@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" type="image/png" sizes="64x64" href="./favicon-64.png">
+<link rel="icon" href="./favicon.ico">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<meta name="theme-color" content="#12283F">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>OpsLog Arcelio - Laporan Operasional Harian</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+:root{
+  --bg:#F2F5F4; --surface:#FFFFFF; --ink:#16232E; --muted:#64748B; --line:#E3E9E8;
+  --navy:#12283F; --teal:#167D7F; --teal-d:#0F5D5F; --gold:#E0A93E;
+  --red:#C0392B; --amber:#B7791F; --green:#2F7D46; --blue:#2563EB; --purple:#7C3AED;
+  --c-pool:#1B7FA6; --c-fnb:#C2622E; --c-hk:#5B8C3E; --c-fd:#7A4FA3; --c-ho:#B08A2E; --c-security:#4A5A6A;
+  --r:12px; --shadow:0 1px 3px rgba(18,40,63,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5}
+button{font-family:inherit;cursor:pointer;border:none;border-radius:9px;font-weight:600}
+input,select,textarea{font-family:inherit;font-size:14px;border:1px solid var(--line);border-radius:9px;padding:9px 11px;width:100%;background:#fff;color:var(--ink)}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--teal);outline-offset:0;border-color:var(--teal)}
+label{display:block;font-size:12px;font-weight:700;color:var(--muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.04em}
+h2{font-size:18px;font-weight:800;margin-bottom:10px}
+h3{font-size:15px;font-weight:700;margin-bottom:8px}
+.hidden{display:none!important}
+.muted{color:var(--muted)}
+.small{font-size:12px}
+
+/* Login */
+#loginView{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(160deg,var(--navy) 0%,#1A3D5C 60%,var(--teal-d) 100%);padding:20px}
+.loginCard{background:#fff;border-radius:18px;padding:32px 28px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.loginCard .brand{font-size:22px;font-weight:800;color:var(--navy)}
+.loginCard .brand span{color:var(--teal)}
+.btn-primary{background:var(--teal);color:#fff;padding:11px 18px;width:100%;font-size:15px;margin-top:16px}
+.btn-primary:hover{background:var(--teal-d)}
+.btn-primary:disabled{opacity:.6;cursor:wait}
+
+/* Shell */
+#topbar{background:var(--navy);color:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:40}
+#topbar .brand{font-weight:800;font-size:16px}
+#topbar .brand span{color:var(--gold)}
+#topbar .who{font-size:12px;opacity:.85;text-align:right}
+#topbar .who b{display:block;font-size:13px;opacity:1}
+#nav{background:var(--surface);border-bottom:1px solid var(--line);display:flex;gap:2px;overflow-x:auto;padding:0 8px;position:sticky;top:52px;z-index:39;-webkit-overflow-scrolling:touch}
+#nav button{background:none;padding:12px 13px;font-size:13px;font-weight:700;color:var(--muted);border-radius:0;border-bottom:3px solid transparent;white-space:nowrap}
+#nav button.on{color:var(--teal-d);border-bottom-color:var(--teal)}
+main{max-width:960px;margin:0 auto;padding:16px 14px 80px}
+
+/* Cards & badges */
+.card{background:var(--surface);border-radius:var(--r);box-shadow:var(--shadow);padding:16px;margin-bottom:14px;border:1px solid var(--line)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+@media(max-width:640px){.grid3{grid-template-columns:repeat(2,1fr)}}
+.badge{display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
+.dept-tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:.03em}
+.item{border-left:4px solid var(--line);background:var(--surface);border-radius:10px;box-shadow:var(--shadow);padding:12px 14px;margin-bottom:10px;cursor:pointer;border-top:1px solid var(--line);border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+.item:hover{box-shadow:0 3px 10px rgba(18,40,63,.13)}
+.btn{padding:9px 14px;font-size:13px}
+.btn-teal{background:var(--teal);color:#fff}
+.btn-navy{background:var(--navy);color:#fff}
+.btn-gold{background:var(--gold);color:#1F2937}
+.btn-red{background:var(--red);color:#fff}
+.btn-ghost{background:#EDF2F1;color:var(--ink)}
+.btn-sm{padding:6px 10px;font-size:12px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px;text-align:center}
+.stat .n{font-size:24px;font-weight:800}
+.stat .l{font-size:11px;color:var(--muted);font-weight:600}
+
+/* Dept tiles dashboard */
+.deptTile{border-radius:var(--r);padding:12px;color:#fff;position:relative;min-height:74px}
+.deptTile .d{font-weight:800;font-size:13px;text-transform:uppercase}
+.deptTile .s{font-size:11px;opacity:.9;margin-top:2px}
+.deptTile .mark{position:absolute;top:10px;right:10px;font-size:16px}
+
+/* Modal */
+#modalWrap{position:fixed;inset:0;background:rgba(18,40,63,.55);z-index:50;display:flex;align-items:flex-end;justify-content:center}
+@media(min-width:641px){#modalWrap{align-items:center}}
+#modalBox{background:#fff;border-radius:18px 18px 0 0;width:100%;max-width:600px;max-height:92vh;overflow-y:auto;padding:20px}
+@media(min-width:641px){#modalBox{border-radius:18px}}
+.mhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.mhead button{background:#EDF2F1;width:32px;height:32px;border-radius:50%;font-size:16px}
+body{overflow-x:hidden}
+main{overflow-x:hidden}
+table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+th{text-align:left;font-size:11px;color:var(--muted);text-transform:uppercase;padding:6px 8px;border-bottom:2px solid var(--line);overflow:hidden;text-overflow:ellipsis}
+td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
+/* Di layar kecil, tabel berubah jadi kartu bertumpuk agar tidak ada scroll kiri-kanan */
+@media(max-width:640px){
+  table.respTable, table.respTable tbody, table.respTable tr, table.respTable td{display:block;width:100%}
+  table.respTable{table-layout:auto}
+  table.respTable thead{display:none}
+  table.respTable tr{border:1px solid var(--line);border-radius:10px;padding:4px 10px;margin-bottom:8px;background:var(--surface)}
+  table.respTable td{display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px dashed var(--line);padding:8px 2px;text-align:right}
+  table.respTable td:last-child{border-bottom:none}
+  table.respTable td:empty{display:none}
+  table.respTable td[data-label]:before{content:attr(data-label);font-weight:700;color:var(--muted);font-size:11px;text-transform:uppercase;text-align:left;flex-shrink:0}
+  table.respTable td:not([data-label]):before{content:none}
+  table.respTable input, table.respTable select{width:auto;max-width:60%;text-align:right}
+}
+.timeline{border-left:2px solid var(--line);padding-left:14px;margin:8px 0}
+.timeline .tl{margin-bottom:10px;position:relative}
+.timeline .tl:before{content:'';width:8px;height:8px;border-radius:50%;background:var(--teal);position:absolute;left:-19px;top:5px}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;padding:11px 20px;border-radius:10px;z-index:60;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.3)}
+.age-red{color:var(--red);font-weight:700}
+.age-amber{color:var(--amber);font-weight:700}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.filters select{width:auto;padding:7px 10px;font-size:13px}
+</style>
+</head>
+<body>
+
+<div id="loginView">
+  <div class="loginCard">
+    <div class="brand">OpsLog <span>Arcelio</span></div>
+    <p class="muted small" style="margin-top:4px">Laporan operasional harian, kerusakan &amp; aset</p>
+    <label>Email</label>
+    <input type="email" id="loginEmail" autocomplete="username">
+    <label>Password</label>
+    <input type="password" id="loginPass" autocomplete="current-password">
+    <button class="btn-primary" id="loginBtn" onclick="doLogin()">Masuk</button>
+    <p id="loginErr" class="small" style="color:var(--red);margin-top:10px"></p>
+  </div>
+</div>
+
+<div id="appView" class="hidden">
+  <div id="topbar">
+    <div class="brand">OpsLog <span>Arcelio</span></div>
+    <div class="row" style="gap:12px">
+      <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
+      <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="doLogout()">Keluar</button>
+    </div>
+  </div>
+  <div id="nav"></div>
+  <main id="main"></main>
+</div>
+
+<div id="modalWrap" class="hidden" onpointerdown="modalPointerDown(event)" onpointerup="modalPointerUp(event)"><div id="modalBox"></div></div>
+<div id="toast" class="hidden"></div>
+<script>
+/* ================= KONFIGURASI =================
+   Ganti dengan URL & anon key project Supabase Anda */
+const SUPABASE_URL = "https://hsenozdmrpxppzzuxsaq.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhzZW5vemRtcnB4cHB6enV4c2FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzMzQzMjYsImV4cCI6MjA5OTkxMDMyNn0.8YVSBECx1jIehn5xqN0iZgG3_CWtNk45G7dq8Azhp9A";
+/* =============================================== */
+
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const DEPTS = {
+  pool:{label:'Pool',color:'var(--c-pool)'},
+  fnb:{label:'FnB',color:'var(--c-fnb)'},
+  hk:{label:'HK',color:'var(--c-hk)'},
+  fd:{label:'FD',color:'var(--c-fd)'},
+  ho:{label:'HO',color:'var(--c-ho)'},
+  security:{label:'Security',color:'var(--c-security)'}
+};
+const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',accounting:'Accounting'};
+const TSTAT = {
+  dilaporkan:{l:'Dilaporkan',c:'#E5E7EB',t:'#374151'},
+  ditindaklanjuti:{l:'Ditindaklanjuti',c:'#DBEAFE',t:'#1D4ED8'},
+  butuh_biaya:{l:'Butuh Biaya',c:'#FEF3C7',t:'#92400E'},
+  dibiayai:{l:'Dibiayai',c:'#CCFBF1',t:'#0F766E'},
+  menunggu_verifikasi:{l:'Menunggu Verifikasi',c:'#EDE9FE',t:'#6D28D9'},
+  selesai:{l:'Selesai',c:'#DCFCE7',t:'#166534'},
+  ditunda:{l:'Ditunda',c:'#F3F4F6',t:'#6B7280'}
+};
+const URG = {rendah:{l:'Rendah',c:'#E5E7EB',t:'#374151'},sedang:{l:'Sedang',c:'#FEF3C7',t:'#92400E'},tinggi:{l:'Tinggi',c:'#FEE2E2',t:'#B91C1C'}};
+const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'Bermasalah'};
+
+let me = null;          // profil user login
+let profilesCache = []; // semua profil (untuk nama)
+let page = 'dashboard';
+
+/* ---------- Util ---------- */
+const $ = id => document.getElementById(id);
+const esc = s => (s??'').toString().replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const rp = n => 'Rp ' + Number(n||0).toLocaleString('id-ID');
+const today = () => new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD lokal
+const fdate = d => d ? new Date(d+'T00:00:00').toLocaleDateString('id-ID',{day:'numeric',month:'short',year:'numeric'}) : '-';
+const fdt = d => d ? new Date(d).toLocaleString('id-ID',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '-';
+const ageDays = d => Math.floor((Date.now() - new Date(d).getTime())/86400000);
+const ageHtml = d => { const a = ageDays(d); const cls = a>7?'age-red':(a>3?'age-amber':'muted'); return `<span class="${cls} small">${a} hari</span>`; };
+const uname = id => (profilesCache.find(p=>p.id===id)||{}).name || '-';
+const deptTag = d => `<span class="dept-tag" style="background:${DEPTS[d].color}">${DEPTS[d].label}</span>`;
+const statBadge = s => `<span class="badge" style="background:${TSTAT[s].c};color:${TSTAT[s].t}">${TSTAT[s].l}</span>`;
+const urgBadge = u => `<span class="badge" style="background:${URG[u].c};color:${URG[u].t}">${URG[u].l}</span>`;
+const isMgr = () => ['manager','owner'].includes(me.role);
+const myDepts = () => me.role==='spv' && me.department ? [me.department] : Object.keys(DEPTS);
+
+function toast(msg){ $('toast').textContent = msg; $('toast').classList.remove('hidden');
+  clearTimeout(toast._t); toast._t = setTimeout(()=>$('toast').classList.add('hidden'),2600); }
+function openModal(html){ $('modalBox').innerHTML = html; $('modalWrap').classList.remove('hidden'); }
+function closeModal(){ $('modalWrap').classList.add('hidden'); }
+// Popup hanya tertutup jika titik tekan (mousedown/tap) DAN titik lepas
+// keduanya berada di luar kotak popup (di area gelap), bukan di dalam kotak popup.
+let _modalPressedOutside = false;
+function modalPointerDown(e){ _modalPressedOutside = (e.target === $('modalWrap')); }
+function modalPointerUp(e){
+  if(_modalPressedOutside && e.target === $('modalWrap')) closeModal();
+  _modalPressedOutside = false;
+}
+function deptOptions(sel){ return myDepts().map(d=>`<option value="${d}" ${d===sel?'selected':''}>${DEPTS[d].label}</option>`).join(''); }
+async function q(promise){ const {data,error} = await promise; if(error){ console.error(error); toast('Error: '+error.message); throw error; } return data; }
+
+/* ---------- Auth ---------- */
+async function doLogin(){
+  const btn=$('loginBtn'); btn.disabled=true; $('loginErr').textContent='';
+  const {error} = await db.auth.signInWithPassword({email:$('loginEmail').value.trim(),password:$('loginPass').value});
+  btn.disabled=false;
+  if(error){ $('loginErr').textContent = 'Login gagal: email atau password salah.'; return; }
+  init();
+}
+async function doLogout(){ await db.auth.signOut(); location.reload(); }
+
+async function init(){
+  const {data:{session}} = await db.auth.getSession();
+  if(!session){ $('loginView').classList.remove('hidden'); $('appView').classList.add('hidden'); return; }
+  profilesCache = await q(db.from('profiles').select('*'));
+  me = profilesCache.find(p=>p.id===session.user.id);
+  if(!me || !me.active){ toast('Akun tidak aktif. Hubungi owner.'); await db.auth.signOut(); return; }
+  $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden');
+  $('whoName').textContent = me.name;
+  $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+DEPTS[me.department].label:'');
+  buildNav(); go('dashboard');
+}
+
+function buildNav(){
+  const tabs = [['dashboard','Dashboard'],['log','Log Harian'],['tiket','Kerusakan'],['aset','Aset'],['mtc','Maintenance'],['rekap','Rekap']];
+  if(isMgr()) tabs.push(['checklist','Checklist']);
+  if(me.role==='owner') tabs.push(['users','Pengguna']);
+  $('nav').innerHTML = tabs.map(([k,l])=>`<button id="nav-${k}" onclick="go('${k}')">${l}</button>`).join('');
+}
+function go(p){
+  page=p;
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.remove('on'));
+  const nb=$('nav-'+p); if(nb) nb.classList.add('on');
+  $('main').innerHTML = '<p class="muted">Memuat...</p>';
+  ({dashboard:renderDashboard,log:renderLog,tiket:renderTiket,aset:renderAset,mtc:renderMtc,rekap:renderRekap,checklist:renderChecklist,users:renderUsers})[p]();
+}
+/* ================= DASHBOARD ================= */
+async function renderDashboard(){
+  const t = today();
+  const [logs, tickets, dueMtc, pendDisp] = await Promise.all([
+    q(db.from('daily_logs').select('*').eq('log_date',t)),
+    q(db.from('tickets').select('*').neq('status','selesai').order('created_at')),
+    q(db.from('maintenance_schedules').select('*').eq('active',true).lte('next_due', addDays(t,7))),
+    q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending'))
+  ]);
+  const open = tickets.filter(x=>x.status!=='selesai');
+  const needFund = open.filter(x=>x.status==='butuh_biaya');
+  const needVerif = open.filter(x=>x.status==='menunggu_verifikasi');
+
+  let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
+
+  // Kepatuhan log hari ini
+  h += `<div class="card"><h3>Pengisian Log Hari Ini</h3><div class="grid3">`;
+  for(const d in DEPTS){
+    const l = logs.find(x=>x.department===d);
+    h += `<div class="deptTile" style="background:${DEPTS[d].color};opacity:${l?1:.45}" onclick="go('log')">
+      <div class="d">${DEPTS[d].label}</div>
+      <div class="s">${l ? KONDISI[l.kondisi]+' · '+uname(l.filled_by) : 'Belum diisi'}</div>
+      <div class="mark">${l?'✓':'—'}</div></div>`;
+  }
+  h += `</div></div>`;
+
+  // Statistik ringkas
+  h += `<div class="grid3" style="margin-bottom:14px">
+    <div class="stat"><div class="n" style="color:var(--red)">${open.length}</div><div class="l">Tiket Menggantung</div></div>
+    <div class="stat"><div class="n" style="color:var(--amber)">${needFund.length}</div><div class="l">Butuh Biaya</div></div>
+    <div class="stat"><div class="n" style="color:var(--purple)">${needVerif.length}</div><div class="l">Menunggu Verifikasi</div></div>
+  </div>`;
+
+  // Antrian sesuai role
+  if(me.role==='accounting' && needFund.length){
+    h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Antrian Biaya (perlu diproses)</h3>`;
+    needFund.forEach(x=> h += ticketRow(x));
+    h += `</div>`;
+  }
+  if(isMgr()){
+    if(needVerif.length){
+      h += `<div class="card" style="border-left:4px solid var(--purple)"><h3>Perlu Verifikasi Selesai</h3>`;
+      needVerif.forEach(x=> h += ticketRow(x)); h += `</div>`;
+    }
+    if(pendDisp.length){
+      h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>Pengajuan Aset Keluar</h3>`;
+      pendDisp.forEach(x=> h += `<div class="item" style="border-left-color:${DEPTS[x.assets.department].color}" onclick="go('aset')">
+        ${deptTag(x.assets.department)} <b>${esc(x.assets.name)}</b><div class="small muted">${esc(x.reason)} · oleh ${uname(x.requested_by)}</div></div>`);
+      h += `</div>`;
+    }
+  }
+
+  // Tiket menggantung tertua
+  const oldest = open.filter(x=>['dilaporkan','ditindaklanjuti','butuh_biaya','dibiayai','ditunda'].includes(x.status))
+    .filter(x=> myDepts().includes(x.department) || me.role!=='spv');
+  if(oldest.length){
+    h += `<div class="card"><h3>Kerusakan Menggantung</h3>`;
+    oldest.slice(0,8).forEach(x=> h += ticketRow(x));
+    if(oldest.length>8) h += `<button class="btn btn-ghost btn-sm" onclick="go('tiket')">Lihat semua (${oldest.length})</button>`;
+    h += `</div>`;
+  }
+
+  // Maintenance jatuh tempo
+  if(dueMtc.length){
+    h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>Maintenance Jatuh Tempo ≤ 7 Hari</h3>`;
+    dueMtc.forEach(s=> h += `<div class="item" style="border-left-color:${DEPTS[s.department].color}" onclick="go('mtc')">
+      ${deptTag(s.department)} <b>${esc(s.task_name)}</b>
+      <span class="small ${s.next_due<=t?'age-red':'muted'}" style="float:right">${s.next_due<=t?'JATUH TEMPO':''} ${fdate(s.next_due)}</span></div>`);
+    h += `</div>`;
+  }
+  $('main').innerHTML = h;
+}
+function addDays(d,n){ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return x.toLocaleDateString('sv-SE'); }
+function ticketRow(x){
+  return `<div class="item" style="border-left-color:${DEPTS[x.department].color}" onclick="openTicket(${x.id})">
+    <div class="row" style="justify-content:space-between">
+      <div>${deptTag(x.department)} <b>${esc(x.title)}</b></div>
+      <div>${statBadge(x.status)} ${urgBadge(x.urgency)}</div></div>
+    <div class="small muted">PIC: ${esc(x.pic_followup||'-')} · dibuat ${fdt(x.created_at)} · ${ageHtml(x.created_at)}</div></div>`;
+}
+
+/* ================= LOG HARIAN ================= */
+async function renderLog(){
+  let h = `<h2>Log Harian</h2>
+  <div class="card"><div class="row">
+    <div style="flex:1"><label>Departemen</label><select id="logDept" onchange="loadLogForm()">${deptOptions(me.department)}</select></div>
+    <div style="flex:1"><label>Tanggal</label><input type="date" id="logDate" value="${today()}" onchange="loadLogForm()"></div>
+  </div><div id="logFormArea" style="margin-top:8px"></div></div>
+  <div class="card"><h3>Riwayat 14 Hari Terakhir</h3><div id="logHist"></div></div>`;
+  $('main').innerHTML = h;
+  loadLogForm(); loadLogHist();
+}
+async function loadLogForm(){
+  const d = $('logDept').value, t = $('logDate').value;
+  const [items, logs] = await Promise.all([
+    q(db.from('checklist_items').select('*').eq('department',d).eq('active',true).order('sort_order')),
+    q(db.from('daily_logs').select('*, daily_log_checks(*)').eq('department',d).eq('log_date',t))
+  ]);
+  const log = logs[0];
+  const canFill = isMgr() || (me.role==='spv' && me.department===d);
+  let h = '';
+  if(log){
+    h += `<p class="small" style="color:var(--green);font-weight:700">✓ Sudah diisi oleh ${uname(log.filled_by)} (${fdt(log.created_at)})</p>`;
+  }
+  if(!canFill){ h += `<p class="muted small">Anda tidak memiliki akses mengisi log departemen ini.</p>`; $('logFormArea').innerHTML=h; return; }
+
+  h += `<label>Checklist Standar</label>`;
+  if(!items.length) h += `<p class="muted small">Belum ada item checklist. ${isMgr()?'Tambahkan di menu Checklist.':'Minta Manager menambahkan item.'}</p>`;
+  items.forEach(it=>{
+    const chk = log ? (log.daily_log_checks.find(c=>c.item_id===it.id)||{}) : {};
+    h += `<div class="row" style="margin-bottom:6px;align-items:flex-start">
+      <input type="checkbox" style="width:20px;height:20px;margin-top:2px" data-item="${it.id}" ${chk.checked?'checked':''}>
+      <div style="flex:1">${esc(it.item_text)}
+        <input type="text" placeholder="catatan (opsional)" data-note="${it.id}" value="${esc(chk.note||'')}" style="margin-top:3px;padding:5px 8px;font-size:12px"></div></div>`;
+  });
+  h += `<label>Kondisi Umum</label><select id="logKondisi">
+    ${Object.entries(KONDISI).map(([k,v])=>`<option value="${k}" ${log&&log.kondisi===k?'selected':''}>${v}</option>`).join('')}</select>
+  <label>Catatan Kejadian</label><textarea id="logCatatan" rows="3" placeholder="Kejadian penting hari ini...">${esc(log?log.catatan:'')}</textarea>
+  <div class="row" style="margin-top:12px">
+    <button class="btn btn-teal" onclick="saveLog(${log?log.id:'null'})">${log?'Perbarui Log':'Simpan Log'}</button>
+    <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button></div>`;
+  $('logFormArea').innerHTML = h;
+}
+async function saveLog(existingId){
+  const d = $('logDept').value, t = $('logDate').value;
+  const payload = {log_date:t, department:d, kondisi:$('logKondisi').value, catatan:$('logCatatan').value.trim(), filled_by:me.id};
+  let logId = existingId;
+  if(existingId){ await q(db.from('daily_logs').update(payload).eq('id',existingId)); }
+  else { const r = await q(db.from('daily_logs').insert(payload).select()); logId = r[0].id; }
+  // simpan checklist: hapus lama, insert baru (sederhana & aman)
+  if(existingId) await q(db.from('daily_log_checks').delete().eq('log_id',logId).select());
+  const checks = [...document.querySelectorAll('[data-item]')].map(cb=>({
+    log_id:logId, item_id:Number(cb.dataset.item), checked:cb.checked,
+    note: document.querySelector(`[data-note="${cb.dataset.item}"]`).value.trim() || null }));
+  if(checks.length) await q(db.from('daily_log_checks').insert(checks).select());
+  toast('Log harian tersimpan'); loadLogForm(); loadLogHist();
+}
+async function loadLogHist(){
+  const from = addDays(today(),-14);
+  const logs = await q(db.from('daily_logs').select('*').gte('log_date',from).order('log_date',{ascending:false}));
+  const mine = logs.filter(l=> me.role!=='spv' || l.department===me.department || true); // semua boleh lihat
+  let h = '<table class="respTable"><tr><th>Tanggal</th><th>Dept</th><th>Kondisi</th><th>Pengisi</th></tr>';
+  mine.forEach(l=> h += `<tr><td data-label="Tanggal">${fdate(l.log_date)}</td><td data-label="Dept">${deptTag(l.department)}</td>
+    <td data-label="Kondisi">${KONDISI[l.kondisi]}</td><td data-label="Pengisi">${uname(l.filled_by)}</td></tr>`);
+  $('logHist').innerHTML = h + '</table>' + (mine.length?'':'<p class="muted small">Belum ada log.</p>');
+}
+/* ================= TIKET KERUSAKAN ================= */
+async function renderTiket(){
+  let h = `<h2>Laporan Kerusakan</h2>
+  <div class="row" style="margin-bottom:12px;justify-content:space-between">
+    <div class="filters">
+      <select id="fDept" onchange="loadTickets()"><option value="">Semua Dept</option>
+        ${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+      <select id="fStat" onchange="loadTickets()"><option value="">Semua Status</option><option value="__open">Belum Selesai</option>
+        ${Object.entries(TSTAT).map(([k,v])=>`<option value="${k}">${v.l}</option>`).join('')}</select>
+    </div>
+    ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newTicketModal()">+ Lapor Kerusakan</button>`:''}
+  </div><div id="ticketList"></div>`;
+  $('main').innerHTML = h;
+  $('fStat').value='__open';
+  loadTickets();
+}
+async function loadTickets(){
+  let query = db.from('tickets').select('*').order('created_at',{ascending:false}).limit(200);
+  const fd=$('fDept').value, fs=$('fStat').value;
+  if(fd) query = query.eq('department',fd);
+  if(fs==='__open') query = query.neq('status','selesai');
+  else if(fs) query = query.eq('status',fs);
+  const list = await q(query);
+  $('ticketList').innerHTML = list.length ? list.map(ticketRow).join('') : '<p class="muted">Tidak ada tiket.</p>';
+}
+async function newTicketModal(dept){
+  const d0 = dept || (me.department||'pool');
+  const assets = await q(db.from('assets').select('id,name,department').eq('status','aktif').order('name'));
+  openModal(`<div class="mhead"><h3>Lapor Kerusakan Baru</h3><button onclick="closeModal()">✕</button></div>
+    <label>Departemen</label><select id="ntDept" onchange="ntFilterAssets()">${deptOptions(d0)}</select>
+    <label>Aset Terkait (opsional)</label><select id="ntAsset"></select>
+    <label>Judul Kerusakan</label><input id="ntTitle" placeholder="mis. Pompa filter kolam anak mati">
+    <label>Deskripsi</label><textarea id="ntDesc" rows="3"></textarea>
+    <label>Urgensi</label><select id="ntUrg"><option value="rendah">Rendah</option><option value="sedang" selected>Sedang</option><option value="tinggi">Tinggi</option></select>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="createTicket()">Simpan Laporan</button>`);
+  window._assets = assets; ntFilterAssets();
+}
+function ntFilterAssets(){
+  const d = $('ntDept').value;
+  $('ntAsset').innerHTML = '<option value="">— tidak terkait aset —</option>' +
+    window._assets.filter(a=>a.department===d).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');
+}
+async function createTicket(){
+  const title = $('ntTitle').value.trim();
+  if(!title){ toast('Judul wajib diisi'); return; }
+  const r = await q(db.from('tickets').insert({
+    department:$('ntDept').value, asset_id:$('ntAsset').value||null, title,
+    description:$('ntDesc').value.trim(), urgency:$('ntUrg').value, reported_by:me.id }).select());
+  await q(db.from('ticket_updates').insert({ticket_id:r[0].id, note:'Tiket dibuat', created_by:me.id}).select());
+  closeModal(); toast('Laporan kerusakan tersimpan');
+  if(page==='tiket') loadTickets(); else go('tiket');
+}
+async function openTicket(id){
+  const [tk] = await q(db.from('tickets').select('*, ticket_items(*), ticket_updates(*), assets(name)').eq('id',id));
+  const t = tk;
+  const canEdit = isMgr() || (me.role==='spv' && me.department===t.department);
+  const estTotal = t.ticket_items.reduce((s,i)=>s + i.qty*i.est_price, 0);
+  const actTotal = t.ticket_items.reduce((s,i)=>s + (i.actual_price!=null ? i.qty*i.actual_price : 0), 0);
+  const hasActual = t.ticket_items.some(i=>i.actual_price!=null);
+
+  let h = `<div class="mhead"><h3>#${t.id} · ${esc(t.title)}</h3><button onclick="closeModal()">✕</button></div>
+  <div class="row">${deptTag(t.department)} ${statBadge(t.status)} ${urgBadge(t.urgency)} ${ageHtml(t.created_at)}</div>
+  <p class="small" style="margin-top:8px">${esc(t.description||'')}</p>
+  <p class="small muted">Aset: ${t.assets?esc(t.assets.name):'-'} · Pelapor: ${uname(t.reported_by)} · ${fdt(t.created_at)}</p>`;
+  if(t.status==='ditunda') h += `<p class="small age-amber">Ditunda: ${esc(t.hold_reason||'')}</p>`;
+
+  // PIC & rencana
+  if(canEdit && t.status!=='selesai'){
+    h += `<label>PIC Follow-up</label><input id="tPic" value="${esc(t.pic_followup||'')}" placeholder="nama teknisi / SPV / vendor">
+    <label>Notasi Rencana Perbaikan</label><textarea id="tPlan" rows="2">${esc(t.repair_plan||'')}</textarea>
+    <label>Target Selesai</label><input type="date" id="tTarget" value="${t.target_date||''}">
+    <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="saveTicketPlan(${t.id})">Simpan Rencana</button>`;
+  } else {
+    h += `<p class="small"><b>PIC:</b> ${esc(t.pic_followup||'-')} · <b>Target:</b> ${fdate(t.target_date)}<br><b>Rencana:</b> ${esc(t.repair_plan||'-')}</p>`;
+  }
+
+  // Rincian kebutuhan biaya
+  h += `<h3 style="margin-top:16px">Rincian Kebutuhan Biaya</h3>`;
+  if(t.ticket_items.length){
+    h += `<table class="respTable"><tr><th>Barang/Jasa</th><th>Qty</th><th>Perkiraan</th><th>Realisasi</th><th></th></tr>`;
+    t.ticket_items.forEach(i=>{
+      h += `<tr><td data-label="Barang/Jasa">${esc(i.item_name)}</td><td data-label="Qty">${i.qty}</td><td data-label="Perkiraan">${rp(i.est_price)}</td>
+        <td data-label="Realisasi">${me.role==='accounting' && t.status!=='selesai'
+          ? `<input type="number" value="${i.actual_price??''}" placeholder="Rp" style="width:100px;padding:4px" onchange="setActual(${i.id},this.value,${t.id})">`
+          : (i.actual_price!=null?rp(i.actual_price):'-')}</td>
+        <td>${canEdit && ['dilaporkan','ditindaklanjuti','butuh_biaya'].includes(t.status)
+          ? `<button class="btn-sm btn-ghost" onclick="delItem(${i.id},${t.id})">✕ Hapus</button>`:''}</td></tr>`;
+    });
+    h += `<tr><td data-label="Total"><b>Total</b></td><td></td><td data-label="Perkiraan"><b>${rp(estTotal)}</b></td><td data-label="Realisasi"><b>${hasActual?rp(actTotal):'-'}</b></td><td></td></tr></table>`;
+  } else h += `<p class="muted small">Belum ada rincian.</p>`;
+  if(canEdit && t.status!=='selesai'){
+    h += `<div class="row" style="margin-top:8px">
+      <input id="niName" placeholder="barang/jasa" style="flex:2">
+      <input id="niQty" type="number" value="1" style="width:60px">
+      <input id="niPrice" type="number" placeholder="perkiraan harga" style="flex:1">
+      <button class="btn btn-ghost btn-sm" onclick="addItem(${t.id})">Tambah</button></div>`;
+  }
+
+  // Aksi status
+  h += `<h3 style="margin-top:16px">Aksi</h3><div class="row">`;
+  const setS = (s,label,cls,extra='') => `<button class="btn ${cls} btn-sm" onclick="setStatus(${t.id},'${s}'${extra})">${label}</button>`;
+  if(t.status!=='selesai'){
+    if(canEdit){
+      if(t.status==='dilaporkan') h += setS('ditindaklanjuti','Tandai Ditindaklanjuti','btn-teal');
+      if(['dilaporkan','ditindaklanjuti'].includes(t.status) && t.ticket_items.length)
+        h += setS('butuh_biaya','Ajukan ke Accounting','btn-gold');
+      if(['ditindaklanjuti','dibiayai','dilaporkan'].includes(t.status))
+        h += setS('menunggu_verifikasi','Klaim Selesai (minta verifikasi)','btn-navy');
+    }
+    if(me.role==='accounting' && t.status==='butuh_biaya')
+      h += setS('dibiayai','Tandai Sudah Dibiayai','btn-teal');
+    if(isMgr()){
+      if(t.status==='menunggu_verifikasi') h += setS('selesai','✓ Verifikasi Selesai','btn-teal');
+      if(t.status!=='ditunda') h += `<button class="btn btn-ghost btn-sm" onclick="holdTicket(${t.id})">Tunda</button>`;
+      else h += setS('ditindaklanjuti','Aktifkan Lagi','btn-teal');
+    }
+  }
+  h += `</div>`;
+
+  // Update / timeline
+  h += `<h3 style="margin-top:16px">Riwayat Update</h3><div class="timeline">`;
+  t.ticket_updates.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(u=>{
+    h += `<div class="tl"><span class="small muted">${fdt(u.created_at)} · ${uname(u.created_by)}</span><br>${esc(u.note)}</div>`;
+  });
+  h += `</div><div class="row"><input id="tNote" placeholder="tulis update progres..." style="flex:1">
+    <button class="btn btn-ghost btn-sm" onclick="addUpdate(${t.id})">Kirim</button></div>`;
+  openModal(h);
+}
+async function saveTicketPlan(id){
+  await q(db.from('tickets').update({pic_followup:$('tPic').value.trim(), repair_plan:$('tPlan').value.trim(),
+    target_date:$('tTarget').value||null}).eq('id',id));
+  toast('Rencana tersimpan'); openTicket(id);
+}
+async function addItem(id){
+  const n=$('niName').value.trim(); if(!n){toast('Nama barang wajib');return;}
+  await q(db.from('ticket_items').insert({ticket_id:id,item_name:n,qty:Number($('niQty').value)||1,est_price:Number($('niPrice').value)||0}).select());
+  openTicket(id);
+}
+async function delItem(itemId,tid){ await q(db.from('ticket_items').delete().eq('id',itemId).select()); openTicket(tid); }
+async function setActual(itemId,val,tid){
+  await q(db.from('ticket_items').update({actual_price:val===''?null:Number(val)}).eq('id',itemId));
+  toast('Realisasi tersimpan');
+}
+async function setStatus(id,s){
+  const upd = {status:s};
+  if(s==='dibiayai'){ upd.funded_by=me.id; upd.funded_at=new Date().toISOString(); }
+  if(s==='selesai'){ upd.closed_by=me.id; upd.closed_at=new Date().toISOString(); }
+  await q(db.from('tickets').update(upd).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id,note:'Status → '+TSTAT[s].l,created_by:me.id}).select());
+  toast('Status diperbarui'); openTicket(id);
+  if(page==='tiket') loadTickets();
+}
+async function holdTicket(id){
+  const r = prompt('Alasan penundaan:'); if(r===null) return;
+  await q(db.from('tickets').update({status:'ditunda',hold_reason:r}).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id,note:'Ditunda: '+r,created_by:me.id}).select());
+  openTicket(id);
+}
+async function addUpdate(id){
+  const n=$('tNote').value.trim(); if(!n)return;
+  await q(db.from('ticket_updates').insert({ticket_id:id,note:n,created_by:me.id}).select());
+  openTicket(id);
+}
+/* ================= ASET ================= */
+async function renderAset(){
+  let h = `<h2>Aset Departemen</h2>
+  <div class="row" style="margin-bottom:12px;justify-content:space-between">
+    <div class="filters">
+      <select id="aDept" onchange="loadAssets()"><option value="">Semua Dept</option>
+        ${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}" ${me.department===k?'selected':''}>${v.label}</option>`).join('')}</select>
+      <select id="aStat" onchange="loadAssets()"><option value="aktif">Aktif</option><option value="diajukan_keluar">Diajukan Keluar</option><option value="keluar">Sudah Keluar</option><option value="">Semua</option></select>
+    </div>
+    ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newAssetModal()">+ Input Aset</button>`:''}
+  </div>
+  <div id="dispPending"></div><div id="assetList"></div>`;
+  $('main').innerHTML = h;
+  loadAssets(); loadDispPending();
+}
+async function loadAssets(){
+  let query = db.from('assets').select('*').order('department').order('name');
+  if($('aDept').value) query = query.eq('department',$('aDept').value);
+  if($('aStat').value) query = query.eq('status',$('aStat').value);
+  const list = await q(query);
+  const KOND = {baik:['Baik','var(--green)'],perlu_perbaikan:['Perlu Perbaikan','var(--amber)'],rusak:['Rusak','var(--red)']};
+  let h = list.length ? `<table class="respTable"><tr><th>Kode</th><th>Nama</th><th>Dept</th><th>Kondisi</th><th></th></tr>` : '<p class="muted">Tidak ada aset.</p>';
+  list.forEach(a=>{
+    const canAct = (isMgr() || (me.role==='spv'&&me.department===a.department)) && a.status==='aktif';
+    h += `<tr><td data-label="Kode" class="small muted">${esc(a.code||'-')}</td><td data-label="Nama"><b>${esc(a.name)}</b></td>
+      <td data-label="Dept">${deptTag(a.department)}</td>
+      <td data-label="Kondisi"><span class="small" style="color:${KOND[a.condition][1]};font-weight:700">${KOND[a.condition][0]}</span>
+        ${a.status!=='aktif'?`<br><span class="badge" style="background:#F3F4F6;color:#6B7280">${a.status==='keluar'?'Keluar '+(a.disposed_at?fdt(a.disposed_at):''):'Diajukan keluar'}</span>`:''}</td>
+      <td>${canAct?`<button class="btn-sm btn-ghost" onclick="assetActions(${a.id},'${esc(a.name)}','${a.condition}')">⋯ Aksi</button>`:''}</td></tr>`;
+  });
+  if(list.length) h += '</table>';
+  $('assetList').innerHTML = h;
+}
+async function newAssetModal(){
+  openModal(`<div class="mhead"><h3>Input Aset Baru</h3><button onclick="closeModal()">✕</button></div>
+    <label>Departemen</label><select id="naDept">${deptOptions(me.department)}</select>
+    <label>Kode Aset (opsional)</label><input id="naCode" placeholder="mis. POOL-001">
+    <label>Nama Aset</label><input id="naName" placeholder="mis. Pompa Filter 2HP">
+    <label>Kondisi Awal</label><select id="naCond"><option value="baik">Baik</option><option value="perlu_perbaikan">Perlu Perbaikan</option><option value="rusak">Rusak</option></select>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="createAsset()">Simpan Aset</button>`);
+}
+async function createAsset(){
+  const n=$('naName').value.trim(); if(!n){toast('Nama aset wajib');return;}
+  await q(db.from('assets').insert({department:$('naDept').value,code:$('naCode').value.trim()||null,name:n,condition:$('naCond').value,input_by:me.id}).select());
+  closeModal(); toast('Aset tersimpan'); loadAssets();
+}
+function assetActions(id,name,cond){
+  openModal(`<div class="mhead"><h3>${esc(name)}</h3><button onclick="closeModal()">✕</button></div>
+    <label>Ubah Kondisi</label><select id="acCond">
+      <option value="baik" ${cond==='baik'?'selected':''}>Baik</option>
+      <option value="perlu_perbaikan" ${cond==='perlu_perbaikan'?'selected':''}>Perlu Perbaikan</option>
+      <option value="rusak" ${cond==='rusak'?'selected':''}>Rusak</option></select>
+    <button class="btn btn-ghost" style="margin-top:10px;width:100%" onclick="updateAssetCond(${id})">Simpan Kondisi</button>
+    <hr style="margin:16px 0;border:none;border-top:1px solid var(--line)">
+    <label>Ajukan Keluar dari Aset (disposal)</label>
+    <textarea id="acReason" rows="2" placeholder="alasan: rusak berat, hilang, dsb."></textarea>
+    <button class="btn btn-red" style="margin-top:10px;width:100%" onclick="requestDisposal(${id})">Ajukan Keluar (perlu approval Manager/Owner)</button>`);
+}
+async function updateAssetCond(id){
+  await q(db.from('assets').update({condition:$('acCond').value}).eq('id',id));
+  closeModal(); toast('Kondisi diperbarui'); loadAssets();
+}
+async function requestDisposal(id){
+  const r=$('acReason').value.trim(); if(!r){toast('Alasan wajib diisi');return;}
+  await q(db.from('asset_disposals').insert({asset_id:id,reason:r,requested_by:me.id}).select());
+  await q(db.from('assets').update({status:'diajukan_keluar'}).eq('id',id));
+  closeModal(); toast('Pengajuan terkirim, menunggu approval'); loadAssets(); loadDispPending();
+}
+async function loadDispPending(){
+  const pend = await q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending').order('requested_at'));
+  if(!pend.length){ $('dispPending').innerHTML=''; return; }
+  let h = `<div class="card" style="border-left:4px solid var(--gold)"><h3>Pengajuan Aset Keluar (${pend.length})</h3>`;
+  pend.forEach(x=>{
+    h += `<div class="item" style="border-left-color:${DEPTS[x.assets.department].color};cursor:default">
+      ${deptTag(x.assets.department)} <b>${esc(x.assets.name)}</b>
+      <div class="small muted">${esc(x.reason)} · oleh ${uname(x.requested_by)} · ${fdt(x.requested_at)}</div>
+      ${isMgr()?`<div class="row" style="margin-top:8px">
+        <button class="btn btn-teal btn-sm" onclick="decideDisposal(${x.id},${x.asset_id},'disetujui')">✓ Setujui</button>
+        <button class="btn btn-ghost btn-sm" onclick="decideDisposal(${x.id},${x.asset_id},'ditolak')">Tolak</button></div>`:'<p class="small muted">Menunggu Manager/Owner</p>'}</div>`;
+  });
+  $('dispPending').innerHTML = h + '</div>';
+}
+async function decideDisposal(dispId,assetId,decision){
+  await q(db.from('asset_disposals').update({status:decision,decided_by:me.id,decided_at:new Date().toISOString()}).eq('id',dispId));
+  await q(db.from('assets').update(decision==='disetujui'
+    ? {status:'keluar',disposed_at:new Date().toISOString()} : {status:'aktif'}).eq('id',assetId));
+  toast(decision==='disetujui'?'Aset dikeluarkan dari daftar':'Pengajuan ditolak, aset tetap aktif');
+  loadAssets(); loadDispPending();
+}
+
+/* ================= MAINTENANCE ================= */
+async function renderMtc(){
+  let h = `<h2>Maintenance Terjadwal</h2>
+    ${isMgr()?`<button class="btn btn-teal" style="margin-bottom:12px" onclick="newMtcModal()">+ Jadwal Baru</button>`:''}
+    <div id="mtcList"></div>`;
+  $('main').innerHTML = h; loadMtc();
+}
+async function loadMtc(){
+  const list = await q(db.from('maintenance_schedules').select('*, assets(name)').eq('active',true).order('next_due'));
+  const t = today();
+  let h = list.length?'':'<p class="muted">Belum ada jadwal maintenance.</p>';
+  list.forEach(s=>{
+    const canDo = isMgr() || (me.role==='spv'&&me.department===s.department);
+    const due = s.next_due<=t;
+    h += `<div class="item" style="border-left-color:${DEPTS[s.department].color};cursor:default">
+      <div class="row" style="justify-content:space-between">
+        <div>${deptTag(s.department)} <b>${esc(s.task_name)}</b>${s.assets?` <span class="small muted">(${esc(s.assets.name)})</span>`:''}</div>
+        <span class="small ${due?'age-red':(s.next_due<=addDays(t,7)?'age-amber':'muted')}">${due?'JATUH TEMPO · ':''}${fdate(s.next_due)}</span></div>
+      <div class="small muted">Setiap ${s.interval_days} hari</div>
+      ${canDo?`<div class="row" style="margin-top:6px"><button class="btn btn-teal btn-sm" onclick="doneMtc(${s.id},${s.interval_days})">✓ Tandai Selesai Dikerjakan</button>
+        ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="delMtc(${s.id})">Nonaktifkan</button>`:''}</div>`:''}</div>`;
+  });
+  $('mtcList').innerHTML = h;
+}
+async function newMtcModal(){
+  const assets = await q(db.from('assets').select('id,name,department').eq('status','aktif').order('name'));
+  window._assets = assets;
+  openModal(`<div class="mhead"><h3>Jadwal Maintenance Baru</h3><button onclick="closeModal()">✕</button></div>
+    <label>Departemen</label><select id="nmDept" onchange="nmFilterAssets()">${deptOptions()}</select>
+    <label>Aset Terkait (opsional)</label><select id="nmAsset"></select>
+    <label>Nama Tugas</label><input id="nmTask" placeholder="mis. Servis pompa filter, backwash total">
+    <label>Interval (hari)</label><input id="nmInt" type="number" value="30">
+    <label>Jatuh Tempo Pertama</label><input id="nmDue" type="date" value="${today()}">
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="createMtc()">Simpan Jadwal</button>`);
+  nmFilterAssets();
+}
+function nmFilterAssets(){
+  const d=$('nmDept').value;
+  $('nmAsset').innerHTML = '<option value="">— umum —</option>' +
+    window._assets.filter(a=>a.department===d).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');
+}
+async function createMtc(){
+  const n=$('nmTask').value.trim(); if(!n){toast('Nama tugas wajib');return;}
+  await q(db.from('maintenance_schedules').insert({department:$('nmDept').value,asset_id:$('nmAsset').value||null,
+    task_name:n,interval_days:Number($('nmInt').value)||30,next_due:$('nmDue').value}).select());
+  closeModal(); toast('Jadwal tersimpan'); loadMtc();
+}
+async function doneMtc(id,interval){
+  const note = prompt('Catatan pengerjaan (opsional):') || null;
+  await q(db.from('maintenance_logs').insert({schedule_id:id,done_date:today(),done_by:me.id,note}).select());
+  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval)}).eq('id',id));
+  toast('Maintenance dicatat, jadwal berikutnya dibuat'); loadMtc();
+}
+async function delMtc(id){
+  if(!confirm('Nonaktifkan jadwal ini?'))return;
+  await q(db.from('maintenance_schedules').update({active:false}).eq('id',id));
+  loadMtc();
+}
+/* ================= REKAP BULANAN ================= */
+async function renderRekap(){
+  const m = today().slice(0,7);
+  $('main').innerHTML = `<h2>Rekap Bulanan</h2>
+    <div class="card"><label>Pilih Bulan</label><input type="month" id="rkMonth" value="${m}" onchange="loadRekap()"></div>
+    <div id="rkArea"></div>`;
+  loadRekap();
+}
+async function loadRekap(){
+  const m = $('rkMonth').value;
+  const from = m+'-01';
+  const daysInMonth = new Date(Number(m.slice(0,4)), Number(m.slice(5,7)), 0).getDate();
+  const lastDay = m + '-' + String(daysInMonth).padStart(2,'0');
+  const isCurrent = m === today().slice(0,7);
+  const effDays = isCurrent ? Number(today().slice(8,10)) : daysInMonth;
+
+  const [logs, tickets, items, assetsIn, dispOut] = await Promise.all([
+    q(db.from('daily_logs').select('id,log_date,department').gte('log_date',from).lte('log_date',lastDay)),
+    q(db.from('tickets').select('*').gte('created_at',from).lte('created_at',lastDay+'T23:59:59')),
+    q(db.from('ticket_items').select('*, tickets!inner(department,created_at)').gte('tickets.created_at',from).lte('tickets.created_at',lastDay+'T23:59:59')),
+    q(db.from('assets').select('id,department,created_at').gte('created_at',from).lte('created_at',lastDay+'T23:59:59')),
+    q(db.from('asset_disposals').select('*, assets(department,name)').eq('status','disetujui').gte('decided_at',from).lte('decided_at',lastDay+'T23:59:59'))
+  ]);
+  const closedThisMonth = await q(db.from('tickets').select('*').eq('status','selesai').gte('closed_at',from).lte('closed_at',lastDay+'T23:59:59'));
+
+  let h = '';
+  // Kepatuhan log
+  h += `<div class="card"><h3>Kepatuhan Pengisian Log (${effDays} hari)</h3><table class="respTable"><tr><th>Dept</th><th>Terisi</th><th>%</th></tr>`;
+  for(const d in DEPTS){
+    const n = logs.filter(l=>l.department===d).length;
+    const pct = effDays? Math.round(n/effDays*100):0;
+    h += `<tr><td data-label="Dept">${deptTag(d)}</td><td data-label="Terisi">${n}/${effDays}</td>
+      <td data-label="%" style="font-weight:800;color:${pct>=90?'var(--green)':pct>=60?'var(--amber)':'var(--red)'}">${pct}%</td></tr>`;
+  }
+  h += `</table></div>`;
+
+  // Tiket
+  const avgDays = closedThisMonth.length
+    ? (closedThisMonth.reduce((s,t)=>s+(new Date(t.closed_at)-new Date(t.created_at))/86400000,0)/closedThisMonth.length).toFixed(1) : '-';
+  h += `<div class="grid3" style="margin-bottom:14px">
+    <div class="stat"><div class="n">${tickets.length}</div><div class="l">Tiket Baru</div></div>
+    <div class="stat"><div class="n" style="color:var(--green)">${closedThisMonth.length}</div><div class="l">Tiket Selesai</div></div>
+    <div class="stat"><div class="n">${avgDays}</div><div class="l">Rata² Hari Selesai</div></div></div>`;
+
+  // Biaya per departemen (realisasi jika ada, jika tidak perkiraan)
+  const cost = {};
+  items.forEach(i=>{
+    const d = i.tickets.department;
+    cost[d] = cost[d]||{est:0,act:0};
+    cost[d].est += i.qty*i.est_price;
+    if(i.actual_price!=null) cost[d].act += i.qty*i.actual_price;
+  });
+  h += `<div class="card"><h3>Biaya Perbaikan per Departemen</h3><table class="respTable"><tr><th>Dept</th><th>Perkiraan</th><th>Realisasi</th></tr>`;
+  let te=0, ta=0;
+  for(const d in DEPTS){ const c=cost[d]||{est:0,act:0}; te+=c.est; ta+=c.act;
+    h += `<tr><td data-label="Dept">${deptTag(d)}</td><td data-label="Perkiraan">${rp(c.est)}</td><td data-label="Realisasi">${rp(c.act)}</td></tr>`; }
+  h += `<tr><td data-label="Total"><b>Total</b></td><td data-label="Perkiraan"><b>${rp(te)}</b></td><td data-label="Realisasi"><b>${rp(ta)}</b></td></tr></table></div>`;
+
+  // Aset masuk/keluar
+  h += `<div class="card"><h3>Mutasi Aset Bulan Ini</h3>
+    <p class="small"><b>Masuk:</b> ${assetsIn.length} aset · <b>Keluar (disposal disetujui):</b> ${dispOut.length} aset</p>`;
+  if(dispOut.length){
+    h += `<table class="respTable"><tr><th>Aset</th><th>Dept</th><th>Alasan</th><th>Disetujui</th></tr>`;
+    dispOut.forEach(x=> h += `<tr><td data-label="Aset">${esc(x.assets.name)}</td><td data-label="Dept">${deptTag(x.assets.department)}</td>
+      <td data-label="Alasan" class="small">${esc(x.reason)}</td><td data-label="Disetujui" class="small">${uname(x.decided_by)} · ${fdt(x.decided_at)}</td></tr>`);
+    h += `</table>`;
+  }
+  h += `</div>`;
+  $('rkArea').innerHTML = h;
+}
+
+/* ================= CHECKLIST (Manager/Owner) ================= */
+async function renderChecklist(){
+  $('main').innerHTML = `<h2>Kelola Checklist Harian</h2>
+    <div class="card"><label>Departemen</label>
+    <select id="ckDept" onchange="loadCk()">${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+    <div id="ckList" style="margin-top:12px"></div>
+    <div class="row" style="margin-top:12px"><input id="ckNew" placeholder="item checklist baru..." style="flex:1">
+    <button class="btn btn-teal" onclick="addCk()">Tambah</button></div></div>`;
+  loadCk();
+}
+async function loadCk(){
+  const items = await q(db.from('checklist_items').select('*').eq('department',$('ckDept').value).eq('active',true).order('sort_order'));
+  $('ckList').innerHTML = items.length ? items.map(i=>
+    `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
+      <span>${esc(i.item_text)}</span>
+      <button class="btn-sm btn-ghost" onclick="delCk(${i.id})">Hapus</button></div>`).join('')
+    : '<p class="muted small">Belum ada item untuk departemen ini.</p>';
+}
+async function addCk(){
+  const t=$('ckNew').value.trim(); if(!t)return;
+  await q(db.from('checklist_items').insert({department:$('ckDept').value,item_text:t}).select());
+  $('ckNew').value=''; loadCk();
+}
+async function delCk(id){
+  await q(db.from('checklist_items').update({active:false}).eq('id',id)); loadCk();
+}
+
+/* ================= PENGGUNA (Owner) ================= */
+async function renderUsers(){
+  profilesCache = await q(db.from('profiles').select('*').order('created_at'));
+  let h = `<h2>Kelola Pengguna</h2>
+  <p class="small muted" style="margin-bottom:10px">Buat akun baru di Supabase Dashboard → Authentication → Add User (centang Auto Confirm). Setelah user login pertama kali / dibuat, atur role &amp; departemennya di sini.</p>`;
+  h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Role</th><th>Dept</th><th>Aktif</th><th></th></tr>`;
+  profilesCache.forEach(p=>{
+    h += `<tr><td data-label="Nama"><input value="${esc(p.name)}" id="un-${p.id}" style="padding:5px 8px;min-width:110px"></td>
+      <td data-label="Role"><select id="ur-${p.id}" style="padding:5px 8px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${p.role===k?'selected':''}>${v}</option>`).join('')}</select></td>
+      <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
+      <td data-label="Aktif"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''} style="width:18px;height:18px"></td>
+      <td><button class="btn-sm btn-teal" style="width:100%" onclick="saveUser('${p.id}')">Simpan</button></td></tr>`;
+  });
+  h += `</table></div>`;
+  $('main').innerHTML = h;
+}
+async function saveUser(id){
+  await q(db.from('profiles').update({name:$('un-'+id).value.trim(), role:$('ur-'+id).value,
+    department:$('ud-'+id).value||null, active:$('ua-'+id).checked}).eq('id',id));
+  toast('Pengguna diperbarui');
+  profilesCache = await q(db.from('profiles').select('*'));
+}
+
+/* Enter untuk login */
+document.addEventListener('keydown',e=>{ if(e.key==='Enter' && !$('loginView').classList.contains('hidden')) doLogin(); });
+init();
+</script>
+</body>
+</html>
