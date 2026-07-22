@@ -283,8 +283,8 @@ async function renderDashboard(){
     q(db.from('maintenance_schedules').select('*').eq('active',true).lte('next_due', addDays(t,7))),
     q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending'))
   ]);
-  const pqAuth = isMgr() ? await q(db.from('procurement_items').select('*, procurement_requests(department)').eq('status','menunggu_otorisasi')) : [];
-  const pqAcct = me.role==='accounting' ? await q(db.from('procurement_items').select('*, procurement_requests(department)').eq('status','diproses')) : [];
+  const pqAuth = isMgr() ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','menunggu_otorisasi')) : [];
+  const pqAcct = me.role==='accounting' ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : [];
   const hasCost = x => (x.ticket_items[0]?.count || 0) > 0;
   const open = tickets;
   const needApproval = open.filter(x=> hasCost(x) && ['dilaporkan','ditindaklanjuti'].includes(x.status));
@@ -347,6 +347,7 @@ async function renderDashboard(){
     h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Pengadaan: Menunggu Otorisasi</h3>`;
     pqAuth.forEach(it=> h += `<div class="item" style="cursor:pointer" onclick="go('pengadaan')">
       ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b> · Qty ${it.qty}
+      ${it.procurement_requests.ticket_id?`<span class="badge" style="background:#FEE2E2;color:#B91C1C">Dari Tiket #${it.procurement_requests.ticket_id}</span>`:''}
       <div class="small muted">Perkiraan: ${rp(it.est_price)} · ${ageHtml(it.created_at)}</div></div>`);
     h += `</div>`;
   }
@@ -354,6 +355,7 @@ async function renderDashboard(){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>Pengadaan: Perlu Diproses</h3>`;
     pqAcct.forEach(it=> h += `<div class="item" style="cursor:pointer" onclick="go('pengadaan')">
       ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b> · Qty ${it.qty}
+      ${it.procurement_requests.ticket_id?`<span class="badge" style="background:#FEE2E2;color:#B91C1C">Dari Tiket #${it.procurement_requests.ticket_id}</span>`:''}
       <div class="small muted">${ageHtml(it.created_at)}</div></div>`);
     h += `</div>`;
   }
@@ -723,7 +725,28 @@ async function approveTicket(id){
   await q(db.from('tickets').update({status:'disetujui', handling_division:'accounting',
     handling_division_since:new Date().toISOString()}).eq('id',id));
   await q(db.from('ticket_updates').insert({ticket_id:id, note:'Disetujui, posisi dipindahkan ke Accounting untuk pengadaan', created_by:me.id}).select());
-  toast('Tiket disetujui'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+  await createPengadaanFromTicket(id);
+  toast('Tiket disetujui, permintaan pengadaan otomatis dibuat'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
+// Membuat Permintaan Pengadaan otomatis dari rincian biaya sebuah tiket kerusakan,
+// supaya Accounting juga melihatnya di menu Pengadaan (bukan hanya di menu Kerusakan).
+async function createPengadaanFromTicket(ticketId){
+  const existing = await q(db.from('procurement_requests').select('id').eq('ticket_id',ticketId));
+  if(existing.length) return; // sudah pernah dibuat, jangan duplikat
+  const [t] = await q(db.from('tickets').select('*, ticket_items(*)').eq('id',ticketId));
+  if(!t.ticket_items.length) return; // tidak ada rincian biaya, tidak perlu pengadaan
+  const r = await q(db.from('procurement_requests').insert({
+    department: t.department, requested_by: t.reported_by,
+    notes: 'Otomatis dari Tiket Kerusakan #'+t.id+': '+t.title, ticket_id: t.id
+  }).select());
+  const reqId = r[0].id;
+  const items = t.ticket_items.map(it=>({
+    request_id: reqId, ticket_item_id: it.id, item_name: it.item_name,
+    category: 'baru', qty: it.qty, keterangan: 'Kebutuhan perbaikan tiket #'+t.id,
+    est_price: it.est_price, status: 'diproses' // sudah disetujui via approval tiket, langsung ke Accounting
+  }));
+  await q(db.from('procurement_items').insert(items).select());
+  await q(db.from('procurement_updates').insert({request_id:reqId, note:'Dibuat otomatis dari Tiket Kerusakan #'+t.id, created_by:me.id}).select());
 }
 async function markBarangTersedia(id, backToDept){
   await q(db.from('tickets').update({status:'barang_tersedia', handling_division:backToDept,
@@ -813,7 +836,7 @@ function reqRow(r){
   const done = r.procurement_items.filter(i=>['selesai','ditolak'].includes(i.status)).length;
   return `<div class="item" style="border-left-color:${DIVS[r.department]?DIVS[r.department].color:'#999'}" onclick="openPengadaan(${r.id})">
     <div class="row" style="justify-content:space-between">
-      <div>${divTag(r.department)} <b>Permintaan #${r.id}</b></div>
+      <div>${divTag(r.department)} <b>Permintaan #${r.id}</b> ${r.ticket_id?`<span class="badge" style="background:#FEE2E2;color:#B91C1C">Dari Tiket #${r.ticket_id}</span>`:''}</div>
       <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
     <div class="small muted">${r.procurement_items.length} item (${done} selesai) · oleh ${uname(r.requested_by)} · ${fdt(r.created_at)} · ${ageHtml(r.created_at)}</div></div>`;
 }
@@ -939,7 +962,8 @@ async function submitPengadaan(){
 async function openPengadaan(id){
   const [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
   let h = `<div class="mhead"><h3>Permintaan #${r.id}</h3><button onclick="closeModal()">✕</button></div>
-    <div class="row">${divTag(r.department)}</div>
+    <div class="row">${divTag(r.department)}
+      ${r.ticket_id?`<button class="btn btn-ghost btn-sm" onclick="closeModal();openTicket(${r.ticket_id})">Lihat Tiket Kerusakan #${r.ticket_id}</button>`:''}</div>
     <p class="small muted">Diajukan oleh ${uname(r.requested_by)} · ${fdt(r.created_at)}</p>`;
   if(r.notes) h += `<p class="small">${esc(r.notes)}</p>`;
   h += `<h3 style="margin-top:14px">Item</h3>`;
@@ -995,8 +1019,15 @@ async function fulfillItem(itemId, method){
   }
   await q(db.from('procurement_items').update({status:'selesai', fulfillment_method:method, actual_price:actual,
     fulfilled_by:me.id, fulfilled_at:new Date().toISOString()}).eq('id',itemId));
-  const [it] = await q(db.from('procurement_items').select('request_id,item_name').eq('id',itemId));
+  const [it] = await q(db.from('procurement_items').select('request_id,item_name,ticket_item_id').eq('id',itemId));
   await q(db.from('procurement_updates').insert({request_id:it.request_id, note:'Diserahkan ('+(method==='gudang'?'ambil dari gudang':'dibeli')+'): '+it.item_name, created_by:me.id}).select());
+  // Kalau item ini berasal dari tiket kerusakan, sinkronkan harga realisasi balik ke tiket
+  if(it.ticket_item_id){
+    await q(db.from('ticket_items').update({actual_price: method==='beli' ? actual : 0}).eq('id',it.ticket_item_id));
+    const [ti] = await q(db.from('ticket_items').select('ticket_id').eq('id',it.ticket_item_id));
+    await q(db.from('ticket_updates').insert({ticket_id:ti.ticket_id,
+      note:'Pengadaan selesai ('+(method==='gudang'?'ambil dari gudang':'dibeli')+'): '+it.item_name, created_by:me.id}).select());
+  }
   toast('Item diserahkan'); openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
 }
 async function deletePengadaan(id){
