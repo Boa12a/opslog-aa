@@ -14,6 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root{
   --bg:#F2F5F4; --surface:#FFFFFF; --ink:#16232E; --muted:#64748B; --line:#E3E9E8;
@@ -148,8 +149,8 @@ td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
 <script>
 /* ================= KONFIGURASI =================
    Ganti dengan URL & anon key project Supabase Anda */
-const SUPABASE_URL = "https://hsenozdmrpxppzzuxsaq.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhzZW5vemRtcnB4cHB6enV4c2FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzMzQzMjYsImV4cCI6MjA5OTkxMDMyNn0.8YVSBECx1jIehn5xqN0iZgG3_CWtNk45G7dq8Azhp9A";
+const SUPABASE_URL = "GANTI_DENGAN_SUPABASE_URL";
+const SUPABASE_KEY = "GANTI_DENGAN_SUPABASE_ANON_KEY";
 /* =============================================== */
 
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -161,6 +162,15 @@ const DEPTS = {
   fd:{label:'FD',color:'var(--c-fd)'},
   ho:{label:'HO',color:'var(--c-ho)'},
   security:{label:'Security',color:'var(--c-security)'}
+};
+// Divisi Penanganan: departemen operasional + 2 divisi teknis baru + Accounting
+// (Accounting muncul sebagai "posisi" tiket ketika sedang diproses pembeliannya),
+// dipakai khusus untuk menentukan siapa yang mengerjakan/memegang perbaikan.
+const DIVS = {
+  ...DEPTS,
+  engineering:{label:'Engineering',color:'#92400E'},
+  electrical:{label:'Electrical',color:'#A16207'},
+  accounting:{label:'Accounting',color:'#334155'}
 };
 const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',accounting:'Accounting'};
 const TSTAT = {
@@ -176,6 +186,13 @@ const TSTAT = {
   ditunda:{l:'Ditunda',c:'#F3F4F6',t:'#6B7280'},
   butuh_biaya:{l:'Butuh Biaya (lama)',c:'#FEF3C7',t:'#92400E'},
   dibiayai:{l:'Dibiayai (lama)',c:'#CCFBF1',t:'#0F766E'}
+};
+// Status item Permintaan Pengadaan Barang
+const PSTAT = {
+  menunggu_otorisasi:{l:'Menunggu Otorisasi',c:'#FEF3C7',t:'#92400E'},
+  ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'},
+  diproses:{l:'Diproses (Accounting)',c:'#DBEAFE',t:'#1D4ED8'},
+  selesai:{l:'Selesai',c:'#DCFCE7',t:'#166534'}
 };
 const URG = {rendah:{l:'Rendah',c:'#E5E7EB',t:'#374151'},sedang:{l:'Sedang',c:'#FEF3C7',t:'#92400E'},tinggi:{l:'Tinggi',c:'#FEE2E2',t:'#B91C1C'}};
 const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'Bermasalah'};
@@ -195,10 +212,15 @@ const ageDays = d => Math.floor((Date.now() - new Date(d).getTime())/86400000);
 const ageHtml = d => { const a = ageDays(d); const cls = a>7?'age-red':(a>3?'age-amber':'muted'); return `<span class="${cls} small">${a} hari</span>`; };
 const uname = id => (profilesCache.find(p=>p.id===id)||{}).name || '-';
 const deptTag = d => `<span class="dept-tag" style="background:${DEPTS[d].color}">${DEPTS[d].label}</span>`;
+const divTag = d => d ? `<span class="dept-tag" style="background:${DIVS[d].color}">${DIVS[d].label}</span>`
+  : `<span class="badge" style="background:#F3F4F6;color:#6B7280">Belum ditentukan</span>`;
 const statBadge = s => `<span class="badge" style="background:${TSTAT[s].c};color:${TSTAT[s].t}">${TSTAT[s].l}</span>`;
 const urgBadge = u => `<span class="badge" style="background:${URG[u].c};color:${URG[u].t}">${URG[u].l}</span>`;
 const isMgr = () => ['manager','owner'].includes(me.role);
-const myDepts = () => me.role==='spv' && me.department ? [me.department] : Object.keys(DEPTS);
+// Untuk form operasional (log/aset/maintenance/pelapor) tetap 6 dept asli.
+const myDepts = () => me.role==='spv' && me.department ? (DEPTS[me.department] ? [me.department] : []) : Object.keys(DEPTS);
+// Untuk keperluan divisi penanganan (termasuk Engineering/Electrical).
+const myDivs = () => me.role==='spv' && me.department ? [me.department] : Object.keys(DIVS);
 
 function toast(msg){ $('toast').textContent = msg; $('toast').classList.remove('hidden');
   clearTimeout(toast._t); toast._t = setTimeout(()=>$('toast').classList.add('hidden'),2600); }
@@ -213,6 +235,7 @@ function modalPointerUp(e){
   _modalPressedOutside = false;
 }
 function deptOptions(sel){ return myDepts().map(d=>`<option value="${d}" ${d===sel?'selected':''}>${DEPTS[d].label}</option>`).join(''); }
+function divOptions(sel){ return Object.entries(DIVS).map(([k,v])=>`<option value="${k}" ${k===sel?'selected':''}>${v.label}</option>`).join(''); }
 async function q(promise){ const {data,error} = await promise; if(error){ console.error(error); toast('Error: '+error.message); throw error; } return data; }
 
 /* ---------- Auth ---------- */
@@ -233,13 +256,14 @@ async function init(){
   if(!me || !me.active){ toast('Akun tidak aktif. Hubungi owner.'); await db.auth.signOut(); return; }
   $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden');
   $('whoName').textContent = me.name;
-  $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+DEPTS[me.department].label:'');
+  $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+(DIVS[me.department]?.label||me.department):'');
   buildNav(); go('dashboard');
 }
 
 function buildNav(){
-  const tabs = [['dashboard','Dashboard'],['log','Log Harian'],['tiket','Kerusakan'],['aset','Aset'],['mtc','Maintenance'],['rekap','Rekap']];
+  const tabs = [['dashboard','Dashboard'],['log','Log Harian'],['tiket','Kerusakan'],['pengadaan','Pengadaan'],['aset','Aset'],['mtc','Maintenance'],['rekap','Rekap']];
   if(isMgr()) tabs.push(['checklist','Checklist']);
+  if(isMgr() || me.role==='accounting') tabs.push(['katalog','Katalog Barang']);
   if(me.role==='owner') tabs.push(['users','Pengguna']);
   $('nav').innerHTML = tabs.map(([k,l])=>`<button id="nav-${k}" onclick="go('${k}')">${l}</button>`).join('');
 }
@@ -248,7 +272,7 @@ function go(p){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.remove('on'));
   const nb=$('nav-'+p); if(nb) nb.classList.add('on');
   $('main').innerHTML = '<p class="muted">Memuat...</p>';
-  ({dashboard:renderDashboard,log:renderLog,tiket:renderTiket,aset:renderAset,mtc:renderMtc,rekap:renderRekap,checklist:renderChecklist,users:renderUsers})[p]();
+  ({dashboard:renderDashboard,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,users:renderUsers})[p]();
 }
 /* ================= DASHBOARD ================= */
 async function renderDashboard(){
@@ -259,14 +283,31 @@ async function renderDashboard(){
     q(db.from('maintenance_schedules').select('*').eq('active',true).lte('next_due', addDays(t,7))),
     q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending'))
   ]);
+  const pqAuth = isMgr() ? await q(db.from('procurement_items').select('*, procurement_requests(department)').eq('status','menunggu_otorisasi')) : [];
+  const pqAcct = me.role==='accounting' ? await q(db.from('procurement_items').select('*, procurement_requests(department)').eq('status','diproses')) : [];
   const hasCost = x => (x.ticket_items[0]?.count || 0) > 0;
   const open = tickets;
   const needApproval = open.filter(x=> hasCost(x) && ['dilaporkan','ditindaklanjuti'].includes(x.status));
   const needBarang = open.filter(x=> x.status==='disetujui');
   const needJadwal = open.filter(x=> x.status==='barang_tersedia');
   const needVerif = open.filter(x=> ['diperbaiki','menunggu_verifikasi'].includes(x.status));
+  const myDivPending = me.department ? open.filter(x=> x.handling_division===me.department) : [];
 
   let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
+
+  // Notifikasi pekerjaan menggantung untuk divisi milik user (selalu tampil jika user punya divisi)
+  if(me.department){
+    const lbl = DIVS[me.department] ? DIVS[me.department].label : me.department;
+    h += `<div class="card" style="border:2px solid ${myDivPending.length?'var(--red)':'var(--green)'}">
+      <h3>Pekerjaan Menggantung untuk Divisi Anda (${lbl})</h3>`;
+    if(myDivPending.length){
+      myDivPending.slice(0,10).forEach(x=> h += ticketRow(x));
+      if(myDivPending.length>10) h += `<button class="btn btn-ghost btn-sm" onclick="go('tiket')">Lihat semua (${myDivPending.length})</button>`;
+    } else {
+      h += `<p class="small" style="color:var(--green)">✓ Tidak ada pekerjaan menggantung untuk divisi Anda saat ini.</p>`;
+    }
+    h += `</div>`;
+  }
 
   // Kepatuhan log hari ini
   h += `<div class="card"><h3>Pengisian Log Hari Ini</h3><div class="grid3">`;
@@ -300,6 +341,20 @@ async function renderDashboard(){
   if(isMgr() && needJadwal.length){
     h += `<div class="card" style="border-left:4px solid var(--blue)"><h3>Barang Tersedia, Perlu Dijadwalkan</h3>`;
     needJadwal.forEach(x=> h += ticketRow(x));
+    h += `</div>`;
+  }
+  if(isMgr() && pqAuth.length){
+    h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Pengadaan: Menunggu Otorisasi</h3>`;
+    pqAuth.forEach(it=> h += `<div class="item" style="cursor:pointer" onclick="go('pengadaan')">
+      ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b> · Qty ${it.qty}
+      <div class="small muted">Perkiraan: ${rp(it.est_price)} · ${ageHtml(it.created_at)}</div></div>`);
+    h += `</div>`;
+  }
+  if(me.role==='accounting' && pqAcct.length){
+    h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>Pengadaan: Perlu Diproses</h3>`;
+    pqAcct.forEach(it=> h += `<div class="item" style="cursor:pointer" onclick="go('pengadaan')">
+      ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b> · Qty ${it.qty}
+      <div class="small muted">${ageHtml(it.created_at)}</div></div>`);
     h += `</div>`;
   }
   if(isMgr()){
@@ -336,11 +391,15 @@ async function renderDashboard(){
 }
 function addDays(d,n){ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return x.toLocaleDateString('sv-SE'); }
 function ticketRow(x){
+  const divSince = x.handling_division_since || x.created_at;
+  const divAge = ageDays(divSince);
+  const divCls = divAge>7?'age-red':(divAge>3?'age-amber':'muted');
   return `<div class="item" style="border-left-color:${DEPTS[x.department].color}" onclick="openTicket(${x.id})">
     <div class="row" style="justify-content:space-between">
-      <div>${deptTag(x.department)} <b>${esc(x.title)}</b></div>
+      <div>${deptTag(x.department)} ${x.handling_division?divTag(x.handling_division):''} <b>${esc(x.title)}</b></div>
       <div>${statBadge(x.status)} ${urgBadge(x.urgency)}</div></div>
-    <div class="small muted">PIC: ${esc(x.pic_followup||'-')} · dibuat ${fdt(x.created_at)} · ${ageHtml(x.created_at)}</div></div>`;
+    <div class="small muted">PIC: ${esc(x.pic_followup||'-')} · dibuat ${fdt(x.created_at)} · ${ageHtml(x.created_at)}
+      ${x.handling_division?` · <span class="${divCls}">${divAge} hari di ${DIVS[x.handling_division].label}</span>`:''}</div></div>`;
 }
 
 /* ================= LOG HARIAN ================= */
@@ -350,7 +409,9 @@ async function renderLog(){
     <div style="flex:1"><label>Departemen</label><select id="logDept" onchange="loadLogForm()">${deptOptions(me.department)}</select></div>
     <div style="flex:1"><label>Tanggal</label><input type="date" id="logDate" value="${today()}" onchange="loadLogForm()"></div>
   </div><div id="logFormArea" style="margin-top:8px"></div></div>
-  <div class="card"><h3>Riwayat 14 Hari Terakhir</h3><div id="logHist"></div></div>`;
+  <div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat 14 Hari Terakhir</h3>
+    ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="exportLogsExcel()">⬇ Excel (semua riwayat)</button>`:''}</div>
+    <div id="logHist"></div></div>`;
   $('main').innerHTML = h;
   loadLogForm(); loadLogHist();
 }
@@ -408,17 +469,75 @@ async function loadLogHist(){
     <td data-label="Kondisi">${KONDISI[l.kondisi]}</td><td data-label="Pengisi">${uname(l.filled_by)}</td></tr>`);
   $('logHist').innerHTML = h + '</table>' + (mine.length?'':'<p class="muted small">Belum ada log.</p>');
 }
+/* ================= EXPORT EXCEL (Manager/Owner) ================= */
+async function exportTicketsExcel(){
+  const list = await q(db.from('tickets').select('*, ticket_items(*)').order('created_at'));
+  const rows = list.map(t=>({
+    ID:t.id,
+    Departemen: DEPTS[t.department]?DEPTS[t.department].label:t.department,
+    'Divisi Penanganan': t.handling_division ? (DIVS[t.handling_division]?DIVS[t.handling_division].label:t.handling_division) : '-',
+    Judul:t.title, Deskripsi:t.description||'',
+    Urgensi: URG[t.urgency]?URG[t.urgency].l:t.urgency,
+    Status: TSTAT[t.status]?TSTAT[t.status].l:t.status,
+    PIC:t.pic_followup||'', 'Target Tanggal': t.target_date||'',
+    Pelapor: uname(t.reported_by), Dibuat: fdt(t.created_at),
+    'Total Perkiraan': t.ticket_items.reduce((s,i)=>s+i.qty*i.est_price,0),
+    'Total Realisasi': t.ticket_items.reduce((s,i)=>s+(i.actual_price!=null?i.qty*i.actual_price:0),0)
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Kerusakan');
+  XLSX.writeFile(wb, `Riwayat_Kerusakan_${today()}.xlsx`);
+}
+async function exportPengadaanExcel(){
+  const list = await q(db.from('procurement_requests').select('*, procurement_items(*)').order('created_at'));
+  const rows = [];
+  list.forEach(r=>{
+    r.procurement_items.forEach(it=>{
+      rows.push({
+        'ID Permintaan': r.id,
+        Departemen: DIVS[r.department]?DIVS[r.department].label:r.department,
+        Barang: it.item_name, Kategori: it.category==='umum'?'Umum':'Baru',
+        Qty: it.qty, 'Stok Ada': it.stok_ada??'', Keterangan: it.keterangan||'',
+        'Perkiraan Harga': it.est_price??'', 'Harga Realisasi': it.actual_price??'',
+        Status: PSTAT[it.status]?PSTAT[it.status].l:it.status,
+        Pemohon: uname(r.requested_by), Diajukan: fdt(r.created_at)
+      });
+    });
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Pengadaan');
+  XLSX.writeFile(wb, `Riwayat_Pengadaan_${today()}.xlsx`);
+}
+async function exportLogsExcel(){
+  const list = await q(db.from('daily_logs').select('*').order('log_date'));
+  const rows = list.map(l=>({
+    Tanggal:l.log_date, Departemen: DEPTS[l.department]?DEPTS[l.department].label:l.department,
+    Kondisi: KONDISI[l.kondisi], Catatan:l.catatan||'', Pengisi: uname(l.filled_by)
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Log Harian');
+  XLSX.writeFile(wb, `Riwayat_Log_Harian_${today()}.xlsx`);
+}
+
 /* ================= TIKET KERUSAKAN ================= */
 async function renderTiket(){
   let h = `<h2>Laporan Kerusakan</h2>
   <div class="row" style="margin-bottom:12px;justify-content:space-between">
     <div class="filters">
-      <select id="fDept" onchange="loadTickets()"><option value="">Semua Dept</option>
+      <select id="fDept" onchange="loadTickets()"><option value="">Semua Dept Pelapor</option>
         ${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+      <select id="fHandle" onchange="loadTickets()"><option value="">Semua Divisi Penanganan</option>
+        ${Object.entries(DIVS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
       <select id="fStat" onchange="loadTickets()"><option value="">Semua Status</option><option value="__open">Belum Selesai</option>
         ${Object.entries(TSTAT).map(([k,v])=>`<option value="${k}">${v.l}</option>`).join('')}</select>
     </div>
-    ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newTicketModal()">+ Lapor Kerusakan</button>`:''}
+    <div class="row">
+      ${isMgr()?`<button class="btn btn-ghost" onclick="exportTicketsExcel()">⬇ Excel</button>`:''}
+      ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newTicketModal()">+ Lapor Kerusakan</button>`:''}
+    </div>
   </div><div id="ticketList"></div>`;
   $('main').innerHTML = h;
   $('fStat').value='__open';
@@ -426,18 +545,20 @@ async function renderTiket(){
 }
 async function loadTickets(){
   let query = db.from('tickets').select('*').order('created_at',{ascending:false}).limit(200);
-  const fd=$('fDept').value, fs=$('fStat').value;
+  const fd=$('fDept').value, fs=$('fStat').value, fh=$('fHandle').value;
   if(fd) query = query.eq('department',fd);
+  if(fh) query = query.eq('handling_division',fh);
   if(fs==='__open') query = query.neq('status','selesai');
   else if(fs) query = query.eq('status',fs);
   const list = await q(query);
   $('ticketList').innerHTML = list.length ? list.map(ticketRow).join('') : '<p class="muted">Tidak ada tiket.</p>';
 }
 async function newTicketModal(dept){
-  const d0 = dept || (me.department||'pool');
+  const d0 = dept || (me.department && DEPTS[me.department] ? me.department : 'pool');
   const assets = await q(db.from('assets').select('id,name,department').eq('status','aktif').order('name'));
   openModal(`<div class="mhead"><h3>Lapor Kerusakan Baru</h3><button onclick="closeModal()">✕</button></div>
-    <label>Departemen</label><select id="ntDept" onchange="ntFilterAssets()">${deptOptions(d0)}</select>
+    <label>Departemen Pelapor</label><select id="ntDept" onchange="ntFilterAssets()">${deptOptions(d0)}</select>
+    <label>Divisi yang Menangani</label><select id="ntHandle">${divOptions(d0)}</select>
     <label>Aset Terkait (opsional)</label><select id="ntAsset"></select>
     <label>Judul Kerusakan</label><input id="ntTitle" placeholder="mis. Pompa filter kolam anak mati">
     <label>Deskripsi</label><textarea id="ntDesc" rows="3"></textarea>
@@ -454,27 +575,42 @@ async function createTicket(){
   const title = $('ntTitle').value.trim();
   if(!title){ toast('Judul wajib diisi'); return; }
   const r = await q(db.from('tickets').insert({
-    department:$('ntDept').value, asset_id:$('ntAsset').value||null, title,
+    department:$('ntDept').value, handling_division:$('ntHandle').value,
+    handling_division_since:new Date().toISOString(),
+    asset_id:$('ntAsset').value||null, title,
     description:$('ntDesc').value.trim(), urgency:$('ntUrg').value, reported_by:me.id }).select());
-  await q(db.from('ticket_updates').insert({ticket_id:r[0].id, note:'Tiket dibuat', created_by:me.id}).select());
+  await q(db.from('ticket_updates').insert({ticket_id:r[0].id, note:'Tiket dibuat, ditujukan ke divisi '+DIVS[$('ntHandle').value].label, created_by:me.id}).select());
   closeModal(); toast('Laporan kerusakan tersimpan');
   if(page==='tiket') loadTickets(); else go('tiket');
 }
 async function openTicket(id){
   const [tk] = await q(db.from('tickets').select('*, ticket_items(*), ticket_updates(*), assets(name)').eq('id',id));
   const t = tk;
-  const canEdit = isMgr() || (me.role==='spv' && me.department===t.department);
+  const canEdit = isMgr() || (me.role==='spv' && (me.department===t.department || me.department===t.handling_division));
   const hasCost = t.ticket_items.length > 0;
   const estTotal = t.ticket_items.reduce((s,i)=>s + i.qty*i.est_price, 0);
   const actTotal = t.ticket_items.reduce((s,i)=>s + (i.actual_price!=null ? i.qty*i.actual_price : 0), 0);
   const hasActual = t.ticket_items.some(i=>i.actual_price!=null);
 
   let h = `<div class="mhead"><h3>#${t.id} · ${esc(t.title)}</h3><button onclick="closeModal()">✕</button></div>
-  <div class="row">${deptTag(t.department)} ${statBadge(t.status)} ${urgBadge(t.urgency)} ${ageHtml(t.created_at)}</div>
+  <div class="row">${deptTag(t.department)} ${divTag(t.handling_division)} ${statBadge(t.status)} ${urgBadge(t.urgency)} ${ageHtml(t.created_at)}</div>
   <p class="small" style="margin-top:8px">${esc(t.description||'')}</p>
   <p class="small muted">Aset: ${t.assets?esc(t.assets.name):'-'} · Pelapor: ${uname(t.reported_by)} · ${fdt(t.created_at)}</p>`;
+  if(t.handling_division){
+    const divSince = t.handling_division_since || t.created_at;
+    const da = ageDays(divSince);
+    const daCls = da>7?'age-red':(da>3?'age-amber':'muted');
+    h += `<p class="small ${daCls}">Sudah ${da} hari berada di divisi ${DIVS[t.handling_division].label}</p>`;
+  }
   if(t.status==='ditunda') h += `<p class="small age-amber">Ditunda: ${esc(t.hold_reason||'')}</p>`;
   if(t.status==='ditolak') h += `<p class="small" style="color:var(--red)">Ditolak: ${esc(t.hold_reason||'')}</p>`;
+
+  // Pemindahan divisi penanganan (khusus Manager/Owner)
+  if(isMgr() && t.status!=='selesai'){
+    h += `<div style="margin-top:10px"><label>Divisi yang Menangani</label>
+      <div class="row"><select id="thDiv" style="flex:1">${divOptions(t.handling_division)}</select>
+      <button class="btn btn-ghost btn-sm" onclick="changeHandlingDivision(${t.id})">Pindahkan</button></div></div>`;
+  }
 
   // Alur tahapan (indikator visual, hanya untuk tiket berbiaya)
   if(hasCost){
@@ -524,7 +660,7 @@ async function openTicket(id){
   if(t.status==='dilaporkan'){
     if(hasCost){
       if(isMgr()){
-        h += setS('disetujui','✓ Setujui Perbaikan','btn-teal');
+        h += `<button class="btn btn-teal btn-sm" onclick="approveTicket(${t.id})">✓ Setujui Perbaikan</button>`;
         h += `<button class="btn btn-ghost btn-sm" onclick="rejectTicket(${t.id})">Tolak</button>`;
       } else h += `<p class="small muted">Menunggu persetujuan Manager/Owner (ada rincian biaya).</p>`;
     } else if(canEdit){
@@ -533,7 +669,7 @@ async function openTicket(id){
   } else if(t.status==='ditindaklanjuti'){
     if(hasCost){
       if(isMgr()){
-        h += setS('disetujui','✓ Setujui Perbaikan','btn-teal');
+        h += `<button class="btn btn-teal btn-sm" onclick="approveTicket(${t.id})">✓ Setujui Perbaikan</button>`;
         h += `<button class="btn btn-ghost btn-sm" onclick="rejectTicket(${t.id})">Tolak</button>`;
       } else h += `<p class="small muted">Rincian biaya ditambahkan, menunggu persetujuan Manager/Owner.</p>`;
     } else if(canEdit){
@@ -541,9 +677,9 @@ async function openTicket(id){
     }
   } else if(t.status==='disetujui'){
     if(me.role==='accounting'){
-      h += setS('barang_tersedia','Tandai Barang Sudah Tersedia','btn-teal');
+      h += `<button class="btn btn-teal btn-sm" onclick="markBarangTersedia(${t.id},'${t.department}')">Tandai Barang Sudah Tersedia</button>`;
     } else {
-      h += `<p class="small muted">SPV menyiapkan/membeli barang. Accounting akan menandai jika barang sudah tersedia.</p>`;
+      h += `<p class="small muted">Posisi tiket ada di Accounting untuk proses pengadaan. Accounting akan menandai jika barang sudah tersedia.</p>`;
     }
   } else if(t.status==='barang_tersedia'){
     if(isMgr()){
@@ -583,11 +719,30 @@ async function openTicket(id){
     <button class="btn btn-ghost btn-sm" onclick="addUpdate(${t.id})">Kirim</button></div>`;
   openModal(h);
 }
+async function approveTicket(id){
+  await q(db.from('tickets').update({status:'disetujui', handling_division:'accounting',
+    handling_division_since:new Date().toISOString()}).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Disetujui, posisi dipindahkan ke Accounting untuk pengadaan', created_by:me.id}).select());
+  toast('Tiket disetujui'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
+async function markBarangTersedia(id, backToDept){
+  await q(db.from('tickets').update({status:'barang_tersedia', handling_division:backToDept,
+    handling_division_since:new Date().toISOString(), funded_by:me.id, funded_at:new Date().toISOString()}).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Barang tersedia, posisi dikembalikan ke divisi '+(DIVS[backToDept]?.label||backToDept), created_by:me.id}).select());
+  toast('Barang tersedia'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
 async function rejectTicket(id){
   const r = prompt('Alasan penolakan:'); if(r===null || !r.trim()) return;
   await q(db.from('tickets').update({status:'ditolak', hold_reason:r.trim()}).eq('id',id));
   await q(db.from('ticket_updates').insert({ticket_id:id, note:'Ditolak: '+r.trim(), created_by:me.id}).select());
   toast('Tiket ditolak'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
+async function changeHandlingDivision(id){
+  const val = $('thDiv').value;
+  if(!val){ toast('Pilih divisi'); return; }
+  await q(db.from('tickets').update({handling_division:val, handling_division_since:new Date().toISOString()}).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Dipindahkan ke divisi '+DIVS[val].label, created_by:me.id}).select());
+  toast('Divisi penanganan diperbarui'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 async function scheduleTicket(id){
   const pic = ($('tPic')?.value||'').trim();
@@ -639,6 +794,222 @@ async function addUpdate(id){
   await q(db.from('ticket_updates').insert({ticket_id:id,note:n,created_by:me.id}).select());
   openTicket(id);
 }
+
+/* ================= PENGADAAN BARANG ================= */
+// Siapa yang boleh mengajukan permintaan untuk departemen apa:
+// SPV hanya untuk divisinya sendiri; Manager/Owner untuk semua (kecuali Accounting).
+function pqDeptOptions(sel){
+  const keys = (me.role==='spv' && me.department) ? [me.department] : Object.keys(DIVS).filter(k=>k!=='accounting');
+  return keys.map(d=>`<option value="${d}" ${d===sel?'selected':''}>${DIVS[d]?DIVS[d].label:d}</option>`).join('');
+}
+function reqStatusInfo(items){
+  if(!items.length) return {l:'Kosong',c:'#F3F4F6',t:'#6B7280'};
+  if(items.every(i=>['selesai','ditolak'].includes(i.status))) return {l:'Selesai',c:'#DCFCE7',t:'#166534'};
+  if(items.some(i=>i.status==='menunggu_otorisasi')) return {l:'Menunggu Otorisasi',c:'#FEF3C7',t:'#92400E'};
+  return {l:'Diproses',c:'#DBEAFE',t:'#1D4ED8'};
+}
+function reqRow(r){
+  const st = reqStatusInfo(r.procurement_items);
+  const done = r.procurement_items.filter(i=>['selesai','ditolak'].includes(i.status)).length;
+  return `<div class="item" style="border-left-color:${DIVS[r.department]?DIVS[r.department].color:'#999'}" onclick="openPengadaan(${r.id})">
+    <div class="row" style="justify-content:space-between">
+      <div>${divTag(r.department)} <b>Permintaan #${r.id}</b></div>
+      <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+    <div class="small muted">${r.procurement_items.length} item (${done} selesai) · oleh ${uname(r.requested_by)} · ${fdt(r.created_at)} · ${ageHtml(r.created_at)}</div></div>`;
+}
+async function renderPengadaan(){
+  let h = `<h2>Permintaan Pengadaan Barang</h2>
+  <div class="row" style="margin-bottom:12px;justify-content:space-between">
+    <div class="filters">
+      <select id="pqfDept" onchange="loadPengadaan()"><option value="">Semua Dept</option>
+        ${Object.entries(DIVS).filter(([k])=>k!=='accounting').map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+      <select id="pqfStat" onchange="loadPengadaan()"><option value="">Semua Status</option>
+        <option value="__open">Belum Selesai</option>
+        <option value="menunggu_otorisasi">Menunggu Otorisasi</option>
+        <option value="diproses">Diproses</option>
+        <option value="selesai">Selesai</option></select>
+    </div>
+    <div class="row">
+      ${isMgr()?`<button class="btn btn-ghost" onclick="exportPengadaanExcel()">⬇ Excel</button>`:''}
+      ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
+    </div>
+  </div><div id="pengadaanList"></div>`;
+  $('main').innerHTML = h;
+  loadPengadaan();
+}
+async function loadPengadaan(){
+  let query = db.from('procurement_requests').select('*, procurement_items(*)').order('created_at',{ascending:false}).limit(200);
+  const fd = $('pqfDept').value;
+  if(fd) query = query.eq('department', fd);
+  let list = await q(query);
+  const fs = $('pqfStat').value;
+  if(fs==='__open') list = list.filter(r=> r.procurement_items.some(i=>!['selesai','ditolak'].includes(i.status)));
+  else if(fs) list = list.filter(r=> r.procurement_items.some(i=>i.status===fs));
+  $('pengadaanList').innerHTML = list.length ? list.map(reqRow).join('') : '<p class="muted">Tidak ada permintaan.</p>';
+}
+let pqDraft = [];
+function pqBlankItem(){ return {item_name:'',item_name_custom:'',category:'umum',qty:1,stok_ada:'',keterangan:'',est_price:''}; }
+function pqSyncFromDOM(){
+  document.querySelectorAll('.pq-row').forEach((row,idx)=>{
+    if(!pqDraft[idx]) return;
+    pqDraft[idx].item_name = row.querySelector('.pq-name').value;
+    const custom = row.querySelector('.pq-name-custom'); if(custom) pqDraft[idx].item_name_custom = custom.value;
+    pqDraft[idx].category = row.querySelector('.pq-cat').value;
+    pqDraft[idx].qty = row.querySelector('.pq-qty').value;
+    const stok = row.querySelector('.pq-stok'); if(stok) pqDraft[idx].stok_ada = stok.value;
+    const ket = row.querySelector('.pq-ket'); if(ket) pqDraft[idx].keterangan = ket.value;
+    const est = row.querySelector('.pq-est'); if(est) pqDraft[idx].est_price = est.value;
+  });
+}
+function pqAddRow(){ pqSyncFromDOM(); pqDraft.push(pqBlankItem()); pqRenderItems(); }
+function pqRemoveRow(idx){ pqSyncFromDOM(); pqDraft.splice(idx,1); pqRenderItems(); }
+function pqCatChange(idx){ pqSyncFromDOM(); pqDraft[idx].item_name=''; pqRenderItems(); }
+function pqRenderItems(){
+  const catalog = window._catalog || [];
+  $('pqItemsBox').innerHTML = pqDraft.length ? pqDraft.map((it,idx)=>`
+    <div class="pq-row card" style="padding:10px;margin-bottom:8px">
+      <div class="row">
+        ${it.category==='umum'
+          ? `<select class="pq-name" style="flex:2">
+              <option value="">— pilih barang —</option>
+              ${catalog.map(c=>`<option value="${esc(c.item_name)}" ${it.item_name===c.item_name?'selected':''}>${esc(c.item_name)}</option>`).join('')}
+              <option value="__CUSTOM__" ${it.item_name==='__CUSTOM__'?'selected':''}>+ Barang lain (belum ada di katalog)</option>
+            </select>`
+          : `<input class="pq-name" placeholder="nama barang baru" value="${esc(it.item_name)}" style="flex:2">`}
+        <select class="pq-cat" onchange="pqCatChange(${idx})" style="flex:1">
+          <option value="umum" ${it.category==='umum'?'selected':''}>Umum</option>
+          <option value="baru" ${it.category==='baru'?'selected':''}>Baru</option>
+        </select>
+        <input class="pq-qty" type="number" value="${it.qty}" placeholder="qty" style="width:70px">
+        <button class="btn btn-ghost btn-sm" onclick="pqRemoveRow(${idx})">✕</button>
+      </div>
+      ${it.category==='umum' && it.item_name==='__CUSTOM__'
+        ? `<div class="row" style="margin-top:6px"><input class="pq-name-custom" placeholder="tulis nama barang" value="${esc(it.item_name_custom)}"></div>`:''}
+      ${it.category==='umum'
+        ? `<div class="row" style="margin-top:6px"><input class="pq-stok" type="number" placeholder="stok saat ini" value="${esc(it.stok_ada)}"></div>`
+        : `<div class="row" style="margin-top:6px"><textarea class="pq-ket" placeholder="keterangan barang baru" rows="2" style="flex:1">${esc(it.keterangan)}</textarea></div>
+           <div class="row" style="margin-top:6px"><input class="pq-est" type="number" placeholder="perkiraan harga (Rp)" value="${esc(it.est_price)}"></div>`}
+    </div>`).join('') : '<p class="muted small">Belum ada item, klik Tambah Item.</p>';
+  // pasang ulang listener supaya munculnya kolom "tulis manual" langsung reaktif
+  document.querySelectorAll('.pq-row .pq-name').forEach((el,idx)=>{
+    if(el.tagName==='SELECT') el.onchange = ()=>{ pqSyncFromDOM(); pqRenderItems(); };
+  });
+}
+async function newPengadaanModal(){
+  pqDraft = [pqBlankItem()];
+  window._catalog = await q(db.from('item_catalog').select('*').eq('active',true).order('item_name'));
+  const d0 = (me.role==='spv' && me.department) ? me.department : 'pool';
+  openModal(`<div class="mhead"><h3>Ajukan Permintaan Pengadaan</h3><button onclick="closeModal()">✕</button></div>
+    <label>Departemen</label><select id="pqDept">${pqDeptOptions(d0)}</select>
+    <label>Catatan (opsional)</label><textarea id="pqNotes" rows="2"></textarea>
+    <h3 style="margin-top:14px">Item yang Diminta</h3>
+    <div id="pqItemsBox"></div>
+    <button class="btn btn-ghost btn-sm" onclick="pqAddRow()">+ Tambah Item</button>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitPengadaan()">Ajukan Permintaan</button>`);
+  pqRenderItems();
+}
+async function submitPengadaan(){
+  pqSyncFromDOM();
+  const dept = $('pqDept').value;
+  // Resolusi nama barang: kalau kategori Umum & pilih "barang lain", pakai nama manual
+  pqDraft.forEach(it=>{
+    if(it.category==='umum' && it.item_name==='__CUSTOM__'){
+      it.item_name = (it.item_name_custom||'').trim();
+    }
+  });
+  const valid = pqDraft.filter(it=>it.item_name && it.item_name.trim());
+  if(!valid.length){ toast('Isi minimal 1 nama barang'); return; }
+  const r = await q(db.from('procurement_requests').insert({department:dept, requested_by:me.id, notes:$('pqNotes').value.trim()||null}).select());
+  const reqId = r[0].id;
+  const items = valid.map(it=>({
+    request_id: reqId,
+    item_name: it.item_name.trim(),
+    category: it.category,
+    qty: Number(it.qty)||1,
+    stok_ada: it.category==='umum' ? (it.stok_ada===''?null:Number(it.stok_ada)) : null,
+    keterangan: it.category==='baru' ? ((it.keterangan||'').trim()||null) : null,
+    est_price: it.category==='baru' ? (it.est_price===''?null:Number(it.est_price)) : null,
+    status: it.category==='baru' ? 'menunggu_otorisasi' : 'diproses'
+  }));
+  await q(db.from('procurement_items').insert(items).select());
+  await q(db.from('procurement_updates').insert({request_id:reqId, note:'Permintaan diajukan ('+items.length+' item)', created_by:me.id}).select());
+  closeModal(); toast('Permintaan pengadaan tersimpan');
+  if(page==='pengadaan') loadPengadaan(); else go('pengadaan');
+}
+async function openPengadaan(id){
+  const [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
+  let h = `<div class="mhead"><h3>Permintaan #${r.id}</h3><button onclick="closeModal()">✕</button></div>
+    <div class="row">${divTag(r.department)}</div>
+    <p class="small muted">Diajukan oleh ${uname(r.requested_by)} · ${fdt(r.created_at)}</p>`;
+  if(r.notes) h += `<p class="small">${esc(r.notes)}</p>`;
+  h += `<h3 style="margin-top:14px">Item</h3>`;
+  r.procurement_items.forEach(it=>{
+    h += `<div class="card" style="padding:10px;margin-bottom:8px">
+      <div class="row" style="justify-content:space-between">
+        <b>${esc(it.item_name)}</b>
+        <span class="badge" style="background:${PSTAT[it.status].c};color:${PSTAT[it.status].t}">${PSTAT[it.status].l}</span></div>
+      <div class="small muted">Kategori: ${it.category==='umum'?'Umum':'Baru'} · Qty diminta: ${it.qty}</div>`;
+    if(it.category==='umum'){
+      h += `<div class="small muted">Stok saat ini: ${it.stok_ada??'-'}</div>`;
+    } else {
+      h += `<div class="small muted">Keterangan: ${esc(it.keterangan||'-')}</div>
+        <div class="small muted">Perkiraan harga: ${rp(it.est_price)}</div>`;
+    }
+    if(it.actual_price!=null) h += `<div class="small muted">Harga realisasi: ${rp(it.actual_price)} (${it.fulfillment_method==='gudang'?'ambil dari gudang':'dibeli'})</div>`;
+    if(it.status==='menunggu_otorisasi' && isMgr()){
+      h += `<div class="row" style="margin-top:6px">
+        <button class="btn btn-teal btn-sm" onclick="authorizeItem(${it.id},true)">✓ Setujui</button>
+        <button class="btn btn-ghost btn-sm" onclick="authorizeItem(${it.id},false)">Tolak</button></div>`;
+    }
+    if(it.status==='diproses' && me.role==='accounting'){
+      h += `<div class="row" style="margin-top:6px">
+        <button class="btn btn-teal btn-sm" onclick="fulfillItem(${it.id},'gudang')">Ambil dari Gudang</button>
+        <button class="btn btn-navy btn-sm" onclick="fulfillItem(${it.id},'beli')">Sudah Dibeli</button></div>`;
+    }
+    if(it.status==='ditolak') h += `<p class="small" style="color:var(--red)">Ditolak</p>`;
+    h += `</div>`;
+  });
+  if(isMgr()) h += `<button class="btn btn-red btn-sm" onclick="deletePengadaan(${r.id})">Hapus Permintaan</button>`;
+  h += `<h3 style="margin-top:14px">Riwayat</h3><div class="timeline">`;
+  r.procurement_updates.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(u=>{
+    h += `<div class="tl"><span class="small muted">${fdt(u.created_at)} · ${uname(u.created_by)}</span><br>${esc(u.note)}</div>`;
+  });
+  h += `</div><div class="row"><input id="pqNote" placeholder="tulis catatan..." style="flex:1">
+    <button class="btn btn-ghost btn-sm" onclick="addPengadaanUpdate(${r.id})">Kirim</button></div>`;
+  openModal(h);
+}
+async function authorizeItem(itemId, approve){
+  const upd = approve
+    ? {status:'diproses', authorized_by:me.id, authorized_at:new Date().toISOString()}
+    : {status:'ditolak', authorized_by:me.id, authorized_at:new Date().toISOString()};
+  await q(db.from('procurement_items').update(upd).eq('id',itemId));
+  const [it] = await q(db.from('procurement_items').select('request_id,item_name').eq('id',itemId));
+  await q(db.from('procurement_updates').insert({request_id:it.request_id, note:(approve?'Disetujui: ':'Ditolak: ')+it.item_name, created_by:me.id}).select());
+  toast(approve?'Item disetujui':'Item ditolak'); openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
+}
+async function fulfillItem(itemId, method){
+  let actual = null;
+  if(method==='beli'){
+    const val = prompt('Harga realisasi pembelian (Rp):'); if(val===null) return;
+    actual = Number(val)||0;
+  }
+  await q(db.from('procurement_items').update({status:'selesai', fulfillment_method:method, actual_price:actual,
+    fulfilled_by:me.id, fulfilled_at:new Date().toISOString()}).eq('id',itemId));
+  const [it] = await q(db.from('procurement_items').select('request_id,item_name').eq('id',itemId));
+  await q(db.from('procurement_updates').insert({request_id:it.request_id, note:'Diserahkan ('+(method==='gudang'?'ambil dari gudang':'dibeli')+'): '+it.item_name, created_by:me.id}).select());
+  toast('Item diserahkan'); openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
+}
+async function deletePengadaan(id){
+  if(!confirm('Yakin hapus permintaan pengadaan ini beserta seluruh item & riwayatnya?')) return;
+  await q(db.from('procurement_requests').delete().eq('id',id).select());
+  closeModal(); toast('Permintaan dihapus'); if(page==='pengadaan') loadPengadaan();
+}
+async function addPengadaanUpdate(id){
+  const n = $('pqNote').value.trim(); if(!n) return;
+  await q(db.from('procurement_updates').insert({request_id:id, note:n, created_by:me.id}).select());
+  openPengadaan(id);
+}
+
 /* ================= ASET ================= */
 async function renderAset(){
   let h = `<h2>Aset Departemen</h2>
@@ -885,6 +1256,32 @@ async function delCk(id){
   await q(db.from('checklist_items').update({active:false}).eq('id',id)); loadCk();
 }
 
+/* ================= KATALOG BARANG UMUM (Accounting/Manager/Owner) ================= */
+async function renderKatalog(){
+  $('main').innerHTML = `<h2>Katalog Barang Umum</h2>
+    <p class="small muted" style="margin-bottom:10px">Daftar nama barang yang bisa dipilih departemen saat mengajukan permintaan pengadaan kategori "Umum".</p>
+    <div class="card"><div id="catList"></div>
+    <div class="row" style="margin-top:12px"><input id="catNew" placeholder="nama barang baru..." style="flex:1">
+    <button class="btn btn-teal" onclick="addCatalog()">Tambah</button></div></div>`;
+  loadCatalog();
+}
+async function loadCatalog(){
+  const items = await q(db.from('item_catalog').select('*').eq('active',true).order('item_name'));
+  $('catList').innerHTML = items.length ? items.map(i=>
+    `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
+      <span>${esc(i.item_name)}</span>
+      <button class="btn-sm btn-ghost" onclick="delCatalog(${i.id})">Hapus</button></div>`).join('')
+    : '<p class="muted small">Belum ada barang di katalog.</p>';
+}
+async function addCatalog(){
+  const t=$('catNew').value.trim(); if(!t)return;
+  await q(db.from('item_catalog').insert({item_name:t, created_by:me.id}).select());
+  $('catNew').value=''; loadCatalog();
+}
+async function delCatalog(id){
+  await q(db.from('item_catalog').update({active:false}).eq('id',id)); loadCatalog();
+}
+
 /* ================= PENGGUNA (Owner) ================= */
 async function renderUsers(){
   profilesCache = await q(db.from('profiles').select('*').order('created_at'));
@@ -894,7 +1291,7 @@ async function renderUsers(){
   profilesCache.forEach(p=>{
     h += `<tr><td data-label="Nama"><input value="${esc(p.name)}" id="un-${p.id}" style="padding:5px 8px;min-width:110px"></td>
       <td data-label="Role"><select id="ur-${p.id}" style="padding:5px 8px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${p.role===k?'selected':''}>${v}</option>`).join('')}</select></td>
-      <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
+      <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(DIVS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
       <td data-label="Aktif"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''} style="width:18px;height:18px"></td>
       <td><button class="btn-sm btn-teal" style="width:100%" onclick="saveUser('${p.id}')">Simpan</button></td></tr>`;
   });
