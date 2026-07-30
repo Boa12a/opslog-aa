@@ -11221,6 +11221,7 @@ async function renderDashboard(){
   $('main').innerHTML = h;
 }
 function addDays(d,n){ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return x.toLocaleDateString('sv-SE'); }
+function lastDayOfMonth(m){ const days = new Date(Number(m.slice(0,4)), Number(m.slice(5,7)), 0).getDate(); return `${m}-${String(days).padStart(2,'0')}`; }
 function ticketRow(x){
   const divSince = x.handling_division_since || x.created_at;
   const divAge = ageDays(divSince);
@@ -12320,10 +12321,123 @@ async function renderHrd(){
     <div class="row"><input id="waNum" value="${esc(wa[0]?.value||'')}" placeholder="mis. 0812xxxxxxx" style="flex:1">
     <button class="btn btn-teal btn-sm" onclick="saveWaNumber()">Simpan</button></div></div>
     ${isMgr()?'<div id="checklistFlagArea"></div>':''}
-    <div class="card"><label>Periode</label><input type="month" id="hrMonth" value="${m}" onchange="loadHrdPayroll()"></div>
+    <div class="card"><label>Periode</label><input type="month" id="hrMonth" value="${m}" onchange="loadHrdAll()"></div>
+    <div id="hrAttendanceArea"></div>
+    <div id="hrTreatmentArea"></div>
     <div id="hrArea"></div>`;
   if(isMgr()) loadWaChecklistFlags();
+  loadHrdAll();
+}
+function loadHrdAll(){
+  loadHrdAttendance();
+  loadHrdTreatment();
   loadHrdPayroll();
+}
+// Pasangkan baris mentah (mulai/selesai) jadi sesi, per staff, per kategori,
+// dicocokkan berurutan berdasarkan waktu (boleh lintas tanggal kalender).
+function pairSessions(logs, matchKey){
+  const byStaff = {};
+  logs.forEach(l=>{ (byStaff[l.staff_id]=byStaff[l.staff_id]||[]).push(l); });
+  const sessions = [];
+  Object.values(byStaff).forEach(list=>{
+    list.sort((a,b)=>new Date(a.scanned_at)-new Date(b.scanned_at));
+    const openByKey = {};
+    list.forEach(l=>{
+      const key = matchKey(l);
+      if(l.fase==='mulai'){ openByKey[key]=l; }
+      else if(l.fase==='selesai'){
+        const start = openByKey[key];
+        sessions.push({staff_id:l.staff_id, department:l.department, pool_type_id:l.pool_type_id,
+          start: start?start.scanned_at:null, end:l.scanned_at});
+        delete openByKey[key];
+      }
+    });
+    Object.values(openByKey).forEach(l=>{
+      sessions.push({staff_id:l.staff_id, department:l.department, pool_type_id:l.pool_type_id, start:l.scanned_at, end:null});
+    });
+  });
+  return sessions.sort((a,b)=> new Date(b.start||b.end) - new Date(a.start||a.end));
+}
+async function loadHrdAttendance(){
+  const m = $('hrMonth').value;
+  const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
+  const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
+  const sessions = pairSessions(logs, l=>'k'); // 1 sesi kehadiran per hari per orang, tidak perlu kunci tambahan
+  let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat Kehadiran</h3>
+    <button class="btn btn-ghost btn-sm" onclick="exportKehadiranExcel()">⬇ Excel</button></div>`;
+  if(sessions.length){
+    h += `<table class="respTable"><tr><th>Tanggal</th><th>Nama</th><th>Dept</th><th>Datang</th><th>Pulang</th><th>Status</th></tr>`;
+    sessions.slice(0,50).forEach(s=>{
+      const incomplete = !s.end;
+      h += `<tr><td data-label="Tanggal">${fdate((s.start||s.end).slice(0,10))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
+        <td data-label="Dept">${s.department?divTag(s.department):'-'}</td>
+        <td data-label="Datang">${s.start?fdt(s.start):'-'}</td><td data-label="Pulang">${s.end?fdt(s.end):'-'}</td>
+        <td data-label="Status">${incomplete?'<span class="age-red">⚠ Belum Pulang</span>':'Lengkap'}</td></tr>`;
+    });
+    h += `</table>`;
+    if(sessions.length>50) h += `<p class="small muted">Menampilkan 50 dari ${sessions.length} — export Excel untuk semua.</p>`;
+  } else h += `<p class="muted small">Belum ada data kehadiran bulan ini.</p>`;
+  $('hrAttendanceArea').innerHTML = h + `</div>`;
+}
+async function loadHrdTreatment(){
+  const m = $('hrMonth').value;
+  const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
+  const [logs, pools] = await Promise.all([
+    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to)),
+    q(db.from('pool_types').select('*'))
+  ]);
+  const sessions = pairSessions(logs, l=>'p'+l.pool_type_id);
+  let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat Treatment</h3>
+    <button class="btn btn-ghost btn-sm" onclick="exportTreatmentExcel()">⬇ Excel</button></div>`;
+  if(sessions.length){
+    h += `<table class="respTable"><tr><th>Tanggal</th><th>Nama</th><th>Kolam</th><th>Mulai</th><th>Selesai</th><th>Durasi</th></tr>`;
+    sessions.slice(0,50).forEach(s=>{
+      const poolName = pools.find(p=>p.id===s.pool_type_id)?.name || '-';
+      const durasi = (s.start && s.end) ? (((new Date(s.end)-new Date(s.start))/3600000).toFixed(1)+' jam') : '-';
+      h += `<tr><td data-label="Tanggal">${fdate((s.start||s.end).slice(0,10))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
+        <td data-label="Kolam">${esc(poolName)}</td><td data-label="Mulai">${s.start?fdt(s.start):'-'}</td>
+        <td data-label="Selesai">${s.end?fdt(s.end):'<span class="age-red">⚠ Belum Selesai</span>'}</td>
+        <td data-label="Durasi">${durasi}</td></tr>`;
+    });
+    h += `</table>`;
+    if(sessions.length>50) h += `<p class="small muted">Menampilkan 50 dari ${sessions.length} — export Excel untuk semua.</p>`;
+  } else h += `<p class="muted small">Belum ada data treatment bulan ini.</p>`;
+  $('hrTreatmentArea').innerHTML = h + `</div>`;
+}
+async function exportKehadiranExcel(){
+  const m = $('hrMonth').value;
+  const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
+  const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
+  const sessions = pairSessions(logs, l=>'k');
+  const rows = sessions.map(s=>({
+    Tanggal: (s.start||s.end).slice(0,10), Nama: uname(s.staff_id),
+    Departemen: s.department?(DIVS[s.department]?.label||s.department):'-',
+    Datang: s.start?fdt(s.start):'', Pulang: s.end?fdt(s.end):'',
+    Status: s.end?'Lengkap':'Belum Pulang'
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Kehadiran');
+  XLSX.writeFile(wb, `Riwayat_Kehadiran_${m}.xlsx`);
+}
+async function exportTreatmentExcel(){
+  const m = $('hrMonth').value;
+  const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
+  const [logs, pools] = await Promise.all([
+    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to)),
+    q(db.from('pool_types').select('*'))
+  ]);
+  const sessions = pairSessions(logs, l=>'p'+l.pool_type_id);
+  const rows = sessions.map(s=>({
+    Tanggal: (s.start||s.end).slice(0,10), Nama: uname(s.staff_id),
+    Kolam: pools.find(p=>p.id===s.pool_type_id)?.name || '-',
+    Mulai: s.start?fdt(s.start):'', Selesai: s.end?fdt(s.end):'',
+    'Durasi (jam)': (s.start&&s.end)?((new Date(s.end)-new Date(s.start))/3600000).toFixed(1):''
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Treatment');
+  XLSX.writeFile(wb, `Riwayat_Treatment_${m}.xlsx`);
 }
 async function saveWaNumber(){
   await q(db.from('app_settings').upsert({key:'wa_hrd_darurat', value:$('waNum').value.trim(), updated_by:me.id, updated_at:new Date().toISOString()}, {onConflict:'key'}).select());
