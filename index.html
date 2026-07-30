@@ -52,9 +52,20 @@ h3{font-size:15px;font-weight:700;margin-bottom:8px}
 #topbar .brand span{color:var(--gold)}
 #topbar .who{font-size:12px;opacity:.85;text-align:right}
 #topbar .who b{display:block;font-size:13px;opacity:1}
-#nav{background:var(--surface);border-bottom:1px solid var(--line);display:flex;gap:2px;overflow-x:auto;padding:0 8px;position:sticky;top:52px;z-index:39;-webkit-overflow-scrolling:touch}
-#nav button{background:none;padding:12px 13px;font-size:13px;font-weight:700;color:var(--muted);border-radius:0;border-bottom:3px solid transparent;white-space:nowrap}
-#nav button.on{color:var(--teal-d);border-bottom-color:var(--teal)}
+#hamburgerBtn{background:rgba(255,255,255,.15);color:#fff;width:38px;height:38px;border-radius:9px;font-size:18px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+#drawerOverlay{position:fixed;inset:0;background:rgba(15,25,35,.5);z-index:48;opacity:0;pointer-events:none;transition:opacity .2s}
+#drawerOverlay.open{opacity:1;pointer-events:auto}
+#drawer{position:fixed;top:0;left:0;bottom:0;width:270px;max-width:82vw;background:var(--surface);z-index:49;
+  transform:translateX(-100%);transition:transform .22s ease;display:flex;flex-direction:column;box-shadow:4px 0 20px rgba(0,0,0,.2)}
+#drawer.open{transform:translateX(0)}
+#drawer .dHead{background:var(--navy);color:#fff;padding:18px 16px;font-weight:800;font-size:16px;flex-shrink:0}
+#drawer .dHead span{color:var(--gold)}
+#drawer .dBody{overflow-y:auto;padding:8px 0;flex:1}
+#drawer .dTop button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;padding:13px 18px;font-size:14px;font-weight:700;color:var(--ink);border-radius:0}
+#drawer .dTop button.on{background:#EDF6F5;color:var(--teal-d)}
+#drawer .dGroupLabel{padding:14px 18px 6px;font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+#drawer .dItem{display:block;width:100%;text-align:left;background:none;padding:11px 18px 11px 30px;font-size:14px;font-weight:600;color:var(--ink);border-radius:0}
+#drawer .dItem.on{background:#EDF6F5;color:var(--teal-d);font-weight:700}
 main{max-width:960px;margin:0 auto;padding:16px 14px 80px}
 
 /* Cards & badges */
@@ -136,16 +147,27 @@ td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
 
 <div id="appView" class="hidden">
   <div id="topbar">
-    <div class="brand">OpsLog <span>Arcelio</span></div>
+    <div class="row" style="gap:10px">
+      <button id="hamburgerBtn" onclick="openDrawer()">☰</button>
+      <div class="brand">OpsLog <span>Arcelio</span></div>
+    </div>
     <div class="row" style="gap:12px">
       <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
       <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="changePasswordModal()">Password</button>
       <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="doLogout()">Keluar</button>
     </div>
   </div>
-  <div id="nav"></div>
+  <div id="drawerOverlay" onclick="closeDrawer()"></div>
+  <div id="drawer">
+    <div class="dHead">OpsLog <span>Arcelio</span></div>
+    <div class="dBody">
+      <div class="dTop" id="drawerTop"></div>
+      <div id="drawerGroups"></div>
+    </div>
+  </div>
   <main id="main"></main>
 </div>
+<div id="nav" class="hidden"></div>
 
 <div id="modalWrap" class="hidden" onpointerdown="modalPointerDown(event)" onpointerup="modalPointerUp(event)"><div id="modalBox"></div></div>
 <div id="toast" class="hidden"></div>
@@ -290,11 +312,11 @@ async function init(){
 
   // Mode Kios: perangkat khusus, layar QR berputar penuh, tanpa menu lain.
   if(me.role==='kiosk'){
-    $('topbar').classList.add('hidden'); $('nav').classList.add('hidden');
+    $('topbar').classList.add('hidden');
     renderKioskScreen();
     return;
   }
-  $('topbar').classList.remove('hidden'); $('nav').classList.remove('hidden');
+  $('topbar').classList.remove('hidden');
 
   $('whoName').textContent = me.name;
   $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+(ALL_STAFF_DEPTS[me.department]?.label||me.department):'');
@@ -303,32 +325,50 @@ async function init(){
 }
 
 function buildNav(){
-  let tabs = [['dashboard','Dashboard'],['absen','Absen']];
-  // "Field worker" hanya dapat tab operasional kalau departemennya salah satu
-  // dari 6 departemen operasional (bukan sekadar role spv/staff) — supaya
-  // SPV/Staff di HR atau Accounting tidak ikut kebagian tab ini.
+  // Selalu tampil di atas, di luar grup — dipakai semua orang tiap hari.
+  const top = [['dashboard','Dashboard'],['absen','Absen']];
+
   const inOpsDept = isFieldWorker() && me.department && DEPTS[me.department];
+
+  const grupOperasional = [];
   if(isMgr() || inOpsDept){
-    tabs.push(['log','Log Harian'],['tiket','Kerusakan'],['pengadaan','Pengadaan'],['aset','Aset'],['mtc','Maintenance']);
+    grupOperasional.push(['log','Log Harian'],['tiket','Kerusakan'],['aset','Aset'],['mtc','Maintenance'],['jadwal','Jadwal Kerja']);
   } else if(isAccSpv()){
-    tabs.push(['tiket','Kerusakan'],['pengadaan','Pengadaan']);
+    grupOperasional.push(['tiket','Kerusakan']);
   }
-  // Lembur: hak universal — siapa pun ber-role spv/staff (apa pun departemennya)
-  // boleh ajukan lembur untuk diri sendiri.
-  if(isMgr() || isFieldWorker()) tabs.push(['lembur','Lembur']);
-  if(isMgr() || inOpsDept){ tabs.push(['jadwal','Jadwal Kerja'],['cuti','Ijin & Sakit']); }
-  else if(isHrSpv()){ tabs.push(['cuti','Ijin & Sakit']); }
-  if(isMgr() || inOpsDept) tabs.push(['rekap','Rekap']);
-  if(isMgr()) tabs.push(['checklist','Checklist & Shift']);
-  if(isMgr() || isAccSpv()) tabs.push(['katalog','Katalog Barang']);
-  if(isHrdOrMgr()) tabs.push(['hrd','HRD'],['users','Pengguna']);
-  $('nav').innerHTML = tabs.map(([k,l])=>`<button id="nav-${k}" onclick="go('${k}')">${l}</button>`).join('');
+  if(isMgr()) grupOperasional.push(['checklist','Checklist & Shift']);
+  if(isMgr() || inOpsDept) grupOperasional.push(['rekap','Rekap']);
+
+  const grupPengadaan = [];
+  if(isMgr() || inOpsDept || isAccSpv()) grupPengadaan.push(['pengadaan','Pengadaan']);
+  if(isMgr() || isAccSpv()) grupPengadaan.push(['katalog','Katalog Barang']);
+
+  const grupSdm = [];
+  if(isMgr() || isFieldWorker()) grupSdm.push(['lembur','Lembur']);
+  if(isMgr() || inOpsDept || isHrSpv()) grupSdm.push(['cuti','Ijin & Sakit']);
+  if(isHrdOrMgr()) grupSdm.push(['hrd','HRD'],['users','Pengguna']);
+
+  window._navGroups = {Operasional:grupOperasional, Pengadaan:grupPengadaan, SDM:grupSdm};
+  window._navTop = top;
+
+  $('drawerTop').innerHTML = top.map(([k,l])=>`<button id="nav-${k}" onclick="go('${k}')">${l}</button>`).join('');
+  let gh = '';
+  Object.entries(window._navGroups).forEach(([label, items])=>{
+    if(!items.length) return;
+    gh += `<div class="dGroupLabel">${label}</div>`;
+    gh += items.map(([k,l])=>`<button class="dItem" id="nav-${k}" onclick="go('${k}')">${l}</button>`).join('');
+  });
+  $('drawerGroups').innerHTML = gh;
 }
+function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
+function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
   page=p;
-  document.querySelectorAll('#nav button').forEach(b=>b.classList.remove('on'));
+  document.querySelectorAll('#drawer button').forEach(b=>b.classList.remove('on'));
   const nb=$('nav-'+p); if(nb) nb.classList.add('on');
+  closeDrawer();
   $('main').innerHTML = '<p class="muted">Memuat...</p>';
+  window.scrollTo(0,0);
   ({dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers})[p]();
 }
 
@@ -378,12 +418,12 @@ async function kioskNewToken(){
 }
 function activateEmergencyKiosk(){
   clearInterval(_kioskTimer);
-  $('topbar').classList.add('hidden'); $('nav').classList.add('hidden');
+  $('topbar').classList.add('hidden'); closeDrawer();
   renderKioskScreen(true);
 }
 function exitEmergencyKiosk(){
   clearInterval(_kioskTimer);
-  $('topbar').classList.remove('hidden'); $('nav').classList.remove('hidden');
+  $('topbar').classList.remove('hidden');
   go('dashboard');
 }
 
