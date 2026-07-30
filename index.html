@@ -15,7 +15,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <style>
 :root{
@@ -153,7 +152,6 @@ td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
     </div>
     <div class="row" style="gap:12px">
       <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
-      <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="changePasswordModal()">Password</button>
       <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="doLogout()">Keluar</button>
     </div>
   </div>
@@ -163,6 +161,8 @@ td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
     <div class="dBody">
       <div class="dTop" id="drawerTop"></div>
       <div id="drawerGroups"></div>
+      <div class="dGroupLabel">Akun</div>
+      <button class="dItem" onclick="closeDrawer();changePasswordModal()">Ganti Password</button>
     </div>
   </div>
   <main id="main"></main>
@@ -387,8 +387,7 @@ async function renderKioskScreen(isEmergency){
       <div style="font-size:20px;font-weight:800;margin-bottom:4px">Absensi ${me.department?(ALL_STAFF_DEPTS[me.department]?.label||me.department):''}</div>
       <div class="small" style="opacity:.75;margin-bottom:18px">Buka menu <b>Absen</b> di aplikasi masing-masing, lalu pindai QR ini</div>
       <div id="kioskQrBox" style="background:#fff;padding:18px;border-radius:16px"><p style="color:#333">Memuat QR...</p></div>
-      <div class="small" style="opacity:.6;margin-top:16px">Kode berganti otomatis tiap 10 detik</div>
-      <div class="small" style="opacity:.6;margin-top:10px" id="kioskLast"></div>
+      <div id="kioskLast" class="small" style="opacity:.6;margin-top:20px"></div>
       <div class="small" style="opacity:.55;margin-top:24px;max-width:320px">Jika aplikasi/HP bermasalah: foto selfie + kirim ke WhatsApp HRD${waNum?` (<b>${esc(waNum)}</b>)`:''} sebagai bukti, HRD akan catatkan manual.</div>
       ${isEmergency?`<button class="btn btn-ghost" style="margin-top:20px" onclick="exitEmergencyKiosk()">Keluar dari Mode Kios</button>`:''}
     </div>`;
@@ -396,10 +395,37 @@ async function renderKioskScreen(isEmergency){
   clearInterval(_kioskTimer);
   _kioskTimer = setInterval(kioskNewToken, 10000);
 }
+// Muat library QRCode secara dinamis dengan beberapa sumber cadangan —
+// kalau satu CDN gagal/diblokir jaringan, otomatis coba yang lain.
+let _qrLibPromise = null;
+function ensureQRCodeLib(){
+  if(window.QRCode) return Promise.resolve();
+  if(_qrLibPromise) return _qrLibPromise;
+  const urls = [
+    'https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js',
+    'https://unpkg.com/qrcode@1.5.3/build/qrcode.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.3/qrcode.min.js'
+  ];
+  _qrLibPromise = (async () => {
+    for(const url of urls){
+      if(window.QRCode) return;
+      try{
+        await new Promise((resolve,reject)=>{
+          const s = document.createElement('script');
+          s.src = url; s.onload = resolve; s.onerror = reject;
+          document.head.appendChild(s);
+        });
+        if(window.QRCode) return;
+      }catch(e){ /* coba sumber berikutnya */ }
+    }
+    if(!window.QRCode) throw new Error('Semua sumber library QR gagal dimuat — cek koneksi internet HP kios');
+  })();
+  return _qrLibPromise;
+}
 async function kioskNewToken(){
   const box = $('kioskQrBox');
   try{
-    if(typeof QRCode === 'undefined'){ throw new Error('Library QR belum termuat (cek koneksi internet HP kios)'); }
+    await ensureQRCodeLib();
     const token = randomToken();
     const {error:insErr} = await db.from('attendance_qr_tokens').insert({token, department: me.department||null, created_by: me.id}).select();
     if(insErr) throw new Error('Gagal simpan token: '+insErr.message);
