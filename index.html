@@ -316,6 +316,8 @@ function buildNav(){
   // Lembur: hak universal — siapa pun ber-role spv/staff (apa pun departemennya)
   // boleh ajukan lembur untuk diri sendiri.
   if(isMgr() || isFieldWorker()) tabs.push(['lembur','Lembur']);
+  if(isMgr() || inOpsDept){ tabs.push(['jadwal','Jadwal Kerja'],['cuti','Ijin & Sakit']); }
+  else if(isHrSpv()){ tabs.push(['cuti','Ijin & Sakit']); }
   if(isMgr() || inOpsDept) tabs.push(['rekap','Rekap']);
   if(isMgr()) tabs.push(['checklist','Checklist & Shift']);
   if(isMgr() || isAccSpv()) tabs.push(['katalog','Katalog Barang']);
@@ -327,7 +329,7 @@ function go(p){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.remove('on'));
   const nb=$('nav-'+p); if(nb) nb.classList.add('on');
   $('main').innerHTML = '<p class="muted">Memuat...</p>';
-  ({dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers})[p]();
+  ({dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers})[p]();
 }
 
 /* ================= KIOS ABSENSI (generate QR) ================= */
@@ -584,6 +586,312 @@ async function submitManualAttend(){
     scanned_at: new Date($('maTime').value).toISOString(), note: reason
   }).select());
   closeModal(); toast('Absen manual tersimpan');
+}
+
+/* ================= JADWAL KERJA BULANAN ================= */
+let _jadwalSub = 'bulanan';
+async function renderJadwal(){
+  let h = `<h2>Jadwal Kerja</h2>
+    <div class="row" style="margin-bottom:12px">
+      <button class="btn ${_jadwalSub==='bulanan'?'btn-navy':'btn-ghost'} btn-sm" onclick="switchJadwalSub('bulanan')">Jadwal Bulanan</button>
+      <button class="btn ${_jadwalSub==='tukar'?'btn-navy':'btn-ghost'} btn-sm" onclick="switchJadwalSub('tukar')">Tukar Libur</button>
+    </div>
+    <div id="jadwalArea"></div>`;
+  $('main').innerHTML = h;
+  if(_jadwalSub==='bulanan') renderJadwalBulanan(); else renderTukarLibur();
+}
+function switchJadwalSub(s){ _jadwalSub = s; renderJadwal(); }
+
+async function renderJadwalBulanan(){
+  const d0 = (isFieldWorker() && me.department && DEPTS[me.department]) ? me.department : 'pool';
+  const m = today().slice(0,7);
+  $('jadwalArea').innerHTML = `<div class="card"><div class="row">
+    <div style="flex:1"><label>Departemen</label><select id="jwDept" onchange="loadJadwalGrid()">${deptOptions(d0)}</select></div>
+    <div style="flex:1"><label>Bulan</label><input type="month" id="jwMonth" value="${m}" onchange="loadJadwalGrid()"></div>
+  </div></div><div id="jwGridArea"></div>`;
+  loadJadwalGrid();
+}
+async function loadJadwalGrid(){
+  const dept = $('jwDept').value, month = $('jwMonth').value;
+  const canEdit = isMgr() || (isFieldWorker() && me.department===dept);
+  const [sched, shifts, staffList] = await Promise.all([
+    q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('department',dept).eq('period_month',month)),
+    q(db.from('shifts').select('*').eq('department',dept).eq('active',true).order('sort_order')),
+    q(db.from('profiles').select('*').eq('department',dept).in('role',['spv','staff']).eq('active',true))
+  ]);
+  let s = sched[0];
+  const daysInMonth = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
+
+  if(!s){
+    $('jwGridArea').innerHTML = `<div class="card"><p class="muted">Belum ada jadwal untuk ${dept} bulan ${month}.</p>
+      ${canEdit?`<button class="btn btn-teal" onclick="createSchedule('${dept}','${month}')">+ Buat Jadwal</button>`:''}</div>`;
+    return;
+  }
+  const STAT = {draft:{l:'Draft',c:'#F3F4F6',t:'#6B7280'},diajukan:{l:'Menunggu Otorisasi Manager',c:'#FEF3C7',t:'#92400E'},disetujui:{l:'Disetujui (Resmi)',c:'#DCFCE7',t:'#166534'}};
+  const st = STAT[s.status];
+  const canEditGrid = canEdit && (isMgr() || s.status==='draft'); // SPV cuma bisa ubah saat draft; Manager bisa ubah kapan saja
+  let h = `<div class="card"><div class="row" style="justify-content:space-between">
+    <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span>
+    <div class="row">
+      ${(canEdit && s.status==='draft')?`<button class="btn btn-navy btn-sm" onclick="submitSchedule(${s.id})">Ajukan ke Manager</button>`:''}
+      ${(isMgr() && s.status==='diajukan')?`<button class="btn btn-teal btn-sm" onclick="authorizeSchedule(${s.id})">✓ Otorisasi (Jadikan Resmi)</button>
+        <button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
+    </div></div></div>`;
+
+  h += `<div class="card" style="overflow-x:auto"><table style="font-size:12px;white-space:nowrap"><tr><th style="position:sticky;left:0;background:#fff">Nama</th>`;
+  for(let d=1; d<=daysInMonth; d++) h += `<th style="text-align:center;padding:4px 6px">${d}</th>`;
+  h += `</tr>`;
+  staffList.forEach(p=>{
+    h += `<tr><td style="position:sticky;left:0;background:#fff;font-weight:700;padding:4px 8px">${esc(p.name)}</td>`;
+    for(let d=1; d<=daysInMonth; d++){
+      const dateStr = `${month}-${String(d).padStart(2,'0')}`;
+      const entry = s.work_schedule_entries.find(e=>e.staff_id===p.id && e.work_date===dateStr);
+      if(canEditGrid){
+        h += `<td style="padding:2px"><select style="padding:2px;font-size:11px;width:70px" onchange="setScheduleCell(${s.id},'${p.id}','${dateStr}',this.value)">
+          <option value="off" ${entry&&entry.is_off?'selected':''}>Libur</option>
+          ${shifts.length ? shifts.map(sh=>`<option value="${sh.id}" ${entry&&!entry.is_off&&entry.shift_id===sh.id?'selected':''}>${esc(sh.shift_name)}</option>`).join('')
+            : `<option value="kerja" ${entry&&!entry.is_off?'selected':''}>Kerja</option>`}
+        </select></td>`;
+      } else {
+        const label = !entry ? '-' : (entry.is_off ? 'Libur' : (entry.shift_id ? (shifts.find(sh=>sh.id===entry.shift_id)?.shift_name||'?') : 'Kerja'));
+        h += `<td style="text-align:center;padding:4px 2px;${entry&&entry.is_off?'color:#9CA3AF':''}">${esc(label)}</td>`;
+      }
+    }
+    h += `</tr>`;
+  });
+  h += `</table></div>`;
+  $('jwGridArea').innerHTML = h;
+}
+async function createSchedule(dept, month){
+  await q(db.from('work_schedules').insert({department:dept, period_month:month, created_by:me.id}).select());
+  toast('Jadwal dibuat, silakan isi'); loadJadwalGrid();
+}
+async function setScheduleCell(scheduleId, staffId, workDate, val){
+  const isOff = val==='off';
+  const shiftId = (!isOff && val!=='kerja') ? Number(val) : null;
+  await q(db.from('work_schedule_entries').upsert({
+    schedule_id:scheduleId, staff_id:staffId, work_date:workDate, is_off:isOff, shift_id:shiftId
+  }, {onConflict:'schedule_id,staff_id,work_date'}).select());
+}
+async function submitSchedule(id){
+  await q(db.from('work_schedules').update({status:'diajukan', submitted_at:new Date().toISOString()}).eq('id',id));
+  toast('Jadwal diajukan ke Manager'); loadJadwalGrid();
+}
+async function authorizeSchedule(id){
+  await q(db.from('work_schedules').update({status:'disetujui', authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',id));
+  toast('Jadwal diotorisasi, jadi acuan resmi'); loadJadwalGrid();
+}
+async function revertSchedule(id){
+  await q(db.from('work_schedules').update({status:'draft'}).eq('id',id));
+  toast('Dikembalikan ke draft untuk direvisi SPV'); loadJadwalGrid();
+}
+
+/* ---------- Tukar Libur ---------- */
+async function renderTukarLibur(){
+  let h = `<div class="row" style="justify-content:space-between;margin-bottom:12px">
+    <h3>Pengajuan Tukar Libur</h3>
+    ${isFieldWorker()?`<button class="btn btn-teal btn-sm" onclick="newSwapModal()">+ Ajukan Tukar Libur</button>`:''}
+    </div><div id="swapList"></div>`;
+  $('jadwalArea').innerHTML = h;
+  loadSwapList();
+}
+const SWAPSTAT = {
+  diajukan:{l:'Menunggu SPV',c:'#FEF3C7',t:'#92400E'},
+  disetujui_spv:{l:'Menunggu Manager',c:'#DBEAFE',t:'#1D4ED8'},
+  ditolak_spv:{l:'Ditolak SPV',c:'#FEE2E2',t:'#B91C1C'},
+  disetujui_manager:{l:'Disetujui',c:'#DCFCE7',t:'#166534'},
+  ditolak_manager:{l:'Ditolak Manager',c:'#FEE2E2',t:'#B91C1C'}
+};
+async function loadSwapList(){
+  let query = db.from('swap_requests').select('*').order('created_at',{ascending:false}).limit(100);
+  if(!isMgr()) query = isFieldWorker() ? query.eq('department', me.department) : query.or(`requester_id.eq.${me.id},partner_id.eq.${me.id}`);
+  const list = await q(query);
+  $('swapList').innerHTML = list.length ? list.map(r=>{
+    const st = SWAPSTAT[r.status];
+    return `<div class="item" style="cursor:pointer" onclick="openSwap(${r.id})">
+      <div class="row" style="justify-content:space-between">
+        ${deptTag(r.department)} <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+      <div class="small"><b>${uname(r.requester_id)}</b>: libur ${fdate(r.original_date)} → ${fdate(r.new_date)}
+        ${r.partner_id?' (tukar dengan '+uname(r.partner_id)+')':''}</div>
+      <div class="small muted">${esc(r.reason||'')}</div></div>`;
+  }).join('') : '<p class="muted">Belum ada pengajuan.</p>';
+}
+function newSwapModal(){
+  const staffList = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active && p.department===me.department && p.id!==me.id);
+  openModal(`<div class="mhead"><h3>Ajukan Tukar Libur</h3><button onclick="closeModal()">✕</button></div>
+    <label>Tanggal Libur Saat Ini</label><input type="date" id="swOrig">
+    <label>Tanggal Pengganti</label><input type="date" id="swNew">
+    <label>Tukar dengan (opsional — kosongkan kalau cuma pindah tanggal sendiri)</label>
+    <select id="swPartner"><option value="">— tidak ada, cuma pindah tanggal —</option>
+      ${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    <label>Alasan</label><textarea id="swReason" rows="2"></textarea>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitSwap()">Ajukan</button>`);
+}
+async function submitSwap(){
+  const orig = $('swOrig').value, nw = $('swNew').value;
+  if(!orig || !nw){ toast('Tanggal wajib diisi'); return; }
+  await q(db.from('swap_requests').insert({
+    requester_id:me.id, department:me.department, original_date:orig, new_date:nw,
+    partner_id:$('swPartner').value||null, reason:$('swReason').value.trim()
+  }).select());
+  closeModal(); toast('Pengajuan tukar libur terkirim'); loadSwapList();
+}
+async function openSwap(id){
+  const [r] = await q(db.from('swap_requests').select('*').eq('id',id));
+  const st = SWAPSTAT[r.status];
+  let h = `<div class="mhead"><h3>Tukar Libur</h3><button onclick="closeModal()">✕</button></div>
+    <div class="row">${deptTag(r.department)} <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+    <p class="small" style="margin-top:8px"><b>Pemohon:</b> ${uname(r.requester_id)}<br>
+    <b>Dari:</b> ${fdate(r.original_date)} → <b>Jadi:</b> ${fdate(r.new_date)}<br>
+    ${r.partner_id?`<b>Tukar dengan:</b> ${uname(r.partner_id)}<br>`:''}
+    <b>Alasan:</b> ${esc(r.reason||'-')}</p>`;
+  if(r.status==='diajukan' && (isMgr() || (me.role==='spv' && me.department===r.department))){
+    h += `<div class="row" style="margin-top:10px">
+      <button class="btn btn-teal btn-sm" onclick="decideSwapSpv(${r.id},true)">✓ Setujui (SPV)</button>
+      <button class="btn btn-ghost btn-sm" onclick="decideSwapSpv(${r.id},false)">Tolak</button></div>`;
+  }
+  if(r.status==='disetujui_spv' && isMgr()){
+    h += `<div class="row" style="margin-top:10px">
+      <button class="btn btn-teal btn-sm" onclick="decideSwapManager(${r.id},true)">✓ Otorisasi Manager</button>
+      <button class="btn btn-ghost btn-sm" onclick="decideSwapManager(${r.id},false)">Tolak</button></div>`;
+  }
+  if(['ditolak_spv','ditolak_manager'].includes(r.status)){
+    h += `<p class="small" style="color:var(--red)">Ditolak oleh ${uname(r.spv_decision_by===me.id?r.spv_decision_by:(r.manager_decision_by||r.spv_decision_by))}</p>`;
+  }
+  openModal(h);
+}
+async function decideSwapSpv(id, approve){
+  let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
+  await q(db.from('swap_requests').update({
+    status: approve?'disetujui_spv':'ditolak_spv', spv_decision_by:me.id, spv_decision_at:new Date().toISOString(), spv_decision_note:note
+  }).eq('id',id));
+  toast(approve?'Disetujui, diteruskan ke Manager':'Ditolak'); closeModal(); loadSwapList();
+}
+async function decideSwapManager(id, approve){
+  let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
+  await q(db.from('swap_requests').update({
+    status: approve?'disetujui_manager':'ditolak_manager', manager_decision_by:me.id, manager_decision_at:new Date().toISOString(), manager_decision_note:note
+  }).eq('id',id));
+  if(approve) await applySwapToSchedule(id);
+  toast(approve?'Tukar libur diotorisasi':'Ditolak'); closeModal(); loadSwapList();
+}
+async function applySwapToSchedule(swapId){
+  // Terapkan hasil tukar libur yang sudah diotorisasi ke jadwal resmi bulan terkait (kalau ada).
+  const [r] = await q(db.from('swap_requests').select('*').eq('id',swapId));
+  const month = r.original_date.slice(0,7);
+  const sched = await q(db.from('work_schedules').select('*').eq('department',r.department).eq('period_month',month));
+  if(!sched.length) return; // belum ada jadwal resmi bulan itu, lewati
+  const scheduleId = sched[0].id;
+  // Requester: tanggal asal jadi Libur, tanggal baru jadi Kerja
+  await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.requester_id, work_date:r.original_date, is_off:true, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
+  await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.requester_id, work_date:r.new_date, is_off:false, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
+  if(r.partner_id){
+    // Partner: kebalikannya
+    await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.partner_id, work_date:r.original_date, is_off:false, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
+    await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.partner_id, work_date:r.new_date, is_off:true, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
+  }
+}
+
+/* ================= IJIN & SAKIT ================= */
+async function renderCuti(){
+  let h = `<h2>Ijin &amp; Sakit</h2>
+    <div class="row" style="justify-content:flex-end;margin-bottom:12px">
+    ${isFieldWorker()?`<button class="btn btn-teal btn-sm" onclick="newCutiModal()">+ Ajukan Ijin/Sakit</button>`:''}
+    </div><div id="cutiList"></div>`;
+  $('main').innerHTML = h;
+  const wa = await q(db.from('app_settings').select('*').eq('key','wa_hrd_darurat'));
+  window._waHrd = wa[0]?.value || '';
+  loadCutiList();
+}
+const CUTISTAT = {
+  diajukan:{l:'Menunggu SPV',c:'#FEF3C7',t:'#92400E'},
+  disetujui_spv:{l:'Menunggu HRD',c:'#DBEAFE',t:'#1D4ED8'},
+  ditolak_spv:{l:'Ditolak SPV',c:'#FEE2E2',t:'#B91C1C'},
+  disetujui_hrd:{l:'Disetujui',c:'#DCFCE7',t:'#166534'},
+  ditolak_hrd:{l:'Ditolak HRD',c:'#FEE2E2',t:'#B91C1C'}
+};
+async function loadCutiList(){
+  let query = db.from('leave_requests').select('*').order('created_at',{ascending:false}).limit(100);
+  if(!isMgr() && !isHrSpv()) query = isFieldWorker() ? query.eq('department', me.department) : query.eq('staff_id', me.id);
+  const list = await q(query);
+  $('cutiList').innerHTML = list.length ? list.map(r=>{
+    const st = CUTISTAT[r.status];
+    return `<div class="item" style="cursor:pointer" onclick="openCuti(${r.id})">
+      <div class="row" style="justify-content:space-between">
+        ${deptTag(r.department)} <span class="badge" style="background:${r.leave_type==='sakit'?'#FEE2E2':'#E0E7FF'};color:${r.leave_type==='sakit'?'#B91C1C':'#4338CA'}">${r.leave_type==='sakit'?'Sakit':'Ijin'}</span>
+        <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+      <div class="small"><b>${uname(r.staff_id)}</b>: ${fdate(r.start_date)} – ${fdate(r.end_date)}</div>
+      <div class="small muted">${esc(r.reason)}</div></div>`;
+  }).join('') : '<p class="muted">Belum ada pengajuan.</p>';
+}
+function newCutiModal(){
+  const staffList = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active && p.department===me.department);
+  openModal(`<div class="mhead"><h3>Ajukan Ijin / Sakit</h3><button onclick="closeModal()">✕</button></div>
+    <label>Karyawan</label><select id="cuStaff">${staffList.map(p=>`<option value="${p.id}" ${p.id===me.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
+    <label>Jenis</label><select id="cuType" onchange="toggleSakitNote()"><option value="ijin">Ijin</option><option value="sakit">Sakit</option></select>
+    <div id="sakitNote" class="hidden" style="background:#FEF3C7;padding:10px;border-radius:8px;margin-top:8px">
+      <p class="small" style="color:#92400E">⚠ Wajib kirim foto keterangan dokter ke WhatsApp HRD${window._waHrd?' ('+esc(window._waHrd)+')':''} sebagai bukti. HRD akan verifikasi sebelum menyetujui.</p></div>
+    <label>Tanggal Mulai</label><input type="date" id="cuStart">
+    <label>Tanggal Selesai</label><input type="date" id="cuEnd">
+    <label>Alasan</label><textarea id="cuReason" rows="2"></textarea>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitCuti()">Ajukan</button>`);
+}
+function toggleSakitNote(){
+  $('sakitNote').classList.toggle('hidden', $('cuType').value!=='sakit');
+}
+async function submitCuti(){
+  const start = $('cuStart').value, end = $('cuEnd').value, reason = $('cuReason').value.trim();
+  if(!start || !end || !reason){ toast('Semua kolom wajib diisi'); return; }
+  await q(db.from('leave_requests').insert({
+    staff_id:$('cuStaff').value, department:me.department, leave_type:$('cuType').value,
+    start_date:start, end_date:end, reason
+  }).select());
+  closeModal(); toast('Pengajuan terkirim'); loadCutiList();
+}
+async function openCuti(id){
+  const [r] = await q(db.from('leave_requests').select('*').eq('id',id));
+  const st = CUTISTAT[r.status];
+  let h = `<div class="mhead"><h3>${r.leave_type==='sakit'?'Sakit':'Ijin'}</h3><button onclick="closeModal()">✕</button></div>
+    <div class="row">${deptTag(r.department)} <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+    <p class="small" style="margin-top:8px"><b>Karyawan:</b> ${uname(r.staff_id)}<br>
+    <b>Tanggal:</b> ${fdate(r.start_date)} – ${fdate(r.end_date)}<br>
+    <b>Alasan:</b> ${esc(r.reason)}</p>`;
+  if(r.leave_type==='sakit'){
+    h += `<p class="small">Bukti foto dokter via WA: ${r.doctor_note_received?'<b style="color:var(--green)">✓ Sudah diterima</b>':'<b style="color:var(--red)">Belum diterima</b>'}</p>`;
+    if((isHrSpv()||isMgr()) && r.status==='disetujui_spv'){
+      h += `<button class="btn btn-ghost btn-sm" onclick="toggleDoctorNote(${r.id},${!r.doctor_note_received})">${r.doctor_note_received?'Batalkan tanda terima':'✓ Tandai Foto Sudah Diterima'}</button>`;
+    }
+  }
+  if(r.status==='diajukan' && (isMgr() || (me.role==='spv' && me.department===r.department))){
+    h += `<div class="row" style="margin-top:10px">
+      <button class="btn btn-teal btn-sm" onclick="decideCutiSpv(${r.id},true)">✓ Setujui (SPV)</button>
+      <button class="btn btn-ghost btn-sm" onclick="decideCutiSpv(${r.id},false)">Tolak</button></div>`;
+  }
+  if(r.status==='disetujui_spv' && (isHrSpv()||isMgr())){
+    const canApproveHrd = r.leave_type!=='sakit' || r.doctor_note_received;
+    h += `<div class="row" style="margin-top:10px">
+      <button class="btn btn-teal btn-sm" ${canApproveHrd?'':'disabled title="Tandai foto diterima dulu"'} onclick="decideCutiHrd(${r.id},true)">✓ Setujui (HRD)</button>
+      <button class="btn btn-ghost btn-sm" onclick="decideCutiHrd(${r.id},false)">Tolak</button></div>`;
+  }
+  openModal(h);
+}
+async function toggleDoctorNote(id, val){
+  await q(db.from('leave_requests').update({doctor_note_received:val}).eq('id',id));
+  openCuti(id);
+}
+async function decideCutiSpv(id, approve){
+  let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
+  await q(db.from('leave_requests').update({
+    status: approve?'disetujui_spv':'ditolak_spv', spv_decision_by:me.id, spv_decision_at:new Date().toISOString(), spv_decision_note:note
+  }).eq('id',id));
+  toast(approve?'Disetujui, diteruskan ke HRD':'Ditolak'); closeModal(); loadCutiList();
+}
+async function decideCutiHrd(id, approve){
+  let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
+  await q(db.from('leave_requests').update({
+    status: approve?'disetujui_hrd':'ditolak_hrd', hrd_decision_by:me.id, hrd_decision_at:new Date().toISOString(), hrd_decision_note:note
+  }).eq('id',id));
+  toast(approve?'Disetujui HRD':'Ditolak'); closeModal(); loadCutiList();
 }
 
 /* ================= DASHBOARD ================= */
