@@ -247,19 +247,25 @@ async function q(promise){ const {data,error} = await promise; if(error){ consol
 
 /* ---------- Auth ---------- */
 // Email sintetis pakai alias Gmail sungguhan (domain harus benar-benar ada,
-// Supabase menolak domain palsu). Format: base+username@gmail.com — Gmail
-// tetap mengarahkan semua alias ini ke satu inbox yang sama.
+// Supabase menolak domain palsu di jalur signUp()). Format: base+username@gmail.com
+// — Gmail tetap mengarahkan semua alias ini ke satu inbox yang sama.
 const SYNTH_EMAIL_BASE = 'hrd.arcelio';
 const SYNTH_EMAIL_DOMAIN = 'gmail.com';
 function synthEmail(username){ return `${SYNTH_EMAIL_BASE}+${username}@${SYNTH_EMAIL_DOMAIN}`; }
-function resolveLoginEmail(input){
-  const v = input.trim().toLowerCase();
-  return v.includes('@') ? v : synthEmail(v);
-}
+const LEGACY_EMAIL_DOMAIN = 'aa.id'; // domain lama, dipakai 8 akun yang sudah terlanjur dibuat
 async function doLogin(){
   const btn=$('loginBtn'); btn.disabled=true; $('loginErr').textContent='';
-  const email = resolveLoginEmail($('loginEmail').value);
-  const {error} = await db.auth.signInWithPassword({email, password:$('loginPass').value});
+  const raw = $('loginEmail').value.trim().toLowerCase();
+  const pass = $('loginPass').value;
+  const primaryEmail = raw.includes('@') ? raw : synthEmail(raw);
+  let {error} = await db.auth.signInWithPassword({email:primaryEmail, password:pass});
+  if(error && !raw.includes('@')){
+    // Coba domain lama sebagai cadangan, untuk akun yang didaftarkan
+    // sebelum skema alias Gmail dipakai (tidak perlu ubah apa pun di Supabase).
+    const legacyEmail = `${raw}@${LEGACY_EMAIL_DOMAIN}`;
+    const retry = await db.auth.signInWithPassword({email:legacyEmail, password:pass});
+    if(!retry.error) error = null;
+  }
   btn.disabled=false;
   if(error){ $('loginErr').textContent = 'Login gagal: username atau password salah.'; return; }
   init();
@@ -1651,7 +1657,7 @@ async function renderUsers(){
   h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Username</th><th>Role</th><th>Dept</th>${isMgr()?'<th>Boleh Setujui Lembur</th>':''}<th>Aktif</th><th></th></tr>`;
   profilesCache.forEach(p=>{
     h += `<tr><td data-label="Nama"><input value="${esc(p.name)}" id="un-${p.id}" style="padding:5px 8px;min-width:110px"></td>
-      <td data-label="Username" class="small muted">${esc(p.username||'-')}</td>
+      <td data-label="Username"><input value="${esc(p.username||'')}" id="uu-${p.id}" placeholder="mis. lukman" style="padding:5px 8px;min-width:100px"></td>
       <td data-label="Role"><select id="ur-${p.id}" style="padding:5px 8px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${p.role===k?'selected':''}>${v}</option>`).join('')}</select></td>
       <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(DIVS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
       ${isMgr()?`<td data-label="Boleh Setujui Lembur">${p.role==='spv'?`<input type="checkbox" id="uc-${p.id}" ${p.can_approve_lembur?'checked':''} style="width:18px;height:18px">`:'<span class="small muted">-</span>'}</td>`:''}
@@ -1662,7 +1668,15 @@ async function renderUsers(){
   $('main').innerHTML = h;
 }
 async function saveUser(id){
-  const upd = {name:$('un-'+id).value.trim(), role:$('ur-'+id).value,
+  const usernameRaw = $('uu-'+id).value.trim().toLowerCase();
+  if(usernameRaw){
+    if(!/^[a-z0-9._-]{3,30}$/.test(usernameRaw)){
+      toast('Username hanya huruf kecil/angka/titik/garis, 3-30 karakter'); return;
+    }
+    const dup = await q(db.from('profiles').select('id').eq('username',usernameRaw));
+    if(dup.length && dup[0].id !== id){ toast('Username sudah dipakai orang lain'); return; }
+  }
+  const upd = {name:$('un-'+id).value.trim(), username: usernameRaw||null, role:$('ur-'+id).value,
     department:$('ud-'+id).value||null, active:$('ua-'+id).checked};
   const cbEl = $('uc-'+id);
   if(cbEl) upd.can_approve_lembur = cbEl.checked; // hanya ada di DOM untuk viewer Manager/Owner
