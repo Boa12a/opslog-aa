@@ -246,10 +246,15 @@ function divOptions(sel){ return Object.entries(DIVS).map(([k,v])=>`<option valu
 async function q(promise){ const {data,error} = await promise; if(error){ console.error(error); toast('Error: '+error.message); throw error; } return data; }
 
 /* ---------- Auth ---------- */
-const SYNTH_EMAIL_DOMAIN = 'aa.id';
+// Email sintetis pakai alias Gmail sungguhan (domain harus benar-benar ada,
+// Supabase menolak domain palsu). Format: base+username@gmail.com — Gmail
+// tetap mengarahkan semua alias ini ke satu inbox yang sama.
+const SYNTH_EMAIL_BASE = 'hrd.arcelio';
+const SYNTH_EMAIL_DOMAIN = 'gmail.com';
+function synthEmail(username){ return `${SYNTH_EMAIL_BASE}+${username}@${SYNTH_EMAIL_DOMAIN}`; }
 function resolveLoginEmail(input){
   const v = input.trim().toLowerCase();
-  return v.includes('@') ? v : `${v}@${SYNTH_EMAIL_DOMAIN}`;
+  return v.includes('@') ? v : synthEmail(v);
 }
 async function doLogin(){
   const btn=$('loginBtn'); btn.disabled=true; $('loginErr').textContent='';
@@ -1690,7 +1695,7 @@ async function submitNewEmployee(){
   if(pass.length < 6){ toast('Password minimal 6 karakter'); return; }
   const existing = await q(db.from('profiles').select('id').eq('username',usernameRaw));
   if(existing.length){ toast('Username sudah dipakai, pilih yang lain'); return; }
-  const email = `${usernameRaw}@${SYNTH_EMAIL_DOMAIN}`;
+  const email = synthEmail(usernameRaw);
   // Pakai koneksi Supabase TERPISAH khusus untuk signUp ini, supaya sesi
   // login diri sendiri (HRD/Manager/Owner) tidak ikut tergantikan.
   const tempClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {auth:{persistSession:false}});
