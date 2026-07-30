@@ -15,6 +15,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 <style>
 :root{
   --bg:#F2F5F4; --surface:#FFFFFF; --ink:#16232E; --muted:#64748B; --line:#E3E9E8;
@@ -123,8 +124,8 @@ td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
   <div class="loginCard">
     <div class="brand">OpsLog <span>Arcelio</span></div>
     <p class="muted small" style="margin-top:4px">Laporan operasional harian, kerusakan &amp; aset</p>
-    <label>Email</label>
-    <input type="email" id="loginEmail" autocomplete="username">
+    <label>Username</label>
+    <input type="text" id="loginEmail" autocomplete="username" autocapitalize="off" placeholder="mis. budi.pool">
     <label>Password</label>
     <input type="password" id="loginPass" autocomplete="current-password">
     <button class="btn-primary" id="loginBtn" onclick="doLogin()">Masuk</button>
@@ -137,6 +138,7 @@ td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
     <div class="brand">OpsLog <span>Arcelio</span></div>
     <div class="row" style="gap:12px">
       <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
+      <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="changePasswordModal()">Password</button>
       <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="doLogout()">Keluar</button>
     </div>
   </div>
@@ -149,8 +151,8 @@ td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
 <script>
 /* ================= KONFIGURASI =================
    Ganti dengan URL & anon key project Supabase Anda */
-const SUPABASE_URL = "https://hsenozdmrpxppzzuxsaq.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhzZW5vemRtcnB4cHB6enV4c2FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzMzQzMjYsImV4cCI6MjA5OTkxMDMyNn0.8YVSBECx1jIehn5xqN0iZgG3_CWtNk45G7dq8Azhp9A";
+const SUPABASE_URL = "GANTI_DENGAN_SUPABASE_URL";
+const SUPABASE_KEY = "GANTI_DENGAN_SUPABASE_ANON_KEY";
 /* =============================================== */
 
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -172,7 +174,7 @@ const DIVS = {
   electrical:{label:'Electrical',color:'#A16207'},
   accounting:{label:'Accounting',color:'#334155'}
 };
-const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',accounting:'Accounting'};
+const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',staff:'Staff',accounting:'Accounting',kiosk:'Kios Absensi',hrd:'HRD'};
 const TSTAT = {
   dilaporkan:{l:'Dilaporkan',c:'#E5E7EB',t:'#374151'},
   disetujui:{l:'Disetujui',c:'#DBEAFE',t:'#1D4ED8'},
@@ -217,10 +219,15 @@ const divTag = d => d ? `<span class="dept-tag" style="background:${DIVS[d].colo
 const statBadge = s => `<span class="badge" style="background:${TSTAT[s].c};color:${TSTAT[s].t}">${TSTAT[s].l}</span>`;
 const urgBadge = u => `<span class="badge" style="background:${URG[u].c};color:${URG[u].t}">${URG[u].l}</span>`;
 const isMgr = () => ['manager','owner'].includes(me.role);
+// HRD, Manager, Owner: yang boleh kelola karyawan & lihat halaman HRD.
+const isHrdOrMgr = () => ['hrd','manager','owner'].includes(me.role);
+// SPV dan Staff punya hak operasional yang sama di departemennya sendiri
+// (staff dibutuhkan mengisi laporan saat SPV tidak di tempat).
+const isFieldWorker = () => ['spv','staff'].includes(me.role);
 // Untuk form operasional (log/aset/maintenance/pelapor) tetap 6 dept asli.
-const myDepts = () => me.role==='spv' && me.department ? (DEPTS[me.department] ? [me.department] : []) : Object.keys(DEPTS);
+const myDepts = () => isFieldWorker() && me.department ? (DEPTS[me.department] ? [me.department] : []) : Object.keys(DEPTS);
 // Untuk keperluan divisi penanganan (termasuk Engineering/Electrical).
-const myDivs = () => me.role==='spv' && me.department ? [me.department] : Object.keys(DIVS);
+const myDivs = () => isFieldWorker() && me.department ? [me.department] : Object.keys(DIVS);
 
 function toast(msg){ $('toast').textContent = msg; $('toast').classList.remove('hidden');
   clearTimeout(toast._t); toast._t = setTimeout(()=>$('toast').classList.add('hidden'),2600); }
@@ -239,11 +246,17 @@ function divOptions(sel){ return Object.entries(DIVS).map(([k,v])=>`<option valu
 async function q(promise){ const {data,error} = await promise; if(error){ console.error(error); toast('Error: '+error.message); throw error; } return data; }
 
 /* ---------- Auth ---------- */
+const SYNTH_EMAIL_DOMAIN = 'aa.id';
+function resolveLoginEmail(input){
+  const v = input.trim().toLowerCase();
+  return v.includes('@') ? v : `${v}@${SYNTH_EMAIL_DOMAIN}`;
+}
 async function doLogin(){
   const btn=$('loginBtn'); btn.disabled=true; $('loginErr').textContent='';
-  const {error} = await db.auth.signInWithPassword({email:$('loginEmail').value.trim(),password:$('loginPass').value});
+  const email = resolveLoginEmail($('loginEmail').value);
+  const {error} = await db.auth.signInWithPassword({email, password:$('loginPass').value});
   btn.disabled=false;
-  if(error){ $('loginErr').textContent = 'Login gagal: email atau password salah.'; return; }
+  if(error){ $('loginErr').textContent = 'Login gagal: username atau password salah.'; return; }
   init();
 }
 async function doLogout(){ await db.auth.signOut(); location.reload(); }
@@ -253,18 +266,38 @@ async function init(){
   if(!session){ $('loginView').classList.remove('hidden'); $('appView').classList.add('hidden'); return; }
   profilesCache = await q(db.from('profiles').select('*'));
   me = profilesCache.find(p=>p.id===session.user.id);
-  if(!me || !me.active){ toast('Akun tidak aktif. Hubungi owner.'); await db.auth.signOut(); return; }
+  if(!me || !me.active){ toast('Akun tidak aktif. Hubungi HRD/Owner.'); await db.auth.signOut(); return; }
   $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden');
+
+  // Mode Kios: perangkat khusus untuk absensi. Layar QR berputar akan
+  // dibangun di Tahap 3 — untuk sekarang tampilkan status sederhana saja.
+  if(me.role==='kiosk'){
+    $('topbar').classList.add('hidden'); $('nav').classList.add('hidden');
+    $('main').innerHTML = `<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--navy);color:#fff;text-align:center;padding:20px">
+      <div><div style="font-size:20px;font-weight:800">Mode Kios Absensi</div>
+      <p class="small" style="opacity:.75;margin-top:8px">Fitur QR absensi akan aktif di pembaruan berikutnya (Tahap 3).</p></div></div>`;
+    return;
+  }
+  $('topbar').classList.remove('hidden'); $('nav').classList.remove('hidden');
+
   $('whoName').textContent = me.name;
   $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+(DIVS[me.department]?.label||me.department):'');
-  buildNav(); go('dashboard');
+  buildNav();
+  go('dashboard');
 }
 
 function buildNav(){
-  const tabs = [['dashboard','Dashboard'],['log','Log Harian'],['tiket','Kerusakan'],['pengadaan','Pengadaan'],['aset','Aset'],['mtc','Maintenance'],['rekap','Rekap']];
-  if(isMgr()) tabs.push(['checklist','Checklist']);
+  let tabs = [['dashboard','Dashboard']];
+  if(isMgr() || isFieldWorker()){
+    tabs.push(['log','Log Harian'],['tiket','Kerusakan'],['pengadaan','Pengadaan'],['aset','Aset'],['mtc','Maintenance'],['lembur','Lembur'],['rekap','Rekap']);
+  } else if(me.role==='accounting'){
+    tabs.push(['tiket','Kerusakan'],['pengadaan','Pengadaan']);
+  } else if(me.role==='hrd'){
+    tabs.push(['lembur','Lembur']);
+  }
+  if(isMgr()) tabs.push(['checklist','Checklist & Shift']);
   if(isMgr() || me.role==='accounting') tabs.push(['katalog','Katalog Barang']);
-  if(me.role==='owner') tabs.push(['users','Pengguna']);
+  if(isHrdOrMgr()) tabs.push(['hrd','HRD'],['users','Pengguna']);
   $('nav').innerHTML = tabs.map(([k,l])=>`<button id="nav-${k}" onclick="go('${k}')">${l}</button>`).join('');
 }
 function go(p){
@@ -272,8 +305,9 @@ function go(p){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.remove('on'));
   const nb=$('nav-'+p); if(nb) nb.classList.add('on');
   $('main').innerHTML = '<p class="muted">Memuat...</p>';
-  ({dashboard:renderDashboard,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,users:renderUsers})[p]();
+  ({dashboard:renderDashboard,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers})[p]();
 }
+
 /* ================= DASHBOARD ================= */
 async function renderDashboard(){
   const t = today();
@@ -408,23 +442,50 @@ function ticketRow(x){
 async function renderLog(){
   let h = `<h2>Log Harian</h2>
   <div class="card"><div class="row">
-    <div style="flex:1"><label>Departemen</label><select id="logDept" onchange="loadLogForm()">${deptOptions(me.department)}</select></div>
+    <div style="flex:1"><label>Departemen</label><select id="logDept" onchange="loadLogShifts()">${deptOptions(me.department)}</select></div>
     <div style="flex:1"><label>Tanggal</label><input type="date" id="logDate" value="${today()}" onchange="loadLogForm()"></div>
-  </div><div id="logFormArea" style="margin-top:8px"></div></div>
+  </div>
+  <div id="logShiftArea" style="margin-top:8px"></div>
+  <div id="handoverBanner"></div>
+  <div id="logFormArea" style="margin-top:8px"></div></div>
   <div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat 14 Hari Terakhir</h3>
     ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="exportLogsExcel()">⬇ Excel (semua riwayat)</button>`:''}</div>
     <div id="logHist"></div></div>`;
   $('main').innerHTML = h;
-  loadLogForm(); loadLogHist();
+  loadLogShifts();
+  loadLogHist();
+}
+// Muat daftar shift departemen terpilih; kalau departemen tidak pakai shift,
+// langsung lanjut ke form log seperti biasa (1 log per hari).
+async function loadLogShifts(){
+  const d = $('logDept').value;
+  const shifts = await q(db.from('shifts').select('*').eq('department',d).eq('active',true).order('sort_order'));
+  window._logShifts = shifts;
+  if(shifts.length){
+    $('logShiftArea').innerHTML = `<label>Shift</label><select id="logShift" onchange="loadLogForm()">
+      ${shifts.map(s=>`<option value="${s.id}">${esc(s.shift_name)}${s.start_time?` (${s.start_time.slice(0,5)}-${s.end_time?s.end_time.slice(0,5):'?'})`:''}</option>`).join('')}</select>`;
+  } else {
+    $('logShiftArea').innerHTML = '';
+  }
+  loadLogForm();
+}
+function currentShiftId(){
+  const sel = $('logShift'); return sel ? Number(sel.value) : null;
 }
 async function loadLogForm(){
   const d = $('logDept').value, t = $('logDate').value;
-  const [items, logs] = await Promise.all([
-    q(db.from('checklist_items').select('*').eq('department',d).eq('active',true).order('sort_order')),
-    q(db.from('daily_logs').select('*, daily_log_checks(*)').eq('department',d).eq('log_date',t))
-  ]);
+  const shiftId = currentShiftId();
+  let itemsQuery = db.from('checklist_items').select('*').eq('department',d).eq('active',true).order('sort_order');
+  itemsQuery = shiftId ? itemsQuery.or(`shift_id.eq.${shiftId},shift_id.is.null`) : itemsQuery.is('shift_id', null);
+  let logQuery = db.from('daily_logs').select('*, daily_log_checks(*)').eq('department',d).eq('log_date',t);
+  logQuery = shiftId ? logQuery.eq('shift_id', shiftId) : logQuery.is('shift_id', null);
+  const [items, logs] = await Promise.all([q(itemsQuery), q(logQuery)]);
   const log = logs[0];
-  const canFill = isMgr() || (me.role==='spv' && me.department===d);
+  const canFill = isMgr() || (isFieldWorker() && me.department===d);
+
+  // Banner serah terima dari shift sebelumnya (jika ada dan belum dikonfirmasi)
+  await loadHandoverBanner(d, t, shiftId);
+
   let h = '';
   if(log){
     h += `<p class="small" style="color:var(--green);font-weight:700">✓ Sudah diisi oleh ${uname(log.filled_by)} (${fdt(log.created_at)})</p>`;
@@ -432,7 +493,7 @@ async function loadLogForm(){
   if(!canFill){ h += `<p class="muted small">Anda tidak memiliki akses mengisi log departemen ini.</p>`; $('logFormArea').innerHTML=h; return; }
 
   h += `<label>Checklist Standar</label>`;
-  if(!items.length) h += `<p class="muted small">Belum ada item checklist. ${isMgr()?'Tambahkan di menu Checklist.':'Minta Manager menambahkan item.'}</p>`;
+  if(!items.length) h += `<p class="muted small">Belum ada item checklist. ${isMgr()?'Tambahkan di menu Checklist & Shift.':'Minta Manager menambahkan item.'}</p>`;
   items.forEach(it=>{
     const chk = log ? (log.daily_log_checks.find(c=>c.item_id===it.id)||{}) : {};
     h += `<div class="row" style="margin-bottom:6px;align-items:flex-start">
@@ -445,12 +506,13 @@ async function loadLogForm(){
   <label>Catatan Kejadian</label><textarea id="logCatatan" rows="3" placeholder="Kejadian penting hari ini...">${esc(log?log.catatan:'')}</textarea>
   <div class="row" style="margin-top:12px">
     <button class="btn btn-teal" onclick="saveLog(${log?log.id:'null'})">${log?'Perbarui Log':'Simpan Log'}</button>
-    <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button></div>`;
+    <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button>
+    ${canFill?`<button class="btn btn-navy" onclick="handoverModal('${d}','${t}',${shiftId||'null'})">Serah Terima Shift Ini</button>`:''}</div>`;
   $('logFormArea').innerHTML = h;
 }
 async function saveLog(existingId){
-  const d = $('logDept').value, t = $('logDate').value;
-  const payload = {log_date:t, department:d, kondisi:$('logKondisi').value, catatan:$('logCatatan').value.trim(), filled_by:me.id};
+  const d = $('logDept').value, t = $('logDate').value, shiftId = currentShiftId();
+  const payload = {log_date:t, department:d, shift_id:shiftId||null, kondisi:$('logKondisi').value, catatan:$('logCatatan').value.trim(), filled_by:me.id};
   let logId = existingId;
   if(existingId){ await q(db.from('daily_logs').update(payload).eq('id',existingId)); }
   else { const r = await q(db.from('daily_logs').insert(payload).select()); logId = r[0].id; }
@@ -462,12 +524,46 @@ async function saveLog(existingId){
   if(checks.length) await q(db.from('daily_log_checks').insert(checks).select());
   toast('Log harian tersimpan'); loadLogForm(); loadLogHist();
 }
+// ---------- Serah Terima Antar Shift ----------
+async function loadHandoverBanner(dept, logDate, shiftId){
+  // Cari serah terima terbaru untuk departemen ini (hari ini atau kemarin)
+  // yang belum dikonfirmasi oleh shift berikutnya.
+  const from = addDays(logDate, -1);
+  const list = await q(db.from('shift_handovers').select('*').eq('department',dept)
+    .gte('log_date', from).lte('log_date', logDate).order('created_at',{ascending:false}).limit(1));
+  const ho = list[0];
+  if(!ho || ho.acknowledged_at){ $('handoverBanner').innerHTML=''; return; }
+  const shiftLabel = window._logShifts && ho.shift_id ? (window._logShifts.find(s=>s.id===ho.shift_id)?.shift_name || '') : '';
+  $('handoverBanner').innerHTML = `<div class="card" style="border:2px solid var(--gold);margin:10px 0">
+    <h3>Serah Terima dari Shift Sebelumnya ${shiftLabel?'('+esc(shiftLabel)+')':''}</h3>
+    <p class="small"><b>Kondisi:</b> ${esc(ho.outgoing_notes||'-')}</p>
+    <p class="small"><b>Pekerjaan Menggantung:</b> ${esc(ho.pending_items||'-')}</p>
+    <p class="small muted">oleh ${uname(ho.outgoing_by)} · ${fdt(ho.created_at)}</p>
+    <button class="btn btn-teal btn-sm" onclick="ackHandover(${ho.id})">✓ Konfirmasi Diterima</button></div>`;
+}
+async function ackHandover(id){
+  await q(db.from('shift_handovers').update({acknowledged_by:me.id, acknowledged_at:new Date().toISOString()}).eq('id',id));
+  toast('Serah terima dikonfirmasi'); loadLogForm();
+}
+function handoverModal(dept, logDate, shiftId){
+  const shiftLabel = window._logShifts && shiftId ? (window._logShifts.find(s=>s.id===shiftId)?.shift_name || '') : '';
+  openModal(`<div class="mhead"><h3>Serah Terima Shift${shiftLabel?' — '+esc(shiftLabel):''}</h3><button onclick="closeModal()">✕</button></div>
+    <label>Kondisi Saat Serah Terima</label><textarea id="hoNotes" rows="3" placeholder="kondisi umum saat shift ini berakhir..."></textarea>
+    <label>Pekerjaan yang Masih Menggantung untuk Shift Berikutnya</label><textarea id="hoPending" rows="3"></textarea>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitHandover('${dept}','${logDate}',${shiftId||'null'})">Simpan Serah Terima</button>`);
+}
+async function submitHandover(dept, logDate, shiftId){
+  await q(db.from('shift_handovers').insert({department:dept, shift_id:shiftId||null, log_date:logDate,
+    outgoing_by:me.id, outgoing_notes:$('hoNotes').value.trim(), pending_items:$('hoPending').value.trim()}).select());
+  closeModal(); toast('Serah terima tersimpan, akan tampil untuk shift berikutnya');
+}
 async function loadLogHist(){
   const from = addDays(today(),-14);
   const logs = await q(db.from('daily_logs').select('*').gte('log_date',from).order('log_date',{ascending:false}));
   const mine = logs.filter(l=> me.role!=='spv' || l.department===me.department || true); // semua boleh lihat
-  let h = '<table class="respTable"><tr><th>Tanggal</th><th>Dept</th><th>Kondisi</th><th>Pengisi</th></tr>';
+  let h = '<table class="respTable"><tr><th>Tanggal</th><th>Dept</th><th>Shift</th><th>Kondisi</th><th>Pengisi</th></tr>';
   mine.forEach(l=> h += `<tr><td data-label="Tanggal">${fdate(l.log_date)}</td><td data-label="Dept">${deptTag(l.department)}</td>
+    <td data-label="Shift">${l.shift_id?(window._logShifts?.find(s=>s.id===l.shift_id)?.shift_name||'#'+l.shift_id):'-'}</td>
     <td data-label="Kondisi">${KONDISI[l.kondisi]}</td><td data-label="Pengisi">${uname(l.filled_by)}</td></tr>`);
   $('logHist').innerHTML = h + '</table>' + (mine.length?'':'<p class="muted small">Belum ada log.</p>');
 }
@@ -522,6 +618,19 @@ async function exportLogsExcel(){
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Log Harian');
   XLSX.writeFile(wb, `Riwayat_Log_Harian_${today()}.xlsx`);
+}
+async function exportLemburExcel(){
+  const list = await q(db.from('overtime_requests').select('*').order('requested_date'));
+  const rows = list.map(r=>({
+    Tanggal: r.requested_date, Departemen: DEPTS[r.department]?DEPTS[r.department].label:r.department,
+    Nama: uname(r.staff_id), 'Rencana Mulai': r.planned_start||'', 'Rencana Selesai': r.planned_end||'',
+    Alasan: r.reason, Status: LSTAT[r.status].l, 'Jam Aktual': r.actual_hours??'',
+    Penyetuju: r.approver_id?uname(r.approver_id):'', 'Catatan Keputusan': r.decision_note||''
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Lembur');
+  XLSX.writeFile(wb, `Riwayat_Lembur_${today()}.xlsx`);
 }
 
 /* ================= TIKET KERUSAKAN ================= */
@@ -588,7 +697,7 @@ async function createTicket(){
 async function openTicket(id){
   const [tk] = await q(db.from('tickets').select('*, ticket_items(*), ticket_updates(*), assets(name)').eq('id',id));
   const t = tk;
-  const canEdit = isMgr() || (me.role==='spv' && (me.department===t.department || me.department===t.handling_division));
+  const canEdit = isMgr() || (isFieldWorker() && (me.department===t.department || me.department===t.handling_division));
   const hasCost = t.ticket_items.length > 0;
   const estTotal = t.ticket_items.reduce((s,i)=>s + i.qty*i.est_price, 0);
   const actTotal = t.ticket_items.reduce((s,i)=>s + (i.actual_price!=null ? i.qty*i.actual_price : 0), 0);
@@ -822,7 +931,7 @@ async function addUpdate(id){
 // Siapa yang boleh mengajukan permintaan untuk departemen apa:
 // SPV hanya untuk divisinya sendiri; Manager/Owner untuk semua (kecuali Accounting).
 function pqDeptOptions(sel){
-  const keys = (me.role==='spv' && me.department) ? [me.department] : Object.keys(DIVS).filter(k=>k!=='accounting');
+  const keys = (isFieldWorker() && me.department) ? [me.department] : Object.keys(DIVS).filter(k=>k!=='accounting');
   return keys.map(d=>`<option value="${d}" ${d===sel?'selected':''}>${DIVS[d]?DIVS[d].label:d}</option>`).join('');
 }
 function reqStatusInfo(items){
@@ -921,7 +1030,7 @@ function pqRenderItems(){
 async function newPengadaanModal(){
   pqDraft = [pqBlankItem()];
   window._catalog = await q(db.from('item_catalog').select('*').eq('active',true).order('item_name'));
-  const d0 = (me.role==='spv' && me.department) ? me.department : 'pool';
+  const d0 = (isFieldWorker() && me.department) ? me.department : 'pool';
   openModal(`<div class="mhead"><h3>Ajukan Permintaan Pengadaan</h3><button onclick="closeModal()">✕</button></div>
     <label>Departemen</label><select id="pqDept">${pqDeptOptions(d0)}</select>
     <label>Catatan (opsional)</label><textarea id="pqNotes" rows="2"></textarea>
@@ -1064,7 +1173,7 @@ async function loadAssets(){
   const KOND = {baik:['Baik','var(--green)'],perlu_perbaikan:['Perlu Perbaikan','var(--amber)'],rusak:['Rusak','var(--red)']};
   let h = list.length ? `<table class="respTable"><tr><th>Kode</th><th>Nama</th><th>Dept</th><th>Kondisi</th><th></th></tr>` : '<p class="muted">Tidak ada aset.</p>';
   list.forEach(a=>{
-    const canAct = (isMgr() || (me.role==='spv'&&me.department===a.department)) && a.status==='aktif';
+    const canAct = (isMgr() || (isFieldWorker()&&me.department===a.department)) && a.status==='aktif';
     h += `<tr><td data-label="Kode" class="small muted">${esc(a.code||'-')}</td><td data-label="Nama"><b>${esc(a.name)}</b></td>
       <td data-label="Dept">${deptTag(a.department)}</td>
       <td data-label="Kondisi"><span class="small" style="color:${KOND[a.condition][1]};font-weight:700">${KOND[a.condition][0]}</span>
@@ -1139,18 +1248,26 @@ async function renderMtc(){
   $('main').innerHTML = h; loadMtc();
 }
 async function loadMtc(){
-  const list = await q(db.from('maintenance_schedules').select('*, assets(name)').eq('active',true).order('next_due'));
+  const [list, openSessions] = await Promise.all([
+    q(db.from('maintenance_schedules').select('*, assets(name)').eq('active',true).order('next_due')),
+    q(db.from('maintenance_logs').select('*').is('end_time', null))
+  ]);
   const t = today();
   let h = list.length?'':'<p class="muted">Belum ada jadwal maintenance.</p>';
   list.forEach(s=>{
-    const canDo = isMgr() || (me.role==='spv'&&me.department===s.department);
+    const canDo = isMgr() || (isFieldWorker()&&me.department===s.department);
     const due = s.next_due<=t;
+    const active = openSessions.find(o=>o.schedule_id===s.id);
     h += `<div class="item" style="border-left-color:${DEPTS[s.department].color};cursor:default">
       <div class="row" style="justify-content:space-between">
         <div>${deptTag(s.department)} <b>${esc(s.task_name)}</b>${s.assets?` <span class="small muted">(${esc(s.assets.name)})</span>`:''}</div>
         <span class="small ${due?'age-red':(s.next_due<=addDays(t,7)?'age-amber':'muted')}">${due?'JATUH TEMPO · ':''}${fdate(s.next_due)}</span></div>
       <div class="small muted">Setiap ${s.interval_days} hari</div>
-      ${canDo?`<div class="row" style="margin-top:6px"><button class="btn btn-teal btn-sm" onclick="doneMtc(${s.id},${s.interval_days})">✓ Tandai Selesai Dikerjakan</button>
+      ${active?`<div class="small" style="color:var(--teal-d);font-weight:700;margin-top:4px">⏱ Sedang dikerjakan oleh ${uname(active.done_by)} sejak ${fdt(active.start_time)}</div>`:''}
+      ${canDo?`<div class="row" style="margin-top:6px">
+        ${active
+          ? `<button class="btn btn-teal btn-sm" onclick="finishMtc(${active.id},${s.id},${s.interval_days})">✓ Selesai Dikerjakan</button>`
+          : `<button class="btn btn-navy btn-sm" onclick="startMtc(${s.id})">▶ Mulai Kerjakan</button>`}
         ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="delMtc(${s.id})">Nonaktifkan</button>`:''}</div>`:''}</div>`;
   });
   $('mtcList').innerHTML = h;
@@ -1178,17 +1295,132 @@ async function createMtc(){
     task_name:n,interval_days:Number($('nmInt').value)||30,next_due:$('nmDue').value}).select());
   closeModal(); toast('Jadwal tersimpan'); loadMtc();
 }
-async function doneMtc(id,interval){
+async function startMtc(scheduleId){
+  await q(db.from('maintenance_logs').insert({schedule_id:scheduleId, done_by:me.id, start_time:new Date().toISOString()}).select());
+  toast('Pekerjaan dimulai, jam tercatat'); loadMtc();
+}
+async function finishMtc(logId, scheduleId, interval){
   const note = prompt('Catatan pengerjaan (opsional):') || null;
-  await q(db.from('maintenance_logs').insert({schedule_id:id,done_date:today(),done_by:me.id,note}).select());
-  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval)}).eq('id',id));
-  toast('Maintenance dicatat, jadwal berikutnya dibuat'); loadMtc();
+  await q(db.from('maintenance_logs').update({end_time:new Date().toISOString(), done_date:today(), note}).eq('id',logId));
+  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval)}).eq('id',scheduleId));
+  toast('Pekerjaan selesai, jam kerja tercatat'); loadMtc();
 }
 async function delMtc(id){
   if(!confirm('Nonaktifkan jadwal ini?'))return;
   await q(db.from('maintenance_schedules').update({active:false}).eq('id',id));
   loadMtc();
 }
+
+/* ================= LEMBUR (PENGAJUAN + PERSETUJUAN) ================= */
+// Lembur WAJIB diajukan & disetujui SEBELUM dikerjakan. SPV tertentu bisa
+// diberi hak menyetujui (can_approve_lembur); kalau departemennya tidak
+// punya SPV berhak, pengajuan otomatis jadi urusan Manager/Owner.
+function empoweredSpvFor(dept){
+  return profilesCache.find(p=>p.role==='spv' && p.department===dept && p.can_approve_lembur && p.active);
+}
+function myApprovableDepts(){
+  if(isMgr()) return null; // null = semua dept (mgr/owner lihat semua)
+  if(me.role==='spv' && me.can_approve_lembur && me.department) return [me.department];
+  return [];
+}
+async function renderLembur(){
+  const canApproveAny = isMgr() || (me.role==='spv' && me.can_approve_lembur);
+  const canViewAll = isMgr() || me.role==='hrd';
+  let h = `<h2>Pengajuan Lembur</h2>
+    <div class="row" style="margin-bottom:12px;justify-content:space-between">
+      <div class="filters">
+        <select id="lbFilter" onchange="loadLembur()">
+          <option value="mine">Pengajuan Saya</option>
+          ${canApproveAny?'<option value="approve">Perlu Persetujuan Saya</option>':''}
+          ${canViewAll?'<option value="all">Semua</option>':''}
+        </select>
+      </div>
+      ${canViewAll?`<button class="btn btn-ghost" onclick="exportLemburExcel()">⬇ Excel</button>`:''}
+      ${isFieldWorker()?`<button class="btn btn-teal" onclick="newLemburModal()">+ Ajukan Lembur</button>`:''}
+    </div><div id="lemburList"></div>`;
+  $('main').innerHTML = h;
+  $('lbFilter').value = canViewAll ? 'all' : 'mine';
+  loadLembur();
+}
+const LSTAT = {diajukan:{l:'Menunggu Persetujuan',c:'#FEF3C7',t:'#92400E'}, disetujui:{l:'Disetujui',c:'#DCFCE7',t:'#166534'}, ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'}};
+async function loadLembur(){
+  const f = $('lbFilter').value;
+  let query = db.from('overtime_requests').select('*').order('requested_date',{ascending:false}).limit(200);
+  if(f==='mine') query = query.eq('staff_id', me.id);
+  else if(f==='approve'){
+    if(isMgr()) query = query.eq('status','diajukan');
+    else query = query.eq('status','diajukan').eq('department', me.department);
+  }
+  const list = await q(query);
+  $('lemburList').innerHTML = list.length ? list.map(lemburRow).join('') : '<p class="muted">Tidak ada pengajuan.</p>';
+}
+function lemburRow(r){
+  const st = LSTAT[r.status];
+  return `<div class="item" style="border-left-color:${DEPTS[r.department]?.color||'#999'}" onclick="openLembur(${r.id})">
+    <div class="row" style="justify-content:space-between">
+      <div>${deptTag(r.department)} <b>${uname(r.staff_id)}</b></div>
+      <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+    <div class="small muted">${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'} · ${esc(r.reason)}</div></div>`;
+}
+function newLemburModal(){
+  const d0 = me.department && DEPTS[me.department] ? me.department : 'pool';
+  openModal(`<div class="mhead"><h3>Ajukan Lembur</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small muted">Ajukan SEBELUM lembur dikerjakan. Butuh persetujuan SPV berhak atau Manager/Owner.</p>
+    <label>Departemen</label><select id="lbDept">${deptOptions(d0)}</select>
+    <label>Tanggal</label><input type="date" id="lbDate" value="${today()}">
+    <div class="grid2"><div><label>Rencana Mulai</label><input type="time" id="lbStart"></div>
+    <div><label>Rencana Selesai</label><input type="time" id="lbEnd"></div></div>
+    <label>Alasan</label><textarea id="lbReason" rows="3" placeholder="pekerjaan apa yang perlu diselesaikan lembur..."></textarea>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitLembur()">Ajukan</button>`);
+}
+async function submitLembur(){
+  const reason = $('lbReason').value.trim();
+  if(!reason){ toast('Alasan wajib diisi'); return; }
+  await q(db.from('overtime_requests').insert({
+    staff_id: me.id, department: $('lbDept').value, requested_date: $('lbDate').value,
+    planned_start: $('lbStart').value||null, planned_end: $('lbEnd').value||null, reason
+  }).select());
+  closeModal(); toast('Pengajuan lembur terkirim'); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
+}
+async function openLembur(id){
+  const [r] = await q(db.from('overtime_requests').select('*').eq('id',id));
+  const canDecide = isMgr() || (me.role==='spv' && me.can_approve_lembur && me.department===r.department);
+  let h = `<div class="mhead"><h3>Pengajuan Lembur</h3><button onclick="closeModal()">✕</button></div>
+    <div class="row">${deptTag(r.department)} <span class="badge" style="background:${LSTAT[r.status].c};color:${LSTAT[r.status].t}">${LSTAT[r.status].l}</span></div>
+    <p class="small muted">Diajukan oleh ${uname(r.staff_id)} · ${fdt(r.created_at)}</p>
+    <p class="small"><b>Tanggal:</b> ${fdate(r.requested_date)}<br>
+    <b>Rencana Jam:</b> ${r.planned_start||'-'} – ${r.planned_end||'-'}<br>
+    <b>Alasan:</b> ${esc(r.reason)}</p>`;
+  if(r.status==='diajukan' && canDecide){
+    h += `<div class="row" style="margin-top:12px">
+      <button class="btn btn-teal btn-sm" onclick="decideLembur(${r.id},true)">✓ Setujui</button>
+      <button class="btn btn-ghost btn-sm" onclick="decideLembur(${r.id},false)">Tolak</button></div>`;
+  }
+  if(r.status!=='diajukan'){
+    h += `<p class="small muted" style="margin-top:8px">Diputuskan oleh ${uname(r.approver_id)} · ${fdt(r.decided_at)}${r.decision_note?' — '+esc(r.decision_note):''}</p>`;
+  }
+  if(r.status==='disetujui'){
+    h += `<div style="margin-top:12px"><label>Jam Aktual Lembur (diisi setelah selesai dikerjakan)</label>
+      <div class="row"><input id="lbActual" type="number" step="0.5" placeholder="mis. 2.5" value="${r.actual_hours??''}" style="flex:1">
+      <button class="btn btn-ghost btn-sm" onclick="saveActualLembur(${r.id})">Simpan</button></div>
+      ${r.actual_hours!=null?`<p class="small muted">Terakhir diisi oleh ${uname(r.actual_filled_by)} · ${fdt(r.actual_filled_at)}</p>`:''}</div>`;
+  }
+  openModal(h);
+}
+async function decideLembur(id, approve){
+  let note = null;
+  if(!approve){ note = prompt('Alasan penolakan (opsional):') || null; }
+  await q(db.from('overtime_requests').update({
+    status: approve?'disetujui':'ditolak', approver_id: me.id, decided_at: new Date().toISOString(), decision_note: note
+  }).eq('id',id));
+  toast(approve?'Lembur disetujui':'Lembur ditolak'); openLembur(id); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
+}
+async function saveActualLembur(id){
+  const val = $('lbActual').value;
+  await q(db.from('overtime_requests').update({actual_hours: val===''?null:Number(val), actual_filled_by: me.id, actual_filled_at: new Date().toISOString()}).eq('id',id));
+  toast('Jam aktual tersimpan'); openLembur(id); if(page==='lembur') loadLembur();
+}
+
 /* ================= REKAP BULANAN ================= */
 async function renderRekap(){
   const m = today().slice(0,7);
@@ -1260,27 +1492,119 @@ async function loadRekap(){
   $('rkArea').innerHTML = h;
 }
 
+/* ================= HALAMAN HRD (Tahap 1: dasar dulu) ================= */
+// Rekap absensi/lembur/treatment otomatis menyusul di Tahap 3-4 setelah
+// sistem absensi kios & scanner selesai dibangun. Untuk sekarang: ringkasan
+// karyawan + input manual jam kerja/biaya (sudah bisa dipakai berdiri sendiri).
+async function renderHrd(){
+  const m = today().slice(0,7);
+  $('main').innerHTML = `<h2>HRD</h2>
+    <p class="small muted" style="margin-bottom:10px">Rekap otomatis absensi, lembur, dan treatment akan muncul di sini setelah sistem kios &amp; scanner selesai (tahap pembangunan berikutnya). Untuk sekarang, gunakan input manual di bawah.</p>
+    <div class="card"><label>Periode</label><input type="month" id="hrMonth" value="${m}" onchange="loadHrdPayroll()"></div>
+    <div id="hrArea"></div>`;
+  loadHrdPayroll();
+}
+async function loadHrdPayroll(){
+  const m = $('hrMonth').value;
+  const staffList = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active);
+  const adjustments = await q(db.from('payroll_adjustments').select('*').eq('period_month', m));
+  let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Input Manual Jam Kerja, Lembur &amp; Treatment</h3>
+    <button class="btn btn-ghost btn-sm" onclick="exportPayrollExcel()">⬇ Excel</button></div>
+    <table class="respTable"><tr><th>Nama</th><th>Dept</th><th>Jam Kerja</th><th>Biaya Lembur (Rp)</th><th>Biaya Treatment (Rp)</th><th>Catatan</th><th></th></tr>`;
+  staffList.forEach(p=>{
+    const adj = adjustments.find(a=>a.staff_id===p.id) || {};
+    h += `<tr><td data-label="Nama">${esc(p.name)}</td><td data-label="Dept">${p.department?divTag(p.department):'-'}</td>
+      <td data-label="Jam Kerja"><input id="pj-${p.id}" type="number" step="0.5" value="${adj.jam_kerja_manual??''}" style="width:90px"></td>
+      <td data-label="Biaya Lembur"><input id="pb-${p.id}" type="number" value="${adj.biaya_lembur_manual??''}" style="width:110px"></td>
+      <td data-label="Biaya Treatment"><input id="pt-${p.id}" type="number" value="${adj.biaya_treatment_manual??''}" style="width:110px"></td>
+      <td data-label="Catatan"><input id="pc-${p.id}" value="${esc(adj.catatan||'')}" style="min-width:120px"></td>
+      <td><button class="btn-sm btn-teal" onclick="savePayroll('${p.id}','${m}')">Simpan</button></td></tr>`;
+  });
+  h += `</table></div>`;
+  $('hrArea').innerHTML = h;
+}
+async function savePayroll(staffId, periodMonth){
+  const jam = $('pj-'+staffId).value, biaya = $('pb-'+staffId).value, biayaT = $('pt-'+staffId).value, cat = $('pc-'+staffId).value.trim();
+  await q(db.from('payroll_adjustments').upsert({
+    staff_id: staffId, period_month: periodMonth,
+    jam_kerja_manual: jam===''?null:Number(jam), biaya_lembur_manual: biaya===''?null:Number(biaya),
+    biaya_treatment_manual: biayaT===''?null:Number(biayaT),
+    catatan: cat||null, input_by: me.id
+  }, {onConflict:'staff_id,period_month'}).select());
+  toast('Data payroll tersimpan');
+}
+async function exportPayrollExcel(){
+  const m = $('hrMonth').value;
+  const list = await q(db.from('payroll_adjustments').select('*').eq('period_month', m));
+  const rows = list.map(a=>({
+    Nama: uname(a.staff_id), Periode: a.period_month,
+    'Jam Kerja': a.jam_kerja_manual??'', 'Biaya Lembur': a.biaya_lembur_manual??'',
+    'Biaya Treatment': a.biaya_treatment_manual??'', Catatan: a.catatan||''
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Payroll');
+  XLSX.writeFile(wb, `Payroll_${m}.xlsx`);
+}
+
 /* ================= CHECKLIST (Manager/Owner) ================= */
 async function renderChecklist(){
-  $('main').innerHTML = `<h2>Kelola Checklist Harian</h2>
+  $('main').innerHTML = `<h2>Checklist &amp; Shift</h2>
     <div class="card"><label>Departemen</label>
-    <select id="ckDept" onchange="loadCk()">${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+    <select id="ckDept" onchange="loadShiftMgmt();loadCk()">${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select></div>
+
+    <div class="card"><h3>Shift Departemen Ini</h3>
+    <p class="small muted">Kosongkan (jangan tambah shift) kalau departemen ini cukup 1 log per hari seperti biasa.</p>
+    <div id="shiftList"></div>
+    <div class="row" style="margin-top:12px">
+      <input id="shNew" placeholder="nama shift, mis. Shift 1" style="flex:1">
+      <input id="shStart" type="time" style="width:110px">
+      <input id="shEnd" type="time" style="width:110px">
+      <button class="btn btn-teal" onclick="addShift()">Tambah</button></div></div>
+
+    <div class="card"><h3>Checklist</h3>
+    <label>Berlaku untuk Shift</label><select id="ckShift"><option value="">Semua shift / umum</option></select>
     <div id="ckList" style="margin-top:12px"></div>
     <div class="row" style="margin-top:12px"><input id="ckNew" placeholder="item checklist baru..." style="flex:1">
     <button class="btn btn-teal" onclick="addCk()">Tambah</button></div></div>`;
-  loadCk();
+  loadShiftMgmt(); loadCk();
+}
+async function loadShiftMgmt(){
+  const d = $('ckDept').value;
+  const shifts = await q(db.from('shifts').select('*').eq('department',d).eq('active',true).order('sort_order'));
+  window._ckShifts = shifts;
+  $('shiftList').innerHTML = shifts.length ? shifts.map(s=>
+    `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
+      <span>${esc(s.shift_name)} ${s.start_time?`<span class="small muted">(${s.start_time.slice(0,5)}-${s.end_time?s.end_time.slice(0,5):'?'})</span>`:''}</span>
+      <button class="btn-sm btn-ghost" onclick="delShift(${s.id})">Hapus</button></div>`).join('')
+    : '<p class="muted small">Departemen ini belum pakai sistem shift (1 log per hari).</p>';
+  $('ckShift').innerHTML = '<option value="">Semua shift / umum</option>' +
+    shifts.map(s=>`<option value="${s.id}">${esc(s.shift_name)}</option>`).join('');
+}
+async function addShift(){
+  const t=$('shNew').value.trim(); if(!t){toast('Nama shift wajib');return;}
+  await q(db.from('shifts').insert({department:$('ckDept').value, shift_name:t,
+    start_time:$('shStart').value||null, end_time:$('shEnd').value||null}).select());
+  $('shNew').value=''; $('shStart').value=''; $('shEnd').value='';
+  toast('Shift ditambahkan'); loadShiftMgmt();
+}
+async function delShift(id){
+  if(!confirm('Hapus shift ini? Checklist yang terikat ke shift ini juga akan ikut hilang.'))return;
+  await q(db.from('shifts').update({active:false}).eq('id',id));
+  loadShiftMgmt(); loadCk();
 }
 async function loadCk(){
-  const items = await q(db.from('checklist_items').select('*').eq('department',$('ckDept').value).eq('active',true).order('sort_order'));
+  const d = $('ckDept').value;
+  const items = await q(db.from('checklist_items').select('*').eq('department',d).eq('active',true).order('sort_order'));
   $('ckList').innerHTML = items.length ? items.map(i=>
     `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
-      <span>${esc(i.item_text)}</span>
+      <span>${esc(i.item_text)} ${i.shift_id?`<span class="badge" style="background:#E0E7FF;color:#4338CA">${esc((window._ckShifts||[]).find(s=>s.id===i.shift_id)?.shift_name||'shift #'+i.shift_id)}</span>`:'<span class="badge" style="background:#F3F4F6;color:#6B7280">Semua shift</span>'}</span>
       <button class="btn-sm btn-ghost" onclick="delCk(${i.id})">Hapus</button></div>`).join('')
     : '<p class="muted small">Belum ada item untuk departemen ini.</p>';
 }
 async function addCk(){
   const t=$('ckNew').value.trim(); if(!t)return;
-  await q(db.from('checklist_items').insert({department:$('ckDept').value,item_text:t}).select());
+  await q(db.from('checklist_items').insert({department:$('ckDept').value, item_text:t, shift_id:$('ckShift').value||null}).select());
   $('ckNew').value=''; loadCk();
 }
 async function delCk(id){
@@ -1317,12 +1641,15 @@ async function delCatalog(id){
 async function renderUsers(){
   profilesCache = await q(db.from('profiles').select('*').order('created_at'));
   let h = `<h2>Kelola Pengguna</h2>
-  <p class="small muted" style="margin-bottom:10px">Buat akun baru di Supabase Dashboard → Authentication → Add User (centang Auto Confirm). Setelah user login pertama kali / dibuat, atur role &amp; departemennya di sini.</p>`;
-  h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Role</th><th>Dept</th><th>Aktif</th><th></th></tr>`;
+  <p class="small muted" style="margin-bottom:10px">Role <b>Staff</b> setara SPV untuk departemennya (dipakai saat SPV tidak ada). Role <b>Kios Absensi</b> khusus perangkat HP penampil QR absen. Role <b>HRD</b> kelola karyawan &amp; halaman HRD, tidak akses modul operasional.</p>
+  <button class="btn btn-teal" style="margin-bottom:12px" onclick="newEmployeeModal()">+ Daftarkan Karyawan Baru</button>`;
+  h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Username</th><th>Role</th><th>Dept</th>${isMgr()?'<th>Boleh Setujui Lembur</th>':''}<th>Aktif</th><th></th></tr>`;
   profilesCache.forEach(p=>{
     h += `<tr><td data-label="Nama"><input value="${esc(p.name)}" id="un-${p.id}" style="padding:5px 8px;min-width:110px"></td>
+      <td data-label="Username" class="small muted">${esc(p.username||'-')}</td>
       <td data-label="Role"><select id="ur-${p.id}" style="padding:5px 8px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${p.role===k?'selected':''}>${v}</option>`).join('')}</select></td>
       <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(DIVS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
+      ${isMgr()?`<td data-label="Boleh Setujui Lembur">${p.role==='spv'?`<input type="checkbox" id="uc-${p.id}" ${p.can_approve_lembur?'checked':''} style="width:18px;height:18px">`:'<span class="small muted">-</span>'}</td>`:''}
       <td data-label="Aktif"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''} style="width:18px;height:18px"></td>
       <td><button class="btn-sm btn-teal" style="width:100%" onclick="saveUser('${p.id}')">Simpan</button></td></tr>`;
   });
@@ -1330,10 +1657,68 @@ async function renderUsers(){
   $('main').innerHTML = h;
 }
 async function saveUser(id){
-  await q(db.from('profiles').update({name:$('un-'+id).value.trim(), role:$('ur-'+id).value,
-    department:$('ud-'+id).value||null, active:$('ua-'+id).checked}).eq('id',id));
+  const upd = {name:$('un-'+id).value.trim(), role:$('ur-'+id).value,
+    department:$('ud-'+id).value||null, active:$('ua-'+id).checked};
+  const cbEl = $('uc-'+id);
+  if(cbEl) upd.can_approve_lembur = cbEl.checked; // hanya ada di DOM untuk viewer Manager/Owner
+  await q(db.from('profiles').update(upd).eq('id',id));
   toast('Pengguna diperbarui');
   profilesCache = await q(db.from('profiles').select('*'));
+  if(id===me.id) me = profilesCache.find(p=>p.id===me.id);
+}
+
+/* ---------- Daftarkan Karyawan Baru (tanpa buka Supabase) ---------- */
+function newEmployeeModal(){
+  openModal(`<div class="mhead"><h3>Daftarkan Karyawan Baru</h3><button onclick="closeModal()">✕</button></div>
+    <label>Nama Lengkap</label><input id="neName" placeholder="mis. Budi Santoso">
+    <label>Username (huruf kecil, tanpa spasi)</label><input id="neUser" placeholder="mis. budi.pool" autocapitalize="off">
+    <label>Role</label><select id="neRole">${Object.entries(ROLES).filter(([k])=>k!=='kiosk'||isMgr()).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
+    <label>Departemen (kosongkan untuk role non-operasional)</label>
+    <select id="neDept"><option value="">-</option>${Object.entries(DIVS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+    <label>Password Awal (min. 6 karakter)</label><input id="nePass" type="text" placeholder="mis. aa12345">
+    <p class="small muted" style="margin-top:6px">Sampaikan username &amp; password ini ke karyawan secara langsung. Mereka bisa ganti password sendiri setelah login pertama.</p>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitNewEmployee()">Daftarkan</button>`);
+}
+async function submitNewEmployee(){
+  const name = $('neName').value.trim();
+  const usernameRaw = $('neUser').value.trim().toLowerCase();
+  const role = $('neRole').value;
+  const department = $('neDept').value || null;
+  const pass = $('nePass').value;
+  if(!name){ toast('Nama wajib diisi'); return; }
+  if(!/^[a-z0-9._-]{3,30}$/.test(usernameRaw)){ toast('Username hanya huruf kecil/angka/titik/garis, 3-30 karakter'); return; }
+  if(pass.length < 6){ toast('Password minimal 6 karakter'); return; }
+  const existing = await q(db.from('profiles').select('id').eq('username',usernameRaw));
+  if(existing.length){ toast('Username sudah dipakai, pilih yang lain'); return; }
+  const email = `${usernameRaw}@${SYNTH_EMAIL_DOMAIN}`;
+  // Pakai koneksi Supabase TERPISAH khusus untuk signUp ini, supaya sesi
+  // login diri sendiri (HRD/Manager/Owner) tidak ikut tergantikan.
+  const tempClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {auth:{persistSession:false}});
+  const {data, error} = await tempClient.auth.signUp({email, password:pass, options:{data:{name}}});
+  if(error){ toast('Gagal daftar: '+error.message); return; }
+  const newId = data.user?.id;
+  if(!newId){ toast('Gagal mendapatkan akun baru, coba lagi'); return; }
+  // Trigger di database otomatis bikin baris profiles dasar; sekarang lengkapi.
+  await q(db.from('profiles').update({username:usernameRaw, role, department, active:true}).eq('id',newId));
+  closeModal(); toast('Karyawan berhasil didaftarkan');
+  profilesCache = await q(db.from('profiles').select('*'));
+  if(page==='users') renderUsers();
+}
+
+/* ---------- Ganti Password Sendiri ---------- */
+function changePasswordModal(){
+  openModal(`<div class="mhead"><h3>Ganti Password</h3><button onclick="closeModal()">✕</button></div>
+    <label>Password Baru (min. 6 karakter)</label><input id="cpNew" type="password">
+    <label>Ulangi Password Baru</label><input id="cpConfirm" type="password">
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitChangePassword()">Simpan Password</button>`);
+}
+async function submitChangePassword(){
+  const p1 = $('cpNew').value, p2 = $('cpConfirm').value;
+  if(p1.length < 6){ toast('Password minimal 6 karakter'); return; }
+  if(p1 !== p2){ toast('Konfirmasi password tidak sama'); return; }
+  const {error} = await db.auth.updateUser({password:p1});
+  if(error){ toast('Gagal ganti password: '+error.message); return; }
+  closeModal(); toast('Password berhasil diganti');
 }
 
 /* Enter untuk login */
