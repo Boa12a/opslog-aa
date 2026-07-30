@@ -16,6 +16,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <style>
 :root{
   --bg:#F2F5F4; --surface:#FFFFFF; --ink:#16232E; --muted:#64748B; --line:#E3E9E8;
@@ -287,13 +288,10 @@ async function init(){
   if(!me || !me.active){ toast('Akun tidak aktif. Hubungi HRD/Owner.'); await db.auth.signOut(); return; }
   $('loginView').classList.add('hidden'); $('appView').classList.remove('hidden');
 
-  // Mode Kios: perangkat khusus untuk absensi. Layar QR berputar akan
-  // dibangun di Tahap 3 — untuk sekarang tampilkan status sederhana saja.
+  // Mode Kios: perangkat khusus, layar QR berputar penuh, tanpa menu lain.
   if(me.role==='kiosk'){
     $('topbar').classList.add('hidden'); $('nav').classList.add('hidden');
-    $('main').innerHTML = `<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--navy);color:#fff;text-align:center;padding:20px">
-      <div><div style="font-size:20px;font-weight:800">Mode Kios Absensi</div>
-      <p class="small" style="opacity:.75;margin-top:8px">Fitur QR absensi akan aktif di pembaruan berikutnya (Tahap 3).</p></div></div>`;
+    renderKioskScreen();
     return;
   }
   $('topbar').classList.remove('hidden'); $('nav').classList.remove('hidden');
@@ -305,7 +303,7 @@ async function init(){
 }
 
 function buildNav(){
-  let tabs = [['dashboard','Dashboard']];
+  let tabs = [['dashboard','Dashboard'],['absen','Absen']];
   // "Field worker" hanya dapat tab operasional kalau departemennya salah satu
   // dari 6 departemen operasional (bukan sekadar role spv/staff) — supaya
   // SPV/Staff di HR atau Accounting tidak ikut kebagian tab ini.
@@ -329,7 +327,263 @@ function go(p){
   document.querySelectorAll('#nav button').forEach(b=>b.classList.remove('on'));
   const nb=$('nav-'+p); if(nb) nb.classList.add('on');
   $('main').innerHTML = '<p class="muted">Memuat...</p>';
-  ({dashboard:renderDashboard,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers})[p]();
+  ({dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers})[p]();
+}
+
+/* ================= KIOS ABSENSI (generate QR) ================= */
+// Dipakai oleh: (a) akun role 'kiosk' (permanen, mengambil alih seluruh layar),
+// dan (b) HRD/Manager/Owner lewat "Kios Darurat" (bisa keluar kapan saja).
+let _kioskTimer = null;
+function randomToken(){
+  return Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function renderKioskScreen(isEmergency){
+  const wa = await q(db.from('app_settings').select('*').eq('key','wa_hrd_darurat'));
+  const waNum = wa[0]?.value || '';
+  $('main').innerHTML = `
+    <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--navy);color:#fff;text-align:center;padding:20px">
+      <div style="font-size:20px;font-weight:800;margin-bottom:4px">Absensi ${me.department?(ALL_STAFF_DEPTS[me.department]?.label||me.department):''}</div>
+      <div class="small" style="opacity:.75;margin-bottom:18px">Buka menu <b>Absen</b> di aplikasi masing-masing, lalu pindai QR ini</div>
+      <div id="kioskQrBox" style="background:#fff;padding:18px;border-radius:16px"><p style="color:#333">Memuat QR...</p></div>
+      <div class="small" style="opacity:.6;margin-top:16px">Kode berganti otomatis tiap 10 detik</div>
+      <div class="small" style="opacity:.6;margin-top:10px" id="kioskLast"></div>
+      <div class="small" style="opacity:.55;margin-top:24px;max-width:320px">Jika aplikasi/HP bermasalah: foto selfie + kirim ke WhatsApp HRD${waNum?` (<b>${esc(waNum)}</b>)`:''} sebagai bukti, HRD akan catatkan manual.</div>
+      ${isEmergency?`<button class="btn btn-ghost" style="margin-top:20px" onclick="exitEmergencyKiosk()">Keluar dari Mode Kios</button>`:''}
+    </div>`;
+  await kioskNewToken();
+  clearInterval(_kioskTimer);
+  _kioskTimer = setInterval(kioskNewToken, 10000);
+}
+async function kioskNewToken(){
+  const token = randomToken();
+  await q(db.from('attendance_qr_tokens').insert({token, department: me.department||null, created_by: me.id}).select());
+  const canvas = document.createElement('canvas');
+  await QRCode.toCanvas(canvas, token, {width:260, margin:2});
+  const box = $('kioskQrBox'); if(box){ box.innerHTML=''; box.appendChild(canvas); }
+  const recent = await q(db.from('attendance_logs').select('*').order('scanned_at',{ascending:false}).limit(1));
+  if(recent.length && $('kioskLast')){
+    const r = recent[0];
+    $('kioskLast').textContent = `Terakhir tercatat: ${uname(r.staff_id)} · ${fdt(r.scanned_at)}`;
+  }
+}
+function activateEmergencyKiosk(){
+  clearInterval(_kioskTimer);
+  $('topbar').classList.add('hidden'); $('nav').classList.add('hidden');
+  renderKioskScreen(true);
+}
+function exitEmergencyKiosk(){
+  clearInterval(_kioskTimer);
+  $('topbar').classList.remove('hidden'); $('nav').classList.remove('hidden');
+  go('dashboard');
+}
+
+/* ================= ABSEN (isi data dulu, baru scan) ================= */
+const ABSEN_TYPES = {
+  kehadiran_mulai:{l:'Absen Datang', kategori:'kehadiran', fase:'mulai'},
+  kehadiran_selesai:{l:'Absen Pulang', kategori:'kehadiran', fase:'selesai'},
+  lembur_mulai:{l:'Mulai Lembur', kategori:'lembur', fase:'mulai'},
+  lembur_selesai:{l:'Selesai Lembur', kategori:'lembur', fase:'selesai'},
+  treatment_mulai:{l:'Mulai Treatment', kategori:'treatment', fase:'mulai'},
+  treatment_selesai:{l:'Selesai Treatment', kategori:'treatment', fase:'selesai'}
+};
+async function renderAbsen(){
+  let h = `<h2>Absen</h2>
+    <div class="card">
+    <label>Jenis Pencatatan</label>
+    <select id="abType" onchange="loadAbsenExtra()">${Object.entries(ABSEN_TYPES).map(([k,v])=>`<option value="${k}">${v.l}</option>`).join('')}</select>
+    <div id="abExtra"></div>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="openScanner()">📷 Pindai QR di Kios untuk Konfirmasi</button>
+    </div>
+    <div class="card"><h3>Riwayat Absen Saya (7 Hari Terakhir)</h3><div id="abHist"></div></div>`;
+  if(isHrdOrMgr()){
+    h += `<div class="card"><button class="btn btn-navy" style="width:100%" onclick="activateEmergencyKiosk()">🖥 Aktifkan Kios Darurat (HP ini jadi layar QR)</button>
+    <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="manualAttendModal()">+ Input Absen Manual (untuk HP karyawan bermasalah)</button></div>`;
+  }
+  $('main').innerHTML = h;
+  loadAbsenExtra();
+  loadAbsenHist();
+}
+async function loadAbsenExtra(){
+  const type = ABSEN_TYPES[$('abType').value];
+  let h = '';
+  if(type.kategori==='kehadiran' && me.department){
+    const shifts = await q(db.from('shifts').select('*').eq('department',me.department).eq('active',true).order('sort_order'));
+    if(shifts.length){
+      h += `<label>Shift</label><select id="abShift">${shifts.map(s=>`<option value="${s.id}">${esc(s.shift_name)}</option>`).join('')}</select>`;
+    }
+  }
+  if(type.kategori==='treatment'){
+    const pools = await q(db.from('pool_types').select('*').eq('active',true).order('sort_order'));
+    h += `<label>Jenis Kolam</label><select id="abPool">${pools.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>`;
+  }
+  $('abExtra').innerHTML = h;
+}
+async function loadAbsenHist(){
+  const from = addDays(today(),-7);
+  const list = await q(db.from('attendance_logs').select('*').eq('staff_id',me.id).gte('scanned_at',from).order('scanned_at',{ascending:false}));
+  let h = list.length ? '<table class="respTable"><tr><th>Waktu</th><th>Jenis</th><th>Ket.</th></tr>' : '<p class="muted small">Belum ada riwayat.</p>';
+  list.forEach(a=>{
+    const label = Object.values(ABSEN_TYPES).find(t=>t.kategori===a.kategori&&t.fase===a.fase)?.l || `${a.kategori}/${a.fase}`;
+    let ket = a.input_method==='manual' ? 'Input manual' : '';
+    if(a.kategori==='lembur' && !a.overtime_request_id) ket = (ket?ket+' · ':'')+'Tanpa Izin';
+    if(a.checklist_complete_snapshot===false) ket = (ket?ket+' · ':'')+'⚠ Checklist belum lengkap';
+    h += `<tr><td data-label="Waktu">${fdt(a.scanned_at)}</td><td data-label="Jenis">${label}</td><td data-label="Ket." class="small muted">${ket||'-'}</td></tr>`;
+  });
+  if(list.length) h += '</table>';
+  $('abHist').innerHTML = h;
+}
+
+/* ---------- Scanner kamera di dalam aplikasi ---------- */
+let _scanStream = null, _scanRAF = null;
+function openScanner(){
+  openModal(`<div class="mhead"><h3>Pindai QR Kios</h3><button onclick="closeScanner()">✕</button></div>
+    <video id="scanVideo" style="width:100%;border-radius:12px;background:#000" playsinline muted></video>
+    <canvas id="scanCanvas" class="hidden"></canvas>
+    <p class="small muted" style="margin-top:10px">Arahkan kamera ke layar HP kios yang menampilkan QR berputar.</p>
+    <p id="scanStatus" class="small" style="margin-top:6px"></p>`);
+  startScanner();
+}
+async function startScanner(){
+  try{
+    _scanStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    const video = $('scanVideo');
+    video.srcObject = _scanStream;
+    await video.play();
+    scanLoop();
+  }catch(err){
+    $('scanStatus').textContent = 'Tidak bisa akses kamera: '+err.message;
+  }
+}
+function scanLoop(){
+  const video = $('scanVideo'), canvas = $('scanCanvas');
+  if(!video || !canvas){ return; }
+  if(video.readyState === video.HAVE_ENOUGH_DATA){
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
+    const code = jsQR(imgData.data, imgData.width, imgData.height);
+    if(code && code.data){
+      stopScanner();
+      handleScannedToken(code.data.trim());
+      return;
+    }
+  }
+  _scanRAF = requestAnimationFrame(scanLoop);
+}
+function stopScanner(){
+  if(_scanRAF) cancelAnimationFrame(_scanRAF);
+  if(_scanStream) _scanStream.getTracks().forEach(t=>t.stop());
+  _scanStream = null;
+}
+function closeScanner(){ stopScanner(); closeModal(); }
+
+async function handleScannedToken(token){
+  const rows = await q(db.from('attendance_qr_tokens').select('*').eq('token',token));
+  const tk = rows[0];
+  const cutoff = new Date(Date.now()-10000).toISOString();
+  if(!tk || tk.created_at < cutoff){
+    toast('Kode sudah kedaluwarsa, coba pindai lagi QR yang sedang tampil');
+    closeModal(); return;
+  }
+  await submitAttendance(tk.id);
+}
+async function submitAttendance(tokenId){
+  const type = ABSEN_TYPES[$('abType')?.value || 'kehadiran_mulai'];
+  const shiftEl = $('abShift'), poolEl = $('abPool');
+  const shiftId = shiftEl ? Number(shiftEl.value) : null;
+  const poolId = poolEl ? Number(poolEl.value) : null;
+
+  // Cegah dobel-scan tidak sengaja (<2 menit)
+  const since = new Date(Date.now()-2*60000).toISOString();
+  const dup = await q(db.from('attendance_logs').select('id').eq('staff_id',me.id)
+    .eq('kategori',type.kategori).eq('fase',type.fase).gte('scanned_at',since));
+  if(dup.length){ toast('Sudah tercatat baru saja, tidak perlu diulang'); closeModal(); return; }
+
+  // Peringatan lembut kalau "Selesai" tanpa "Mulai" yang cocok
+  if(type.fase==='selesai'){
+    let q2 = db.from('attendance_logs').select('*').eq('staff_id',me.id).eq('kategori',type.kategori).eq('fase','mulai').order('scanned_at',{ascending:false}).limit(1);
+    const mulai = await q(q2);
+    const cocok = mulai.length && (type.kategori!=='treatment' || mulai[0].pool_type_id===poolId);
+    if(!cocok){
+      if(!confirm('Tidak ditemukan sesi "Mulai" yang cocok. Tetap lanjutkan?')){ closeModal(); return; }
+    }
+  }
+
+  const payload = {
+    staff_id: me.id, department: me.department, shift_id: shiftId||null,
+    kategori: type.kategori, fase: type.fase, pool_type_id: poolId||null,
+    token_id: tokenId, input_method:'qr', input_by: me.id
+  };
+
+  // Tautkan ke pengajuan lembur yang disetujui (kalau ada)
+  if(type.kategori==='lembur'){
+    const t0 = today();
+    const ov = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').eq('requested_date',t0));
+    if(ov.length) payload.overtime_request_id = ov[0].id;
+  }
+
+  // Snapshot kelengkapan checklist — hanya untuk SPV, saat Absen Pulang
+  if(type.kategori==='kehadiran' && type.fase==='selesai' && me.role==='spv' && me.department){
+    const t0 = today();
+    let logQuery = db.from('daily_logs').select('*, daily_log_checks(*)').eq('department',me.department).eq('log_date',t0);
+    logQuery = shiftId ? logQuery.eq('shift_id',shiftId) : logQuery.is('shift_id',null);
+    const logs = await q(logQuery);
+    const log = logs[0];
+    const items = await q(db.from('checklist_items').select('id').eq('department',me.department).eq('active',true));
+    const allChecked = log && items.every(it => log.daily_log_checks.find(c=>c.item_id===it.id && c.checked));
+    payload.checklist_complete_snapshot = !!allChecked;
+    if(!allChecked && !confirm('Checklist harian belum lengkap. Tetap lanjut Absen Pulang? (akan ditandai untuk ditinjau)')){
+      closeModal(); return;
+    }
+  }
+
+  await q(db.from('attendance_logs').insert(payload).select());
+  closeModal(); toast('Absen tercatat: '+type.l);
+  if(page==='absen'){ loadAbsenHist(); }
+}
+
+/* ---------- Input manual (HRD/Manager/Owner) ---------- */
+function manualAttendModal(){
+  const staffList = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active);
+  openModal(`<div class="mhead"><h3>Input Absen Manual</h3><button onclick="closeModal()">✕</button></div>
+    <label>Karyawan</label><select id="maStaff">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    <label>Jenis Pencatatan</label><select id="maType" onchange="loadManualExtra()">${Object.entries(ABSEN_TYPES).map(([k,v])=>`<option value="${k}">${v.l}</option>`).join('')}</select>
+    <div id="maExtra"></div>
+    <label>Waktu Kejadian</label><input type="datetime-local" id="maTime" value="${new Date().toISOString().slice(0,16)}">
+    <label>Alasan (wajib)</label><textarea id="maReason" rows="2" placeholder="mis. HP karyawan rusak, bukti selfie dikirim ke WA jam 14:32"></textarea>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitManualAttend()">Simpan</button>`);
+  loadManualExtra();
+}
+async function loadManualExtra(){
+  const type = ABSEN_TYPES[$('maType').value];
+  let h = '';
+  const staffId = $('maStaff').value;
+  const staff = profilesCache.find(p=>p.id===staffId);
+  if(type.kategori==='kehadiran' && staff?.department){
+    const shifts = await q(db.from('shifts').select('*').eq('department',staff.department).eq('active',true).order('sort_order'));
+    if(shifts.length) h += `<label>Shift</label><select id="maShift">${shifts.map(s=>`<option value="${s.id}">${esc(s.shift_name)}</option>`).join('')}</select>`;
+  }
+  if(type.kategori==='treatment'){
+    const pools = await q(db.from('pool_types').select('*').eq('active',true).order('sort_order'));
+    h += `<label>Jenis Kolam</label><select id="maPool">${pools.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>`;
+  }
+  $('maExtra').innerHTML = h;
+}
+async function submitManualAttend(){
+  const reason = $('maReason').value.trim();
+  if(!reason){ toast('Alasan wajib diisi'); return; }
+  const staffId = $('maStaff').value;
+  const staff = profilesCache.find(p=>p.id===staffId);
+  const type = ABSEN_TYPES[$('maType').value];
+  const shiftEl = $('maShift'), poolEl = $('maPool');
+  await q(db.from('attendance_logs').insert({
+    staff_id: staffId, department: staff?.department||null,
+    shift_id: shiftEl?Number(shiftEl.value):null, pool_type_id: poolEl?Number(poolEl.value):null,
+    kategori: type.kategori, fase: type.fase, input_method:'manual', input_by: me.id,
+    scanned_at: new Date($('maTime').value).toISOString(), note: reason
+  }).select());
+  closeModal(); toast('Absen manual tersimpan');
 }
 
 /* ================= DASHBOARD ================= */
@@ -1522,11 +1776,36 @@ async function loadRekap(){
 // karyawan + input manual jam kerja/biaya (sudah bisa dipakai berdiri sendiri).
 async function renderHrd(){
   const m = today().slice(0,7);
+  const wa = await q(db.from('app_settings').select('*').eq('key','wa_hrd_darurat'));
   $('main').innerHTML = `<h2>HRD</h2>
-    <p class="small muted" style="margin-bottom:10px">Rekap otomatis absensi, lembur, dan treatment akan muncul di sini setelah sistem kios &amp; scanner selesai (tahap pembangunan berikutnya). Untuk sekarang, gunakan input manual di bawah.</p>
+    <div class="card"><h3>Nomor WA Darurat (tampil di layar kios)</h3>
+    <div class="row"><input id="waNum" value="${esc(wa[0]?.value||'')}" placeholder="mis. 0812xxxxxxx" style="flex:1">
+    <button class="btn btn-teal btn-sm" onclick="saveWaNumber()">Simpan</button></div></div>
+    ${isMgr()?'<div id="checklistFlagArea"></div>':''}
     <div class="card"><label>Periode</label><input type="month" id="hrMonth" value="${m}" onchange="loadHrdPayroll()"></div>
     <div id="hrArea"></div>`;
+  if(isMgr()) loadWaChecklistFlags();
   loadHrdPayroll();
+}
+async function saveWaNumber(){
+  await q(db.from('app_settings').upsert({key:'wa_hrd_darurat', value:$('waNum').value.trim(), updated_by:me.id, updated_at:new Date().toISOString()}, {onConflict:'key'}).select());
+  toast('Nomor WA darurat tersimpan');
+}
+async function loadWaChecklistFlags(){
+  const list = await q(db.from('attendance_logs').select('*').eq('checklist_complete_snapshot',false).is('reviewed_at',null).order('scanned_at',{ascending:false}));
+  if(!list.length){ $('checklistFlagArea').innerHTML=''; return; }
+  let h = `<div class="card" style="border-left:4px solid var(--gold)"><h3>⚠ Checklist Belum Lengkap Saat Pulang (${list.length})</h3>`;
+  list.forEach(a=>{
+    h += `<div class="item" style="cursor:default">
+      ${a.department?divTag(a.department):''} <b>${uname(a.staff_id)}</b>
+      <div class="small muted">${fdt(a.scanned_at)}</div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="reviewChecklistFlag(${a.id})">Tandai Sudah Ditinjau</button></div>`;
+  });
+  $('checklistFlagArea').innerHTML = h + '</div>';
+}
+async function reviewChecklistFlag(id){
+  await q(db.from('attendance_logs').update({reviewed_by:me.id, reviewed_at:new Date().toISOString()}).eq('id',id));
+  toast('Ditandai sudah ditinjau'); loadWaChecklistFlags();
 }
 async function loadHrdPayroll(){
   const m = $('hrMonth').value;
@@ -1590,8 +1869,32 @@ async function renderChecklist(){
     <label>Berlaku untuk Shift</label><select id="ckShift"><option value="">Semua shift / umum</option></select>
     <div id="ckList" style="margin-top:12px"></div>
     <div class="row" style="margin-top:12px"><input id="ckNew" placeholder="item checklist baru..." style="flex:1">
-    <button class="btn btn-teal" onclick="addCk()">Tambah</button></div></div>`;
-  loadShiftMgmt(); loadCk();
+    <button class="btn btn-teal" onclick="addCk()">Tambah</button></div></div>
+
+    <div class="card"><h3>Jenis Kolam (untuk Treatment)</h3>
+    <p class="small muted">Daftar pilihan kolam yang muncul saat karyawan mencatat Mulai/Selesai Treatment.</p>
+    <div id="poolList"></div>
+    <div class="row" style="margin-top:12px"><input id="poolNew" placeholder="nama kolam, mis. Kolam VIP" style="flex:1">
+    <button class="btn btn-teal" onclick="addPoolType()">Tambah</button></div></div>`;
+  loadShiftMgmt(); loadCk(); loadPoolTypes();
+}
+async function loadPoolTypes(){
+  const pools = await q(db.from('pool_types').select('*').eq('active',true).order('sort_order'));
+  $('poolList').innerHTML = pools.length ? pools.map(p=>
+    `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
+      <span>${esc(p.name)}</span>
+      <button class="btn-sm btn-ghost" onclick="delPoolType(${p.id})">Hapus</button></div>`).join('')
+    : '<p class="muted small">Belum ada jenis kolam.</p>';
+}
+async function addPoolType(){
+  const t=$('poolNew').value.trim(); if(!t){toast('Nama kolam wajib');return;}
+  await q(db.from('pool_types').insert({name:t}).select());
+  $('poolNew').value=''; toast('Jenis kolam ditambahkan'); loadPoolTypes();
+}
+async function delPoolType(id){
+  if(!confirm('Hapus jenis kolam ini?'))return;
+  await q(db.from('pool_types').update({active:false}).eq('id',id));
+  loadPoolTypes();
 }
 async function loadShiftMgmt(){
   const d = $('ckDept').value;
