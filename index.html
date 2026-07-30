@@ -357,15 +357,23 @@ async function renderKioskScreen(isEmergency){
   _kioskTimer = setInterval(kioskNewToken, 10000);
 }
 async function kioskNewToken(){
-  const token = randomToken();
-  await q(db.from('attendance_qr_tokens').insert({token, department: me.department||null, created_by: me.id}).select());
-  const canvas = document.createElement('canvas');
-  await QRCode.toCanvas(canvas, token, {width:260, margin:2});
-  const box = $('kioskQrBox'); if(box){ box.innerHTML=''; box.appendChild(canvas); }
-  const recent = await q(db.from('attendance_logs').select('*').order('scanned_at',{ascending:false}).limit(1));
-  if(recent.length && $('kioskLast')){
-    const r = recent[0];
-    $('kioskLast').textContent = `Terakhir tercatat: ${uname(r.staff_id)} · ${fdt(r.scanned_at)}`;
+  const box = $('kioskQrBox');
+  try{
+    if(typeof QRCode === 'undefined'){ throw new Error('Library QR belum termuat (cek koneksi internet HP kios)'); }
+    const token = randomToken();
+    const {error:insErr} = await db.from('attendance_qr_tokens').insert({token, department: me.department||null, created_by: me.id}).select();
+    if(insErr) throw new Error('Gagal simpan token: '+insErr.message);
+    const canvas = document.createElement('canvas');
+    await QRCode.toCanvas(canvas, token, {width:260, margin:2});
+    if(box){ box.innerHTML=''; box.appendChild(canvas); }
+    const {data:recent} = await db.from('attendance_logs').select('*').order('scanned_at',{ascending:false}).limit(1);
+    if(recent && recent.length && $('kioskLast')){
+      const r = recent[0];
+      $('kioskLast').textContent = `Terakhir tercatat: ${uname(r.staff_id)} · ${fdt(r.scanned_at)}`;
+    }
+  }catch(err){
+    console.error('kioskNewToken error:', err);
+    if(box) box.innerHTML = `<p style="color:#B91C1C;font-size:13px;max-width:220px">Gagal memuat QR:<br>${esc(err.message)}</p>`;
   }
 }
 function activateEmergencyKiosk(){
