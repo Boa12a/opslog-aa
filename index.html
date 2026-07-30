@@ -10212,6 +10212,14 @@ main{overflow-x:hidden}
 table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
 th{text-align:left;font-size:11px;color:var(--muted);text-transform:uppercase;padding:6px 8px;border-bottom:2px solid var(--line);overflow:hidden;text-overflow:ellipsis}
 td{padding:7px 8px;border-bottom:1px solid var(--line);word-break:break-word}
+/* Kalender jadwal kerja: Senin-Minggu, minggu berikutnya lanjut ke bawah */
+table.calGrid{table-layout:fixed;width:100%}
+table.calGrid th{text-align:center;padding:4px 2px;font-size:10px}
+table.calGrid td.calEmpty{border:none;background:transparent}
+table.calGrid td.calCell{border:1px solid var(--line);padding:3px 2px;text-align:center;vertical-align:top}
+table.calGrid .calDate{font-size:10px;color:var(--muted);margin-bottom:2px}
+table.calGrid .calBadge{font-size:12px;font-weight:800;border-radius:5px;padding:3px 0}
+table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700;text-align:center;border-radius:5px}
 /* Di layar kecil, tabel berubah jadi kartu bertumpuk agar tidak ada scroll kiri-kanan */
 @media(max-width:640px){
   table.respTable, table.respTable tbody, table.respTable tr, table.respTable td{display:block;width:100%}
@@ -10309,6 +10317,7 @@ const ALL_STAFF_DEPTS = {...DIVS, hr:{label:'HR',color:'#7C3AED'}};
 // Role murni tingkatan wewenang — HR & Accounting sekarang DEPARTEMEN, bukan role.
 const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',staff:'Staff',kiosk:'Kios Absensi'};
 const TSTAT = {
+  usulan:{l:'Usulan (Menunggu SPV)',c:'#FEF3C7',t:'#92400E'},
   dilaporkan:{l:'Dilaporkan',c:'#E5E7EB',t:'#374151'},
   disetujui:{l:'Disetujui',c:'#DBEAFE',t:'#1D4ED8'},
   ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'},
@@ -10400,10 +10409,19 @@ async function doLogin(){
     // sebelum skema alias Gmail dipakai (tidak perlu ubah apa pun di Supabase).
     const legacyEmail = `${raw}@${LEGACY_EMAIL_DOMAIN}`;
     const retry = await db.auth.signInWithPassword({email:legacyEmail, password:pass});
-    if(!retry.error) error = null;
+    if(!retry.error) error = null; else error = retry.error;
   }
   btn.disabled=false;
-  if(error){ $('loginErr').textContent = 'Login gagal: username atau password salah.'; return; }
+  if(error){
+    console.error('Login error:', error);
+    const msg = (error.message||'').toLowerCase();
+    if(msg.includes('confirm')){
+      $('loginErr').textContent = 'Login gagal: email akun ini belum terkonfirmasi. Minta HRD/Owner cek pengaturan "Confirm email" di Supabase, atau konfirmasi manual akun ini.';
+    } else {
+      $('loginErr').textContent = 'Login gagal ('+(error.message||'tidak diketahui')+'). Cek username/password, atau hubungi HRD.';
+    }
+    return;
+  }
   init();
 }
 async function doLogout(){ await db.auth.signOut(); location.reload(); }
@@ -10434,19 +10452,25 @@ function buildNav(){
   // Selalu tampil di atas, di luar grup — dipakai semua orang tiap hari.
   const top = [['dashboard','Dashboard'],['absen','Absen']];
 
-  const inOpsDept = isFieldWorker() && me.department && DEPTS[me.department];
+  const isSpvOps = me.role==='spv' && me.department && DEPTS[me.department];
+  const isStaffOps = me.role==='staff' && me.department && DEPTS[me.department];
+  const inOpsDept = isSpvOps || isStaffOps; // dipakai untuk hal yang memang sama-sama boleh (Log Harian, Kerusakan-lapor, Jadwal-lihat)
 
   const grupOperasional = [];
-  if(isMgr() || inOpsDept){
+  if(isMgr() || isSpvOps){
+    // SPV (dan Manager/Owner): akses penuh modul operasional.
     grupOperasional.push(['log','Log Harian'],['tiket','Kerusakan'],['aset','Aset'],['mtc','Maintenance'],['jadwal','Jadwal Kerja']);
+  } else if(isStaffOps){
+    // Staff: cuma yang benar-benar dibutuhkan sehari-hari — tanpa Aset/Maintenance.
+    grupOperasional.push(['log','Log Harian'],['tiket','Kerusakan'],['jadwal','Jadwal Kerja']);
   } else if(isAccSpv()){
     grupOperasional.push(['tiket','Kerusakan']);
   }
   if(isMgr()) grupOperasional.push(['checklist','Checklist & Shift']);
-  if(isMgr() || inOpsDept) grupOperasional.push(['rekap','Rekap']);
+  if(isMgr() || isSpvOps) grupOperasional.push(['rekap','Rekap']);
 
   const grupPengadaan = [];
-  if(isMgr() || inOpsDept || isAccSpv()) grupPengadaan.push(['pengadaan','Pengadaan']);
+  if(isMgr() || isSpvOps || isAccSpv()) grupPengadaan.push(['pengadaan','Pengadaan']);
   if(isMgr() || isAccSpv()) grupPengadaan.push(['katalog','Katalog Barang']);
 
   const grupSdm = [];
@@ -10672,11 +10696,16 @@ async function submitAttendance(tokenId){
     token_id: tokenId, input_method:'qr', input_by: me.id
   };
 
-  // Tautkan ke pengajuan lembur yang disetujui (kalau ada)
+  // Tautkan ke pengajuan lembur yang disetujui (kalau ada).
+  // Khusus Staff: WAJIB ada persetujuan SPV dulu, kalau tidak ada -> ditolak total.
   if(type.kategori==='lembur'){
     const t0 = today();
     const ov = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').eq('requested_date',t0));
     if(ov.length) payload.overtime_request_id = ov[0].id;
+    else if(me.role==='staff'){
+      toast('Belum ada persetujuan SPV untuk lembur hari ini — ajukan dulu di menu Lembur');
+      closeModal(); return;
+    }
   }
 
   // Snapshot kelengkapan checklist — hanya untuk SPV, saat Absen Pulang
@@ -10767,14 +10796,13 @@ async function renderJadwalBulanan(){
 }
 async function loadJadwalGrid(){
   const dept = $('jwDept').value, month = $('jwMonth').value;
-  const canEdit = isMgr() || (isFieldWorker() && me.department===dept);
+  const canEdit = isMgr() || (me.role==='spv' && me.department===dept);
   const [sched, shifts, staffList] = await Promise.all([
     q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('department',dept).eq('period_month',month)),
     q(db.from('shifts').select('*').eq('department',dept).eq('active',true).order('sort_order')),
     q(db.from('profiles').select('*').eq('department',dept).in('role',['spv','staff']).eq('active',true))
   ]);
   let s = sched[0];
-  const daysInMonth = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
 
   if(!s){
     $('jwGridArea').innerHTML = `<div class="card"><p class="muted">Belum ada jadwal untuk ${dept} bulan ${month}.</p>
@@ -10792,37 +10820,58 @@ async function loadJadwalGrid(){
         <button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
     </div></div></div>`;
 
-  h += `<div class="card" style="overflow-x:auto"><table style="font-size:12px;white-space:nowrap"><tr><th style="position:sticky;left:0;background:#fff">Nama</th>`;
-  for(let d=1; d<=daysInMonth; d++) h += `<th style="text-align:center;padding:4px 6px">${d}</th>`;
-  h += `</tr>`;
+  // Bangun daftar minggu (Senin-Minggu), tanggal kosong diberi null untuk mengisi kotak sebelum tgl.1 / setelah akhir bulan.
+  const year = Number(month.slice(0,4)), monthIdx = Number(month.slice(5,7))-1;
+  const daysInMonth = new Date(year, monthIdx+1, 0).getDate();
+  const firstDow = (new Date(year, monthIdx, 1).getDay()+6)%7; // 0=Senin
+  const weeks = []; let week = new Array(firstDow).fill(null);
+  for(let d=1; d<=daysInMonth; d++){
+    week.push(d);
+    if(week.length===7){ weeks.push(week); week=[]; }
+  }
+  if(week.length){ while(week.length<7) week.push(null); weeks.push(week); }
+  const HARI = ['Sen','Sel','Rab','Kam','Jum','Sab','Min'];
+
   staffList.forEach(p=>{
-    h += `<tr><td style="position:sticky;left:0;background:#fff;font-weight:700;padding:4px 8px">${esc(p.name)}</td>`;
-    for(let d=1; d<=daysInMonth; d++){
-      const dateStr = `${month}-${String(d).padStart(2,'0')}`;
-      const entry = s.work_schedule_entries.find(e=>e.staff_id===p.id && e.work_date===dateStr);
-      if(canEditGrid){
-        h += `<td style="padding:2px"><select style="padding:2px;font-size:11px;width:70px" onchange="setScheduleCell(${s.id},'${p.id}','${dateStr}',this.value)">
-          <option value="off" ${entry&&entry.is_off?'selected':''}>Libur</option>
-          ${shifts.length ? shifts.map(sh=>`<option value="${sh.id}" ${entry&&!entry.is_off&&entry.shift_id===sh.id?'selected':''}>${esc(sh.shift_name)}</option>`).join('')
-            : `<option value="kerja" ${entry&&!entry.is_off?'selected':''}>Kerja</option>`}
-        </select></td>`;
-      } else {
-        const label = !entry ? '-' : (entry.is_off ? 'Libur' : (entry.shift_id ? (shifts.find(sh=>sh.id===entry.shift_id)?.shift_name||'?') : 'Kerja'));
-        h += `<td style="text-align:center;padding:4px 2px;${entry&&entry.is_off?'color:#9CA3AF':''}">${esc(label)}</td>`;
-      }
-    }
-    h += `</tr>`;
+    h += `<div class="card"><h3 style="margin-bottom:8px">${esc(p.name)}</h3>
+      <table class="calGrid"><tr>${HARI.map(d=>`<th>${d}</th>`).join('')}</tr>`;
+    weeks.forEach(w=>{
+      h += '<tr>';
+      w.forEach(d=>{
+        if(d===null){ h += '<td class="calEmpty"></td>'; return; }
+        const dateStr = `${month}-${String(d).padStart(2,'0')}`;
+        const entry = s.work_schedule_entries.find(e=>e.staff_id===p.id && e.work_date===dateStr);
+        if(canEditGrid){
+          const isOffNow = entry && entry.is_off;
+          const bg = !entry ? '#fff' : (isOffNow ? '#F3F4F6' : '#DCFCE7');
+          const fg = !entry ? '#374151' : (isOffNow ? '#6B7280' : '#166534');
+          h += `<td class="calCell"><div class="calDate">${d}</div>
+            <select class="calSelect" style="background:${bg};color:${fg}" onchange="setScheduleCell(${s.id},'${p.id}','${dateStr}',this.value,this)">
+              <option value="off" ${entry&&entry.is_off?'selected':''}>L</option>
+              ${shifts.length ? shifts.map(sh=>`<option value="${sh.id}" ${entry&&!entry.is_off&&entry.shift_id===sh.id?'selected':''}>${esc(sh.shift_name)}</option>`).join('')
+                : `<option value="kerja" ${entry&&!entry.is_off?'selected':''}>K</option>`}
+            </select></td>`;
+        } else {
+          const isOff = entry && entry.is_off;
+          const label = !entry ? '-' : (isOff ? 'L' : (entry.shift_id ? (shifts.find(sh=>sh.id===entry.shift_id)?.shift_name||'?') : 'K'));
+          h += `<td class="calCell"><div class="calDate">${d}</div>
+            <div class="calBadge" style="background:${isOff?'#F3F4F6':'#DCFCE7'};color:${isOff?'#6B7280':'#166534'}">${esc(label)}</div></td>`;
+        }
+      });
+      h += '</tr>';
+    });
+    h += `</table></div>`;
   });
-  h += `</table></div>`;
   $('jwGridArea').innerHTML = h;
 }
 async function createSchedule(dept, month){
   await q(db.from('work_schedules').insert({department:dept, period_month:month, created_by:me.id}).select());
   toast('Jadwal dibuat, silakan isi'); loadJadwalGrid();
 }
-async function setScheduleCell(scheduleId, staffId, workDate, val){
+async function setScheduleCell(scheduleId, staffId, workDate, val, el){
   const isOff = val==='off';
   const shiftId = (!isOff && val!=='kerja') ? Number(val) : null;
+  if(el){ el.style.background = isOff?'#F3F4F6':'#DCFCE7'; el.style.color = isOff?'#6B7280':'#166534'; }
   await q(db.from('work_schedule_entries').upsert({
     schedule_id:scheduleId, staff_id:staffId, work_date:workDate, is_off:isOff, shift_id:shiftId
   }, {onConflict:'schedule_id,staff_id,work_date'}).select());
@@ -11061,6 +11110,7 @@ async function renderDashboard(){
   const pqAcct = isAccSpv() ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : [];
   const hasCost = x => (x.ticket_items[0]?.count || 0) > 0;
   const open = tickets;
+  const needUsulan = open.filter(x=> x.status==='usulan' && (isMgr() || (me.role==='spv' && me.department===x.department)));
   const needApproval = open.filter(x=> hasCost(x) && ['dilaporkan','ditindaklanjuti'].includes(x.status));
   const needBarang = open.filter(x=> x.status==='disetujui');
   const needJadwal = open.filter(x=> x.status==='barang_tersedia');
@@ -11102,6 +11152,11 @@ async function renderDashboard(){
   </div>`;
 
   // Antrian sesuai role
+  if(needUsulan.length){
+    h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>Usulan Kerusakan Menunggu Otorisasi</h3>`;
+    needUsulan.forEach(x=> h += ticketRow(x));
+    h += `</div>`;
+  }
   if(isMgr() && needApproval.length){
     h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Perlu Persetujuan (ada biaya)</h3>`;
     needApproval.forEach(x=> h += ticketRow(x));
@@ -11425,19 +11480,33 @@ function ntFilterAssets(){
 async function createTicket(){
   const title = $('ntTitle').value.trim();
   if(!title){ toast('Judul wajib diisi'); return; }
+  const initialStatus = me.role==='staff' ? 'usulan' : 'dilaporkan';
   const r = await q(db.from('tickets').insert({
     department:$('ntDept').value, handling_division:$('ntHandle').value,
-    handling_division_since:new Date().toISOString(),
+    handling_division_since:new Date().toISOString(), status:initialStatus,
     asset_id:$('ntAsset').value||null, title,
     description:$('ntDesc').value.trim(), urgency:$('ntUrg').value, reported_by:me.id }).select());
-  await q(db.from('ticket_updates').insert({ticket_id:r[0].id, note:'Tiket dibuat, ditujukan ke divisi '+DIVS[$('ntHandle').value].label, created_by:me.id}).select());
-  closeModal(); toast('Laporan kerusakan tersimpan');
+  const note = me.role==='staff'
+    ? 'Usulan dibuat oleh staff, menunggu otorisasi SPV'
+    : 'Tiket dibuat, ditujukan ke divisi '+DIVS[$('ntHandle').value].label;
+  await q(db.from('ticket_updates').insert({ticket_id:r[0].id, note, created_by:me.id}).select());
+  closeModal(); toast(me.role==='staff' ? 'Usulan terkirim, menunggu otorisasi SPV' : 'Laporan kerusakan tersimpan');
   if(page==='tiket') loadTickets(); else go('tiket');
+}
+async function authorizeUsulan(id){
+  await q(db.from('tickets').update({status:'dilaporkan'}).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Diotorisasi SPV, resmi jadi tiket kerusakan', created_by:me.id}).select());
+  toast('Diotorisasi, tercatat sebagai tiket resmi'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
+async function rejectUsulan(id){
+  if(!confirm('Tolak usulan ini? Akan dihapus permanen (belum jadi tiket resmi).')) return;
+  await q(db.from('tickets').delete().eq('id',id).select());
+  closeModal(); toast('Usulan ditolak & dihapus'); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 async function openTicket(id){
   const [tk] = await q(db.from('tickets').select('*, ticket_items(*), ticket_updates(*), assets(name)').eq('id',id));
   const t = tk;
-  const canEdit = isMgr() || (isFieldWorker() && (me.department===t.department || me.department===t.handling_division));
+  const canEdit = isMgr() || (me.role==='spv' && (me.department===t.department || me.department===t.handling_division));
   const hasCost = t.ticket_items.length > 0;
   const estTotal = t.ticket_items.reduce((s,i)=>s + i.qty*i.est_price, 0);
   const actTotal = t.ticket_items.reduce((s,i)=>s + (i.actual_price!=null ? i.qty*i.actual_price : 0), 0);
@@ -11508,7 +11577,14 @@ async function openTicket(id){
   h += `<h3 style="margin-top:16px">Aksi</h3><div class="row">`;
   const setS = (s,label,cls) => `<button class="btn ${cls} btn-sm" onclick="setStatus(${t.id},'${s}')">${label}</button>`;
 
-  if(t.status==='dilaporkan'){
+  if(t.status==='usulan'){
+    if(isMgr() || (me.role==='spv' && me.department===t.department)){
+      h += `<button class="btn btn-teal btn-sm" onclick="authorizeUsulan(${t.id})">✓ Otorisasi Jadi Tiket Resmi</button>
+        <button class="btn btn-ghost btn-sm" onclick="rejectUsulan(${t.id})">Tolak</button>`;
+    } else {
+      h += `<p class="small muted">Usulan dari staff, menunggu diotorisasi SPV sebelum resmi jadi tiket kerusakan.</p>`;
+    }
+  } else if(t.status==='dilaporkan'){
     if(hasCost){
       if(isMgr()){
         h += `<button class="btn btn-teal btn-sm" onclick="approveTicket(${t.id})">✓ Setujui Perbaikan</button>`;
@@ -11703,7 +11779,7 @@ async function renderPengadaan(){
     </div>
     <div class="row">
       ${isMgr()?`<button class="btn btn-ghost" onclick="exportPengadaanExcel()">⬇ Excel</button>`:''}
-      ${!isAccSpv()?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
+      ${(isMgr()||(me.role==='spv'&&isFieldWorker())||isAccSpv())&&!(me.role==='staff')?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
     </div>
   </div><div id="pengadaanList"></div>`;
   $('main').innerHTML = h;
