@@ -174,7 +174,11 @@ const DIVS = {
   electrical:{label:'Electrical',color:'#A16207'},
   accounting:{label:'Accounting',color:'#334155'}
 };
-const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',staff:'Staff',accounting:'Accounting',kiosk:'Kios Absensi',hrd:'HRD'};
+// Semua departemen yang bisa dipilih untuk PROFIL karyawan (lebih luas dari
+// DIVS karena termasuk HR, yang tidak relevan sebagai divisi penanganan tiket).
+const ALL_STAFF_DEPTS = {...DIVS, hr:{label:'HR',color:'#7C3AED'}};
+// Role murni tingkatan wewenang — HR & Accounting sekarang DEPARTEMEN, bukan role.
+const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',staff:'Staff',kiosk:'Kios Absensi'};
 const TSTAT = {
   dilaporkan:{l:'Dilaporkan',c:'#E5E7EB',t:'#374151'},
   disetujui:{l:'Disetujui',c:'#DBEAFE',t:'#1D4ED8'},
@@ -219,8 +223,11 @@ const divTag = d => d ? `<span class="dept-tag" style="background:${DIVS[d].colo
 const statBadge = s => `<span class="badge" style="background:${TSTAT[s].c};color:${TSTAT[s].t}">${TSTAT[s].l}</span>`;
 const urgBadge = u => `<span class="badge" style="background:${URG[u].c};color:${URG[u].t}">${URG[u].l}</span>`;
 const isMgr = () => ['manager','owner'].includes(me.role);
-// HRD, Manager, Owner: yang boleh kelola karyawan & lihat halaman HRD.
-const isHrdOrMgr = () => ['hrd','manager','owner'].includes(me.role);
+// SPV di departemen HR / Accounting: dapat akses penuh fitur departemen itu.
+// Staff di HR/Accounting TIDAK dapat akses penuh (cuma hak umum).
+const isHrSpv = () => me.role==='spv' && me.department==='hr';
+const isAccSpv = () => me.role==='spv' && me.department==='accounting';
+const isHrdOrMgr = () => isMgr() || isHrSpv();
 // SPV dan Staff punya hak operasional yang sama di departemennya sendiri
 // (staff dibutuhkan mengisi laporan saat SPV tidak di tempat).
 const isFieldWorker = () => ['spv','staff'].includes(me.role);
@@ -292,22 +299,28 @@ async function init(){
   $('topbar').classList.remove('hidden'); $('nav').classList.remove('hidden');
 
   $('whoName').textContent = me.name;
-  $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+(DIVS[me.department]?.label||me.department):'');
+  $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+(ALL_STAFF_DEPTS[me.department]?.label||me.department):'');
   buildNav();
   go('dashboard');
 }
 
 function buildNav(){
   let tabs = [['dashboard','Dashboard']];
-  if(isMgr() || isFieldWorker()){
-    tabs.push(['log','Log Harian'],['tiket','Kerusakan'],['pengadaan','Pengadaan'],['aset','Aset'],['mtc','Maintenance'],['lembur','Lembur'],['rekap','Rekap']);
-  } else if(me.role==='accounting'){
+  // "Field worker" hanya dapat tab operasional kalau departemennya salah satu
+  // dari 6 departemen operasional (bukan sekadar role spv/staff) — supaya
+  // SPV/Staff di HR atau Accounting tidak ikut kebagian tab ini.
+  const inOpsDept = isFieldWorker() && me.department && DEPTS[me.department];
+  if(isMgr() || inOpsDept){
+    tabs.push(['log','Log Harian'],['tiket','Kerusakan'],['pengadaan','Pengadaan'],['aset','Aset'],['mtc','Maintenance']);
+  } else if(isAccSpv()){
     tabs.push(['tiket','Kerusakan'],['pengadaan','Pengadaan']);
-  } else if(me.role==='hrd'){
-    tabs.push(['lembur','Lembur']);
   }
+  // Lembur: hak universal — siapa pun ber-role spv/staff (apa pun departemennya)
+  // boleh ajukan lembur untuk diri sendiri.
+  if(isMgr() || isFieldWorker()) tabs.push(['lembur','Lembur']);
+  if(isMgr() || inOpsDept) tabs.push(['rekap','Rekap']);
   if(isMgr()) tabs.push(['checklist','Checklist & Shift']);
-  if(isMgr() || me.role==='accounting') tabs.push(['katalog','Katalog Barang']);
+  if(isMgr() || isAccSpv()) tabs.push(['katalog','Katalog Barang']);
   if(isHrdOrMgr()) tabs.push(['hrd','HRD'],['users','Pengguna']);
   $('nav').innerHTML = tabs.map(([k,l])=>`<button id="nav-${k}" onclick="go('${k}')">${l}</button>`).join('');
 }
@@ -329,7 +342,7 @@ async function renderDashboard(){
     q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending'))
   ]);
   const pqAuth = isMgr() ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','menunggu_otorisasi')) : [];
-  const pqAcct = me.role==='accounting' ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : [];
+  const pqAcct = isAccSpv() ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : [];
   const hasCost = x => (x.ticket_items[0]?.count || 0) > 0;
   const open = tickets;
   const needApproval = open.filter(x=> hasCost(x) && ['dilaporkan','ditindaklanjuti'].includes(x.status));
@@ -342,7 +355,7 @@ async function renderDashboard(){
 
   // Notifikasi pekerjaan menggantung untuk divisi milik user (selalu tampil jika user punya divisi)
   if(me.department){
-    const lbl = DIVS[me.department] ? DIVS[me.department].label : me.department;
+    const lbl = ALL_STAFF_DEPTS[me.department] ? ALL_STAFF_DEPTS[me.department].label : me.department;
     h += `<div class="card" style="border:2px solid ${myDivPending.length?'var(--red)':'var(--green)'}">
       <h3>Pekerjaan Menggantung untuk Divisi Anda (${lbl})</h3>`;
     if(myDivPending.length){
@@ -378,7 +391,7 @@ async function renderDashboard(){
     needApproval.forEach(x=> h += ticketRow(x));
     h += `</div>`;
   }
-  if(me.role==='accounting' && needBarang.length){
+  if(isAccSpv() && needBarang.length){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>Menyiapkan Barang (tandai jika sudah tersedia)</h3>`;
     needBarang.forEach(x=> h += ticketRow(x));
     h += `</div>`;
@@ -396,7 +409,7 @@ async function renderDashboard(){
       <div class="small muted">Perkiraan: ${rp(it.est_price)} · ${ageHtml(it.created_at)}</div></div>`);
     h += `</div>`;
   }
-  if(me.role==='accounting' && pqAcct.length){
+  if(isAccSpv() && pqAcct.length){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>Pengadaan: Perlu Diproses</h3>`;
     pqAcct.forEach(it=> h += `<div class="item" style="cursor:pointer" onclick="go('pengadaan')">
       ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b> · Qty ${it.qty}
@@ -658,7 +671,7 @@ async function renderTiket(){
     </div>
     <div class="row">
       ${isMgr()?`<button class="btn btn-ghost" onclick="exportTicketsExcel()">⬇ Excel</button>`:''}
-      ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newTicketModal()">+ Lapor Kerusakan</button>`:''}
+      ${!isAccSpv()?`<button class="btn btn-teal" onclick="newTicketModal()">+ Lapor Kerusakan</button>`:''}
     </div>
   </div><div id="ticketList"></div>`;
   $('main').innerHTML = h;
@@ -759,7 +772,7 @@ async function openTicket(id){
     h += `<table class="respTable"><tr><th>Barang/Jasa</th><th>Qty</th><th>Perkiraan</th><th>Realisasi</th><th></th></tr>`;
     t.ticket_items.forEach(i=>{
       h += `<tr><td data-label="Barang/Jasa">${esc(i.item_name)}</td><td data-label="Qty">${i.qty}</td><td data-label="Perkiraan">${rp(i.est_price)}</td>
-        <td data-label="Realisasi">${me.role==='accounting' && t.status!=='selesai'
+        <td data-label="Realisasi">${isAccSpv() && t.status!=='selesai'
           ? `<input type="number" value="${i.actual_price??''}" placeholder="Rp" style="width:100px;padding:4px" onchange="setActual(${i.id},this.value,${t.id})">`
           : (i.actual_price!=null?rp(i.actual_price):'-')}</td>
         <td>${canEdit && ['dilaporkan','ditindaklanjuti'].includes(t.status)
@@ -798,7 +811,7 @@ async function openTicket(id){
       h += setS('menunggu_verifikasi','Klaim Selesai (minta verifikasi)','btn-navy');
     }
   } else if(t.status==='disetujui'){
-    if(me.role==='accounting'){
+    if(isAccSpv()){
       h += `<button class="btn btn-teal btn-sm" onclick="markBarangTersedia(${t.id},'${t.department}')">Tandai Barang Sudah Tersedia</button>`;
     } else {
       h += `<p class="small muted">Posisi tiket ada di Accounting untuk proses pengadaan. Accounting akan menandai jika barang sudah tersedia.</p>`;
@@ -974,7 +987,7 @@ async function renderPengadaan(){
     </div>
     <div class="row">
       ${isMgr()?`<button class="btn btn-ghost" onclick="exportPengadaanExcel()">⬇ Excel</button>`:''}
-      ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
+      ${!isAccSpv()?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
     </div>
   </div><div id="pengadaanList"></div>`;
   $('main').innerHTML = h;
@@ -1105,7 +1118,7 @@ async function openPengadaan(id){
         <button class="btn btn-teal btn-sm" onclick="authorizeItem(${it.id},true)">✓ Setujui</button>
         <button class="btn btn-ghost btn-sm" onclick="authorizeItem(${it.id},false)">Tolak</button></div>`;
     }
-    if(it.status==='diproses' && me.role==='accounting'){
+    if(it.status==='diproses' && isAccSpv()){
       h += `<div class="row" style="margin-top:6px">
         <button class="btn btn-teal btn-sm" onclick="fulfillItem(${it.id},'gudang')">Ambil dari Gudang</button>
         <button class="btn btn-navy btn-sm" onclick="fulfillItem(${it.id},'beli')">Sudah Dibeli</button></div>`;
@@ -1170,7 +1183,7 @@ async function renderAset(){
         ${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}" ${me.department===k?'selected':''}>${v.label}</option>`).join('')}</select>
       <select id="aStat" onchange="loadAssets()"><option value="aktif">Aktif</option><option value="diajukan_keluar">Diajukan Keluar</option><option value="keluar">Sudah Keluar</option><option value="">Semua</option></select>
     </div>
-    ${me.role!=='accounting'?`<button class="btn btn-teal" onclick="newAssetModal()">+ Input Aset</button>`:''}
+    ${!isAccSpv()?`<button class="btn btn-teal" onclick="newAssetModal()">+ Input Aset</button>`:''}
   </div>
   <div id="dispPending"></div><div id="assetList"></div>`;
   $('main').innerHTML = h;
@@ -1336,7 +1349,7 @@ function myApprovableDepts(){
 }
 async function renderLembur(){
   const canApproveAny = isMgr() || (me.role==='spv' && me.can_approve_lembur);
-  const canViewAll = isMgr() || me.role==='hrd';
+  const canViewAll = isMgr() || isHrSpv();
   let h = `<h2>Pengajuan Lembur</h2>
     <div class="row" style="margin-bottom:12px;justify-content:space-between">
       <div class="filters">
@@ -1652,14 +1665,14 @@ async function delCatalog(id){
 async function renderUsers(){
   profilesCache = await q(db.from('profiles').select('*').order('created_at'));
   let h = `<h2>Kelola Pengguna</h2>
-  <p class="small muted" style="margin-bottom:10px">Role <b>Staff</b> setara SPV untuk departemennya (dipakai saat SPV tidak ada). Role <b>Kios Absensi</b> khusus perangkat HP penampil QR absen. Role <b>HRD</b> kelola karyawan &amp; halaman HRD, tidak akses modul operasional.</p>
+  <p class="small muted" style="margin-bottom:10px">Role <b>Staff</b> setara SPV untuk departemennya (dipakai saat SPV tidak ada). Role <b>Kios Absensi</b> khusus perangkat HP penampil QR absen. Departemen <b>HR</b> dan <b>Accounting</b> — hanya yang ber-role <b>SPV</b> di departemen itu yang dapat akses penuh (Kelola Pengguna/halaman HRD untuk HR; proses Kerusakan &amp; Pengadaan untuk Accounting). Staff di HR/Accounting cuma dapat hak umum (ganti password, ajukan lembur sendiri).</p>
   <button class="btn btn-teal" style="margin-bottom:12px" onclick="newEmployeeModal()">+ Daftarkan Karyawan Baru</button>`;
   h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Username</th><th>Role</th><th>Dept</th>${isMgr()?'<th>Boleh Setujui Lembur</th>':''}<th>Aktif</th><th></th></tr>`;
   profilesCache.forEach(p=>{
     h += `<tr><td data-label="Nama"><input value="${esc(p.name)}" id="un-${p.id}" style="padding:5px 8px;min-width:110px"></td>
       <td data-label="Username"><input value="${esc(p.username||'')}" id="uu-${p.id}" placeholder="mis. lukman" style="padding:5px 8px;min-width:100px"></td>
       <td data-label="Role"><select id="ur-${p.id}" style="padding:5px 8px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${p.role===k?'selected':''}>${v}</option>`).join('')}</select></td>
-      <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(DIVS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
+      <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
       ${isMgr()?`<td data-label="Boleh Setujui Lembur">${p.role==='spv'?`<input type="checkbox" id="uc-${p.id}" ${p.can_approve_lembur?'checked':''} style="width:18px;height:18px">`:'<span class="small muted">-</span>'}</td>`:''}
       <td data-label="Aktif"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''} style="width:18px;height:18px"></td>
       <td><button class="btn-sm btn-teal" style="width:100%" onclick="saveUser('${p.id}')">Simpan</button></td></tr>`;
@@ -1693,7 +1706,7 @@ function newEmployeeModal(){
     <label>Username (huruf kecil, tanpa spasi)</label><input id="neUser" placeholder="mis. budi.pool" autocapitalize="off">
     <label>Role</label><select id="neRole">${Object.entries(ROLES).filter(([k])=>k!=='kiosk'||isMgr()).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
     <label>Departemen (kosongkan untuk role non-operasional)</label>
-    <select id="neDept"><option value="">-</option>${Object.entries(DIVS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+    <select id="neDept"><option value="">-</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
     <label>Password Awal (min. 6 karakter)</label><input id="nePass" type="text" placeholder="mis. aa12345">
     <p class="small muted" style="margin-top:6px">Sampaikan username &amp; password ini ke karyawan secara langsung. Mereka bisa ganti password sendiri setelah login pertama.</p>
     <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitNewEmployee()">Daftarkan</button>`);
