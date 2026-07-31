@@ -10838,25 +10838,22 @@ async function loadJadwalGrid(){
     return;
   }
 
-  // Lengkapi otomatis entri "Kerja" untuk staff yang BELUM punya entri sama
-  // sekali di jadwal ini (mis. baru ditambahkan/dipindah ke departemen ini
-  // SETELAH jadwal bulan ini sudah dibuat) — supaya tidak ada yang "kosong"
-  // dan kelihatan seperti Libur semua padahal cuma belum diisi.
-  if(canEdit){
+  // Lengkapi otomatis entri "Kerja" HANYA kalau jadwal masih Draft (belum resmi)
+  // -- supaya jadwal yang sudah diajukan/disetujui TIDAK ikut berubah sendiri.
+  let missingCount = 0;
+  {
     const daysInMonthCheck = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
-    const missingEntries = [];
     staffList.forEach(p=>{
       for(let d=1; d<=daysInMonthCheck; d++){
         const dateStr = `${month}-${String(d).padStart(2,'0')}`;
-        const has = s.work_schedule_entries.some(e=>e.staff_id===p.id && e.work_date===dateStr);
-        if(!has) missingEntries.push({schedule_id:s.id, staff_id:p.id, work_date:dateStr, is_off:false, shift_id:null});
+        if(!s.work_schedule_entries.some(e=>e.staff_id===p.id && e.work_date===dateStr)) missingCount++;
       }
     });
-    if(missingEntries.length){
-      await q(db.from('work_schedule_entries').insert(missingEntries).select());
-      const fresh = await q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('id', s.id));
-      s = fresh[0];
-    }
+  }
+  if(canEdit && s.status==='draft' && missingCount>0){
+    await backfillScheduleEntries(s.id, dept, month, staffList);
+    const fresh = await q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('id', s.id));
+    s = fresh[0]; missingCount = 0;
   }
   const STAT = {draft:{l:'Draft',c:'#F3F4F6',t:'#6B7280'},diajukan:{l:'Menunggu Otorisasi Manager',c:'#FEF3C7',t:'#92400E'},disetujui:{l:'Disetujui (Resmi)',c:'#DCFCE7',t:'#166534'}};
   const st = STAT[s.status];
@@ -10868,7 +10865,11 @@ async function loadJadwalGrid(){
       ${(isMgr() && s.status==='diajukan')?`<button class="btn btn-teal btn-sm" onclick="authorizeSchedule(${s.id})">✓ Otorisasi (Jadikan Resmi)</button>`:''}
       ${(isMgr() && ['diajukan','disetujui'].includes(s.status))?`<button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
     </div></div>
-    <p class="small muted" style="margin-top:6px">Tanggal <span style="color:var(--red);font-weight:700">merah</span> = Sabtu/Minggu/tanggal merah — SPV tidak bisa memberi libur di hari itu, cuma Manager/Owner yang bisa kalau memang perlu.</p></div>`;
+    <p class="small muted" style="margin-top:6px">Tanggal <span style="color:var(--red);font-weight:700">merah</span> = Sabtu/Minggu/tanggal merah — SPV tidak bisa memberi libur di hari itu, cuma Manager/Owner yang bisa kalau memang perlu.</p>
+    ${(missingCount>0 && s.status!=='draft')?`<div class="row" style="justify-content:space-between;margin-top:8px;background:#FEF3C7;padding:8px 10px;border-radius:8px">
+      <span class="small" style="color:#92400E">⚠ Ada staff yang belum punya entri di jadwal resmi ini (mis. baru ditambahkan setelah jadwal dibuat).</span>
+      ${isMgr()?`<button class="btn btn-navy btn-sm" onclick="fillMissingSchedule(${s.id},'${dept}','${month}')">Lengkapi Sekarang</button>`:''}
+      </div>`:''}</div>`;
 
   // Bangun daftar minggu (Senin-Minggu), tanggal kosong diberi null untuk mengisi kotak sebelum tgl.1 / setelah akhir bulan.
   const year = Number(month.slice(0,4)), monthIdx = Number(month.slice(5,7))-1;
@@ -10925,15 +10926,31 @@ async function createSchedule(dept, month){
   const r = await q(db.from('work_schedules').insert({department:dept, period_month:month, created_by:me.id}).select());
   const scheduleId = r[0].id;
   const staffList = await q(db.from('profiles').select('id').eq('department',dept).in('role',['spv','staff']).eq('active',true));
+  await backfillScheduleEntries(scheduleId, dept, month, staffList);
+  toast('Jadwal dibuat — semua tanggal terisi Kerja, tinggal ubah yang perlu libur'); loadJadwalGrid();
+}
+// Isi entri "Kerja" untuk staff yang belum punya entri sama sekali di jadwal
+// ini. Dipakai saat jadwal baru dibuat, dan (khusus Manager, via tombol sadar)
+// untuk melengkapi jadwal yang sudah resmi kalau ada staff baru masuk belakangan.
+async function backfillScheduleEntries(scheduleId, dept, month, staffList){
+  const existing = await q(db.from('work_schedule_entries').select('staff_id,work_date').eq('schedule_id',scheduleId));
   const daysInMonth = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
   const entries = [];
   staffList.forEach(p=>{
     for(let d=1; d<=daysInMonth; d++){
-      entries.push({schedule_id:scheduleId, staff_id:p.id, work_date:`${month}-${String(d).padStart(2,'0')}`, is_off:false, shift_id:null});
+      const dateStr = `${month}-${String(d).padStart(2,'0')}`;
+      if(!existing.some(e=>e.staff_id===p.id && e.work_date===dateStr)){
+        entries.push({schedule_id:scheduleId, staff_id:p.id, work_date:dateStr, is_off:false, shift_id:null});
+      }
     }
   });
   if(entries.length) await q(db.from('work_schedule_entries').insert(entries).select());
-  toast('Jadwal dibuat — semua tanggal terisi Kerja, tinggal ubah yang perlu libur'); loadJadwalGrid();
+  return entries.length;
+}
+async function fillMissingSchedule(scheduleId, dept, month){
+  const staffList = await q(db.from('profiles').select('id').eq('department',dept).in('role',['spv','staff']).eq('active',true));
+  const n = await backfillScheduleEntries(scheduleId, dept, month, staffList);
+  toast(n>0 ? `${n} entri ditambahkan (Kerja)` : 'Tidak ada yang perlu dilengkapi'); loadJadwalGrid();
 }
 async function setScheduleCell(scheduleId, staffId, workDate, val, el){
   const isOff = val==='off';
@@ -11204,6 +11221,18 @@ async function renderDashboard(){
   }
 
   let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
+
+  // Jadwal Lembur Anda — tampil untuk siapa pun yang dijadwalkan lembur (disetujui, tanggal hari ini/mendatang)
+  const myLembur = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').gte('requested_date', t).order('requested_date'));
+  if(myLembur.length){
+    h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>⏰ Jadwal Lembur Anda</h3>`;
+    myLembur.forEach(r=>{
+      h += `<div class="item" style="cursor:pointer" onclick="go('lembur')">
+        <b>${fdate(r.requested_date)}</b> · ${r.planned_start||'?'}–${r.planned_end||'?'}
+        <div class="small muted">${esc(r.reason)}</div></div>`;
+    });
+    h += `</div>`;
+  }
 
   if(showBirthdays && birthdaysThisMonth.length){
     h += `<div class="card"><h3>🎂 Ulang Tahun Bulan Ini</h3>`;
@@ -12312,8 +12341,9 @@ function myApprovableDepts(){
 async function renderLembur(){
   const canApproveAny = isMgr() || (me.role==='spv' && me.can_approve_lembur);
   const canViewAll = isMgr() || isHrSpv();
+  const canScheduleForOthers = isMgr() || me.role==='spv';
   let h = `<h2>Pengajuan Lembur</h2>
-    <div class="row" style="margin-bottom:12px;justify-content:space-between">
+    <div class="row" style="margin-bottom:12px;justify-content:space-between;flex-wrap:wrap">
       <div class="filters">
         <select id="lbFilter" onchange="loadLembur()">
           <option value="mine">Pengajuan Saya</option>
@@ -12321,8 +12351,11 @@ async function renderLembur(){
           ${canViewAll?'<option value="all">Semua</option>':''}
         </select>
       </div>
-      ${canViewAll?`<button class="btn btn-ghost" onclick="exportLemburExcel()">⬇ Excel</button>`:''}
-      ${isFieldWorker()?`<button class="btn btn-teal" onclick="newLemburModal()">+ Ajukan Lembur</button>`:''}
+      <div class="row">
+        ${canViewAll?`<button class="btn btn-ghost" onclick="exportLemburExcel()">⬇ Excel</button>`:''}
+        ${isFieldWorker()?`<button class="btn btn-teal" onclick="newLemburModal()">+ Ajukan Lembur</button>`:''}
+        ${canScheduleForOthers?`<button class="btn btn-navy" onclick="newJadwalLemburModal()">+ Jadwalkan Lembur${isMgr()?'':' Staff'}</button>`:''}
+      </div>
     </div><div id="lemburList"></div>`;
   $('main').innerHTML = h;
   $('lbFilter').value = canViewAll ? 'all' : 'mine';
@@ -12368,6 +12401,36 @@ async function submitLembur(){
     planned_start: $('lbStart').value||null, planned_end: $('lbEnd').value||null, reason
   }).select());
   closeModal(); toast('Pengajuan lembur terkirim'); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
+}
+async function newJadwalLemburModal(){
+  let staffList;
+  if(isMgr()){
+    staffList = await q(db.from('profiles').select('*').in('role',['spv','staff']).eq('active',true).order('name'));
+  } else {
+    staffList = await q(db.from('profiles').select('*').eq('department',me.department).in('role',['spv','staff']).eq('active',true).order('name'));
+  }
+  openModal(`<div class="mhead"><h3>Jadwalkan Lembur</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small muted">Ini langsung tercatat sebagai <b>disetujui</b> (kamu yang menjadwalkan), langsung tampil di Dashboard orang yang dipilih.</p>
+    <label>Karyawan</label><select id="jlStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)} ${p.department?'— '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
+    <label>Tanggal</label><input type="date" id="jlDate" value="${today()}">
+    <div class="grid2"><div><label>Rencana Mulai</label><input type="time" id="jlStart"></div>
+    <div><label>Rencana Selesai</label><input type="time" id="jlEnd"></div></div>
+    <label>Alasan / Pekerjaan</label><textarea id="jlReason" rows="3" placeholder="pekerjaan apa yang perlu diselesaikan lembur..."></textarea>
+    <button class="btn btn-teal" id="btnSubmitJadwalLembur" style="margin-top:14px;width:100%" onclick="submitJadwalLembur()">Jadwalkan (Langsung Disetujui)</button>`);
+}
+async function submitJadwalLembur(){
+  const reason = $('jlReason').value.trim();
+  if(!reason){ toast('Alasan wajib diisi'); return; }
+  if(!lockBtn($('btnSubmitJadwalLembur'))) return;
+  const staffSel = $('jlStaff');
+  const staffId = staffSel.value;
+  const dept = staffSel.selectedOptions[0].dataset.dept || me.department || null;
+  await q(db.from('overtime_requests').insert({
+    staff_id: staffId, department: dept, requested_date: $('jlDate').value,
+    planned_start: $('jlStart').value||null, planned_end: $('jlEnd').value||null, reason,
+    status:'disetujui', approver_id: me.id, decided_at: new Date().toISOString(), decision_note:'Dijadwalkan langsung oleh '+me.name
+  }).select());
+  closeModal(); toast('Lembur dijadwalkan & langsung disetujui'); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
 async function openLembur(id){
   const [r] = await q(db.from('overtime_requests').select('*').eq('id',id));
