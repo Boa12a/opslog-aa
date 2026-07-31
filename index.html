@@ -10837,6 +10837,27 @@ async function loadJadwalGrid(){
       ${canEdit?`<button class="btn btn-teal" onclick="createSchedule('${dept}','${month}')">+ Buat Jadwal</button>`:''}</div>`;
     return;
   }
+
+  // Lengkapi otomatis entri "Kerja" untuk staff yang BELUM punya entri sama
+  // sekali di jadwal ini (mis. baru ditambahkan/dipindah ke departemen ini
+  // SETELAH jadwal bulan ini sudah dibuat) — supaya tidak ada yang "kosong"
+  // dan kelihatan seperti Libur semua padahal cuma belum diisi.
+  if(canEdit){
+    const daysInMonthCheck = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
+    const missingEntries = [];
+    staffList.forEach(p=>{
+      for(let d=1; d<=daysInMonthCheck; d++){
+        const dateStr = `${month}-${String(d).padStart(2,'0')}`;
+        const has = s.work_schedule_entries.some(e=>e.staff_id===p.id && e.work_date===dateStr);
+        if(!has) missingEntries.push({schedule_id:s.id, staff_id:p.id, work_date:dateStr, is_off:false, shift_id:null});
+      }
+    });
+    if(missingEntries.length){
+      await q(db.from('work_schedule_entries').insert(missingEntries).select());
+      const fresh = await q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('id', s.id));
+      s = fresh[0];
+    }
+  }
   const STAT = {draft:{l:'Draft',c:'#F3F4F6',t:'#6B7280'},diajukan:{l:'Menunggu Otorisasi Manager',c:'#FEF3C7',t:'#92400E'},disetujui:{l:'Disetujui (Resmi)',c:'#DCFCE7',t:'#166534'}};
   const st = STAT[s.status];
   const canEditGrid = canEdit && (isMgr() || s.status==='draft'); // SPV cuma bisa ubah saat draft; Manager bisa ubah kapan saja
