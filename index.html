@@ -10225,6 +10225,7 @@ table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700
   table.respTable, table.respTable tbody, table.respTable tr, table.respTable td{display:block;width:100%}
   table.respTable{table-layout:auto}
   table.respTable thead{display:none}
+  table.respTable tr:has(th){display:none}
   table.respTable tr{border:1px solid var(--line);border-radius:10px;padding:4px 10px;margin-bottom:8px;background:var(--surface)}
   table.respTable td{display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px dashed var(--line);padding:8px 2px;text-align:right}
   table.respTable td:last-child{border-bottom:none}
@@ -10821,10 +10822,11 @@ async function renderJadwalBulanan(){
 async function loadJadwalGrid(){
   const dept = $('jwDept').value, month = $('jwMonth').value;
   const canEdit = isMgr() || (me.role==='spv' && me.department===dept);
-  const [sched, shifts, staffList] = await Promise.all([
+  const [sched, shifts, staffList, holidays] = await Promise.all([
     q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('department',dept).eq('period_month',month)),
     q(db.from('shifts').select('*').eq('department',dept).eq('active',true).order('sort_order')),
-    q(db.from('profiles').select('*').eq('department',dept).in('role',['spv','staff']).eq('active',true))
+    q(db.from('profiles').select('*').eq('department',dept).in('role',['spv','staff']).eq('active',true)),
+    q(db.from('public_holidays').select('*').gte('holiday_date', month+'-01').lte('holiday_date', month+'-31'))
   ]);
   let s = sched[0];
 
@@ -10842,7 +10844,8 @@ async function loadJadwalGrid(){
       ${(canEdit && s.status==='draft')?`<button class="btn btn-navy btn-sm" onclick="submitSchedule(${s.id})">Ajukan ke Manager</button>`:''}
       ${(isMgr() && s.status==='diajukan')?`<button class="btn btn-teal btn-sm" onclick="authorizeSchedule(${s.id})">✓ Otorisasi (Jadikan Resmi)</button>
         <button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
-    </div></div></div>`;
+    </div></div>
+    <p class="small muted" style="margin-top:6px">Tanggal <span style="color:var(--red);font-weight:700">merah</span> = Sabtu/Minggu/tanggal merah — SPV tidak bisa memberi libur di hari itu, cuma Manager/Owner yang bisa kalau memang perlu.</p></div>`;
 
   // Bangun daftar minggu (Senin-Minggu), tanggal kosong diberi null untuk mengisi kotak sebelum tgl.1 / setelah akhir bulan.
   const year = Number(month.slice(0,4)), monthIdx = Number(month.slice(5,7))-1;
@@ -10855,30 +10858,37 @@ async function loadJadwalGrid(){
   }
   if(week.length){ while(week.length<7) week.push(null); weeks.push(week); }
   const HARI = ['Sen','Sel','Rab','Kam','Jum','Sab','Min'];
+  const holidaySet = new Set(holidays.map(hd=>hd.holiday_date));
+  const isRestricted = (dateStr, dowIdx) => dowIdx>=5 || holidaySet.has(dateStr); // dowIdx 5=Sabtu,6=Minggu (Senin=0)
 
   staffList.forEach(p=>{
     h += `<div class="card"><h3 style="margin-bottom:8px">${esc(p.name)}</h3>
       <table class="calGrid"><tr>${HARI.map(d=>`<th>${d}</th>`).join('')}</tr>`;
     weeks.forEach(w=>{
       h += '<tr>';
-      w.forEach(d=>{
+      w.forEach((d,dowIdx)=>{
         if(d===null){ h += '<td class="calEmpty"></td>'; return; }
         const dateStr = `${month}-${String(d).padStart(2,'0')}`;
         const entry = s.work_schedule_entries.find(e=>e.staff_id===p.id && e.work_date===dateStr);
+        const restricted = isRestricted(dateStr, dowIdx);
+        const dateStyle = restricted ? 'color:var(--red);font-weight:700' : '';
+        // SPV tidak boleh set Libur di hari terlarang; Manager/Owner tetap bebas.
+        const lockedForSpv = restricted && !isMgr();
         if(canEditGrid){
           const isOffNow = entry && entry.is_off;
+          const noSpecificShift = entry && !entry.is_off && !entry.shift_id;
           const bg = !entry ? '#fff' : (isOffNow ? '#F3F4F6' : '#DCFCE7');
           const fg = !entry ? '#374151' : (isOffNow ? '#6B7280' : '#166534');
-          h += `<td class="calCell"><div class="calDate">${d}</div>
+          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${d}</div>
             <select class="calSelect" style="background:${bg};color:${fg}" onchange="setScheduleCell(${s.id},'${p.id}','${dateStr}',this.value,this)">
-              <option value="off" ${entry&&entry.is_off?'selected':''}>L</option>
-              ${shifts.length ? shifts.map(sh=>`<option value="${sh.id}" ${entry&&!entry.is_off&&entry.shift_id===sh.id?'selected':''}>${esc(sh.shift_name)}</option>`).join('')
-                : `<option value="kerja" ${entry&&!entry.is_off?'selected':''}>K</option>`}
+              ${lockedForSpv?'':`<option value="off" ${isOffNow?'selected':''}>L</option>`}
+              <option value="kerja" ${(!entry || noSpecificShift)?'selected':''}>${shifts.length?'Kerja (belum pilih shift)':'K'}</option>
+              ${shifts.map(sh=>`<option value="${sh.id}" ${entry&&!entry.is_off&&entry.shift_id===sh.id?'selected':''}>${esc(sh.shift_name)}</option>`).join('')}
             </select></td>`;
         } else {
           const isOff = entry && entry.is_off;
           const label = !entry ? '-' : (isOff ? 'L' : (entry.shift_id ? (shifts.find(sh=>sh.id===entry.shift_id)?.shift_name||'?') : 'K'));
-          h += `<td class="calCell"><div class="calDate">${d}</div>
+          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${d}</div>
             <div class="calBadge" style="background:${isOff?'#F3F4F6':'#DCFCE7'};color:${isOff?'#6B7280':'#166534'}">${esc(label)}</div></td>`;
         }
       });
@@ -10889,8 +10899,18 @@ async function loadJadwalGrid(){
   $('jwGridArea').innerHTML = h;
 }
 async function createSchedule(dept, month){
-  await q(db.from('work_schedules').insert({department:dept, period_month:month, created_by:me.id}).select());
-  toast('Jadwal dibuat, silakan isi'); loadJadwalGrid();
+  const r = await q(db.from('work_schedules').insert({department:dept, period_month:month, created_by:me.id}).select());
+  const scheduleId = r[0].id;
+  const staffList = await q(db.from('profiles').select('id').eq('department',dept).in('role',['spv','staff']).eq('active',true));
+  const daysInMonth = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
+  const entries = [];
+  staffList.forEach(p=>{
+    for(let d=1; d<=daysInMonth; d++){
+      entries.push({schedule_id:scheduleId, staff_id:p.id, work_date:`${month}-${String(d).padStart(2,'0')}`, is_off:false, shift_id:null});
+    }
+  });
+  if(entries.length) await q(db.from('work_schedule_entries').insert(entries).select());
+  toast('Jadwal dibuat — semua tanggal terisi Kerja, tinggal ubah yang perlu libur'); loadJadwalGrid();
 }
 async function setScheduleCell(scheduleId, staffId, workDate, val, el){
   const isOff = val==='off';
@@ -12393,13 +12413,38 @@ async function renderHrd(){
     <div class="card"><h3>Nomor WA Darurat (tampil di layar kios)</h3>
     <div class="row"><input id="waNum" value="${esc(wa[0]?.value||'')}" placeholder="mis. 0812xxxxxxx" style="flex:1">
     <button class="btn btn-teal btn-sm" onclick="saveWaNumber()">Simpan</button></div></div>
+    <div class="card"><h3>Tanggal Merah (Hari Libur Nasional)</h3>
+    <p class="small muted">Karyawan tidak boleh diberi libur oleh SPV di hari Sabtu/Minggu/tanggal merah — butuh otorisasi Manager/Owner kalau memang perlu.</p>
+    <div id="holidayList"></div>
+    <div class="row" style="margin-top:10px">
+      <input type="date" id="hlDate" style="flex:1">
+      <input id="hlDesc" placeholder="keterangan, mis. Idul Fitri" style="flex:1">
+      <button class="btn btn-teal btn-sm" onclick="addHoliday()">Tambah</button></div></div>
     ${isMgr()?'<div id="checklistFlagArea"></div>':''}
     <div class="card"><label>Periode</label><input type="month" id="hrMonth" value="${m}" onchange="loadHrdAll()"></div>
     <div id="hrAttendanceArea"></div>
     <div id="hrTreatmentArea"></div>
     <div id="hrArea"></div>`;
+  loadHolidays();
   if(isMgr()) loadWaChecklistFlags();
   loadHrdAll();
+}
+async function loadHolidays(){
+  const list = await q(db.from('public_holidays').select('*').gte('holiday_date', today().slice(0,4)+'-01-01').order('holiday_date'));
+  $('holidayList').innerHTML = list.length ? list.map(h=>
+    `<div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)">
+      <span>${fdate(h.holiday_date)} ${h.description?'— '+esc(h.description):''}</span>
+      <button class="btn-sm btn-ghost" onclick="delHoliday(${h.id})">Hapus</button></div>`).join('')
+    : '<p class="muted small">Belum ada tanggal merah tercatat tahun ini.</p>';
+}
+async function addHoliday(){
+  const d = $('hlDate').value; if(!d){ toast('Tanggal wajib diisi'); return; }
+  await q(db.from('public_holidays').upsert({holiday_date:d, description:$('hlDesc').value.trim()||null, created_by:me.id}, {onConflict:'holiday_date'}).select());
+  $('hlDate').value=''; $('hlDesc').value=''; toast('Tanggal merah ditambahkan'); loadHolidays();
+}
+async function delHoliday(id){
+  await q(db.from('public_holidays').delete().eq('id',id).select());
+  loadHolidays();
 }
 function loadHrdAll(){
   loadHrdAttendance();
