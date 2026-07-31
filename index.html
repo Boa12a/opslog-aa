@@ -10317,9 +10317,10 @@ const ROLES = {owner:'Owner',manager:'Manager',spv:'SPV',staff:'Staff',kiosk:'Ki
 const TSTAT = {
   usulan:{l:'Usulan (Menunggu SPV)',c:'#FEF3C7',t:'#92400E'},
   dilaporkan:{l:'Dilaporkan',c:'#E5E7EB',t:'#374151'},
-  disetujui:{l:'Disetujui',c:'#DBEAFE',t:'#1D4ED8'},
+  disetujui:{l:'Disetujui (Biaya)',c:'#DBEAFE',t:'#1D4ED8'},
   ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'},
-  ditindaklanjuti:{l:'Ditindaklanjuti',c:'#DBEAFE',t:'#1D4ED8'},
+  ditindaklanjuti:{l:'Dikerjakan Sendiri',c:'#DBEAFE',t:'#1D4ED8'},
+  menunggu_keputusan:{l:'Menunggu Keputusan Manager',c:'#FDE68A',t:'#92400E'},
   barang_tersedia:{l:'Barang Tersedia',c:'#CCFBF1',t:'#0F766E'},
   dijadwalkan:{l:'Dijadwalkan',c:'#E0E7FF',t:'#4338CA'},
   diperbaiki:{l:'Sudah Diperbaiki',c:'#EDE9FE',t:'#6D28D9'},
@@ -11597,10 +11598,27 @@ async function createTicket(){
   closeModal(); toast(me.role==='staff' ? 'Usulan terkirim, menunggu otorisasi SPV' : 'Laporan kerusakan tersimpan');
   if(page==='tiket') loadTickets(); else go('tiket');
 }
-async function authorizeUsulan(id){
-  await q(db.from('tickets').update({status:'dilaporkan'}).eq('id',id));
-  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Diotorisasi SPV, resmi jadi tiket kerusakan', created_by:me.id}).select());
-  toast('Diotorisasi, tercatat sebagai tiket resmi'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+async function routeTicket(id, route){
+  const urgEl = $('tUrg');
+  const statusMap = {a:'ditindaklanjuti', b:'dilaporkan', c:'menunggu_keputusan'};
+  const upd = {status: statusMap[route], route};
+  if(urgEl) upd.urgency = urgEl.value;
+  await q(db.from('tickets').update(upd).eq('id',id));
+  const routeLabel = {a:'A (Kerjakan Sendiri, Tanpa Biaya)', b:'B (Kerjakan Sendiri, Perlu Biaya)', c:'C (Tidak Bisa Sendiri, ke Manager)'}[route];
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'SPV pilih Jalur '+routeLabel, created_by:me.id}).select());
+  toast('Jalur ditentukan: '+routeLabel); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
+async function decideRouteC(id){
+  const div = $('tcDiv').value, pic = $('tcPic').value.trim(), plan = $('tcPlan').value.trim(), target = $('tcTarget').value;
+  if(!pic || !target){ toast('PIC dan Target Tanggal wajib diisi'); return; }
+  await q(db.from('tickets').update({
+    target_division: div, pic_followup: pic, repair_plan: plan||null, target_date: target,
+    handling_division: div, handling_division_since: new Date().toISOString(), status:'dijadwalkan'
+  }).eq('id', id));
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Manager putuskan: divisi '+(DIVS[div]?.label||div)+', PIC '+pic+(plan?' — '+plan:''), created_by:me.id}).select());
+  await createPengadaanFromTicket(id); // otomatis lewati kalau tidak ada rincian biaya
+  toast('Keputusan tersimpan, divisi pelaksana & Accounting (kalau ada biaya) langsung dapat notifikasi');
+  openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 async function rejectUsulan(id){
   if(!confirm('Tolak usulan ini? Akan dihapus permanen (belum jadi tiket resmi).')) return;
@@ -11645,18 +11663,28 @@ async function openTicket(id){
     ).join(' → ')}</div>`;
   }
 
-  // PIC & rencana
-  if(canEdit && t.status!=='selesai'){
-    h += `<label>PIC Follow-up (siapa yang mengerjakan)</label><input id="tPic" value="${esc(t.pic_followup||'')}" placeholder="nama teknisi / SPV / vendor">
-    <label>Notasi Rencana Perbaikan</label><textarea id="tPlan" rows="2">${esc(t.repair_plan||'')}</textarea>
-    <label>Target Tanggal Pasti</label><input type="date" id="tTarget" value="${t.target_date||''}">
-    <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="saveTicketPlan(${t.id})">Simpan Rencana</button>`;
+  // PIC & rencana — disembunyikan total untuk Jalur C sampai Manager putuskan
+  if(t.status==='usulan'){
+    // belum ada apa-apa, ditampilkan di bagian Aksi
+  } else if(t.status==='menunggu_keputusan'){
+    h += `<p class="small muted" style="margin-top:8px">PIC &amp; rencana perbaikan akan ditentukan Manager/Owner sekaligus dengan divisi pelaksana.</p>`;
   } else {
-    h += `<p class="small"><b>PIC:</b> ${esc(t.pic_followup||'-')} · <b>Target:</b> ${fdate(t.target_date)}<br><b>Rencana:</b> ${esc(t.repair_plan||'-')}</p>`;
+    // Jalur C: begitu sudah diputuskan Manager, PIC/rencana jadi baca-saja untuk
+    // semua orang (SPV tidak bisa ubah) — kecuali Manager/Owner yang selalu boleh.
+    const editablePic = t.status!=='selesai' && (isMgr() || (canEdit && t.route!=='c'));
+    if(editablePic){
+      h += `<label>PIC Follow-up (siapa yang mengerjakan)</label><input id="tPic" value="${esc(t.pic_followup||'')}" placeholder="nama teknisi / SPV / vendor">
+      <label>Notasi Rencana Perbaikan</label><textarea id="tPlan" rows="2">${esc(t.repair_plan||'')}</textarea>
+      <label>Target Tanggal Pasti</label><input type="date" id="tTarget" value="${t.target_date||''}">
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="saveTicketPlan(${t.id})">Simpan Rencana</button>`;
+    } else {
+      h += `<p class="small"><b>PIC:</b> ${esc(t.pic_followup||'-')} · <b>Target:</b> ${fdate(t.target_date)}<br><b>Rencana:</b> ${esc(t.repair_plan||'-')}</p>`;
+    }
   }
 
   // Rincian kebutuhan biaya
   h += `<h3 style="margin-top:16px">Rincian Kebutuhan Biaya</h3>`;
+  const itemEditableStatuses = ['usulan','dilaporkan','ditindaklanjuti','menunggu_keputusan'];
   if(t.ticket_items.length){
     h += `<table class="respTable"><tr><th>Barang/Jasa</th><th>Qty</th><th>Perkiraan</th><th>Realisasi</th><th></th></tr>`;
     t.ticket_items.forEach(i=>{
@@ -11664,12 +11692,12 @@ async function openTicket(id){
         <td data-label="Realisasi">${isAccSpv() && t.status!=='selesai'
           ? `<input type="number" value="${i.actual_price??''}" placeholder="Rp" style="width:100px;padding:4px" onchange="setActual(${i.id},this.value,${t.id})">`
           : (i.actual_price!=null?rp(i.actual_price):'-')}</td>
-        <td>${canEdit && ['dilaporkan','ditindaklanjuti'].includes(t.status)
+        <td>${canEdit && itemEditableStatuses.includes(t.status)
           ? `<button class="btn-sm btn-ghost" onclick="delItem(${i.id},${t.id})">✕ Hapus</button>`:''}</td></tr>`;
     });
     h += `<tr><td data-label="Total"><b>Total</b></td><td></td><td data-label="Perkiraan"><b>${rp(estTotal)}</b></td><td data-label="Realisasi"><b>${hasActual?rp(actTotal):'-'}</b></td><td></td></tr></table>`;
   } else h += `<p class="muted small">Belum ada rincian. Tanpa rincian, tiket ini dianggap perbaikan tanpa biaya.</p>`;
-  if(canEdit && ['dilaporkan','ditindaklanjuti'].includes(t.status)){
+  if(canEdit && itemEditableStatuses.includes(t.status)){
     h += `<div class="row" style="margin-top:8px">
       <input id="niName" placeholder="barang/jasa" style="flex:2">
       <input id="niQty" type="number" value="1" style="width:60px">
@@ -11683,10 +11711,30 @@ async function openTicket(id){
 
   if(t.status==='usulan'){
     if(isMgr() || (me.role==='spv' && me.department===t.department)){
-      h += `<button class="btn btn-teal btn-sm" onclick="authorizeUsulan(${t.id})">✓ Otorisasi Jadi Tiket Resmi</button>
-        <button class="btn btn-ghost btn-sm" onclick="rejectUsulan(${t.id})">Tolak</button>`;
+      h += `<label>Urgensi</label><select id="tUrg">
+        <option value="rendah" ${t.urgency==='rendah'?'selected':''}>Rendah</option>
+        <option value="sedang" ${t.urgency==='sedang'?'selected':''}>Sedang</option>
+        <option value="tinggi" ${t.urgency==='tinggi'?'selected':''}>Tinggi</option></select>
+      <label style="margin-top:10px">Pilih Jalur Penanganan</label>
+      <div class="row" style="margin-top:4px;flex-wrap:wrap">
+        <button class="btn btn-teal btn-sm" onclick="routeTicket(${t.id},'a')">A · Kerjakan Sendiri (Tanpa Biaya)</button>
+        <button class="btn btn-navy btn-sm" onclick="routeTicket(${t.id},'b')">B · Kerjakan Sendiri (Perlu Biaya)</button>
+        <button class="btn btn-gold btn-sm" onclick="routeTicket(${t.id},'c')">C · Tidak Bisa Sendiri (ke Manager)</button>
+      </div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="rejectUsulan(${t.id})">Tolak Usulan</button>`;
     } else {
-      h += `<p class="small muted">Usulan dari staff, menunggu diotorisasi SPV sebelum resmi jadi tiket kerusakan.</p>`;
+      h += `<p class="small muted">Usulan dari staff, menunggu diotorisasi SPV departemen pelapor.</p>`;
+    }
+  } else if(t.status==='menunggu_keputusan'){
+    if(isMgr()){
+      h += `<label>Divisi Pelaksana</label><select id="tcDiv">${divOptions(t.department)}</select>
+      <label>PIC Follow-up</label><input id="tcPic" placeholder="nama teknisi / SPV / vendor">
+      <label>Notasi Rencana Perbaikan</label><textarea id="tcPlan" rows="2"></textarea>
+      <label>Target Tanggal Pasti</label><input type="date" id="tcTarget">
+      <button class="btn btn-teal btn-sm" style="margin-top:8px" onclick="decideRouteC(${t.id})">✓ Putuskan</button>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="rejectTicket(${t.id})">Tolak</button>`;
+    } else {
+      h += `<p class="small muted">Menunggu keputusan Manager/Owner (divisi pelaksana, PIC, dan rencana perbaikan).</p>`;
     }
   } else if(t.status==='dilaporkan'){
     if(hasCost){
@@ -11713,16 +11761,23 @@ async function openTicket(id){
       h += `<p class="small muted">Posisi tiket ada di Accounting untuk proses pengadaan. Accounting akan menandai jika barang sudah tersedia.</p>`;
     }
   } else if(t.status==='barang_tersedia'){
-    if(isMgr()){
-      h += `<button class="btn btn-teal btn-sm" onclick="scheduleTicket(${t.id})">Jadwalkan Perbaikan (PIC &amp; Tanggal)</button>`;
-    } else {
-      h += `<p class="small muted">Barang tersedia. Menunggu Manager menjadwalkan &amp; menunjuk pelaksana.</p>`;
-    }
-  } else if(t.status==='dijadwalkan'){
-    if(canEdit){
+    // Jalur B: barang kembali ke departemen pelapor sendiri, SPV pelapor
+    // yang lanjutkan (bukan Manager) — PIC/rencana sudah bisa diisi sendiri
+    // di bagian atas (karena route!=='c').
+    const canMarkDone = isMgr() || (me.role==='spv' && me.department===t.department);
+    if(canMarkDone){
       h += setS('diperbaiki','✓ Tandai Sudah Diperbaiki','btn-teal');
     } else {
-      h += `<p class="small muted">Menunggu SPV menyelesaikan perbaikan sesuai jadwal.</p>`;
+      h += `<p class="small muted">Barang sudah tersedia. Menunggu SPV departemen pelapor menyelesaikan perbaikan.</p>`;
+    }
+  } else if(t.status==='dijadwalkan'){
+    // Berlaku untuk Jalur C (setelah Manager putuskan) — yang menandai
+    // selesai TETAP SPV departemen PELAPOR, bukan divisi pelaksana.
+    const canMarkDone = isMgr() || (me.role==='spv' && me.department===t.department);
+    if(canMarkDone){
+      h += setS('diperbaiki','✓ Tandai Sudah Diperbaiki','btn-teal');
+    } else {
+      h += `<p class="small muted">Menunggu SPV departemen pelapor menandai perbaikan selesai.</p>`;
     }
   } else if(['diperbaiki','menunggu_verifikasi'].includes(t.status)){
     if(isMgr()) h += setS('selesai','✓ Verifikasi &amp; Selesaikan','btn-teal');
