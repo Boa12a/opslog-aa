@@ -10300,17 +10300,14 @@ const DEPTS = {
   hk:{label:'HK',color:'var(--c-hk)'},
   fd:{label:'FD',color:'var(--c-fd)'},
   ho:{label:'Marketing',color:'var(--c-ho)'},
-  security:{label:'Security',color:'var(--c-security)'}
-};
-// Divisi Penanganan: departemen operasional + 2 divisi teknis baru + Accounting
-// (Accounting muncul sebagai "posisi" tiket ketika sedang diproses pembeliannya),
-// dipakai khusus untuk menentukan siapa yang mengerjakan/memegang perbaikan.
-const DIVS = {
-  ...DEPTS,
+  security:{label:'Security',color:'var(--c-security)'},
   engineering:{label:'Engineering',color:'#92400E'},
-  electrical:{label:'Electrical',color:'#A16207'},
-  accounting:{label:'Accounting',color:'#334155'}
+  accounting:{label:'Accounting',color:'#334155'},
+  electrical:{label:'General Affair',color:'#A16207'}
 };
+// Divisi Penanganan tiket = sama dengan departemen sekarang (Accounting,
+// Engineering, Electrical/General Affair sudah jadi departemen penuh).
+const DIVS = {...DEPTS};
 // Semua departemen yang bisa dipilih untuk PROFIL karyawan (lebih luas dari
 // DIVS karena termasuk HR, yang tidak relevan sebagai divisi penanganan tiket).
 const ALL_STAFF_DEPTS = {...DIVS, hr:{label:'HR',color:'#7C3AED'}};
@@ -12151,26 +12148,19 @@ async function renderMtc(){
   $('main').innerHTML = h; loadMtc();
 }
 async function loadMtc(){
-  const [list, openSessions] = await Promise.all([
-    q(db.from('maintenance_schedules').select('*, assets(name)').eq('active',true).order('next_due')),
-    q(db.from('maintenance_logs').select('*').is('end_time', null))
-  ]);
+  const list = await q(db.from('maintenance_schedules').select('*, assets(name)').eq('active',true).order('next_due'));
   const t = today();
   let h = list.length?'':'<p class="muted">Belum ada jadwal maintenance.</p>';
   list.forEach(s=>{
     const canDo = isMgr() || (isFieldWorker()&&me.department===s.department);
     const due = s.next_due<=t;
-    const active = openSessions.find(o=>o.schedule_id===s.id);
     h += `<div class="item" style="border-left-color:${DEPTS[s.department].color};cursor:default">
       <div class="row" style="justify-content:space-between">
         <div>${deptTag(s.department)} <b>${esc(s.task_name)}</b>${s.assets?` <span class="small muted">(${esc(s.assets.name)})</span>`:''}</div>
         <span class="small ${due?'age-red':(s.next_due<=addDays(t,7)?'age-amber':'muted')}">${due?'JATUH TEMPO · ':''}${fdate(s.next_due)}</span></div>
       <div class="small muted">Setiap ${s.interval_days} hari</div>
-      ${active?`<div class="small" style="color:var(--teal-d);font-weight:700;margin-top:4px">⏱ Sedang dikerjakan oleh ${uname(active.done_by)} sejak ${fdt(active.start_time)}</div>`:''}
       ${canDo?`<div class="row" style="margin-top:6px">
-        ${active
-          ? `<button class="btn btn-teal btn-sm" onclick="finishMtc(${active.id},${s.id},${s.interval_days})">✓ Selesai Dikerjakan</button>`
-          : `<button class="btn btn-navy btn-sm" onclick="startMtc(${s.id})">▶ Mulai Kerjakan</button>`}
+        <button class="btn btn-teal btn-sm" onclick="doneMtc(${s.id},${s.interval_days})">✓ Tandai Selesai Dikerjakan</button>
         ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="delMtc(${s.id})">Nonaktifkan</button>`:''}</div>`:''}</div>`;
   });
   $('mtcList').innerHTML = h;
@@ -12198,15 +12188,11 @@ async function createMtc(){
     task_name:n,interval_days:Number($('nmInt').value)||30,next_due:$('nmDue').value}).select());
   closeModal(); toast('Jadwal tersimpan'); loadMtc();
 }
-async function startMtc(scheduleId){
-  await q(db.from('maintenance_logs').insert({schedule_id:scheduleId, done_by:me.id, start_time:new Date().toISOString()}).select());
-  toast('Pekerjaan dimulai, jam tercatat'); loadMtc();
-}
-async function finishMtc(logId, scheduleId, interval){
+async function doneMtc(id,interval){
   const note = prompt('Catatan pengerjaan (opsional):') || null;
-  await q(db.from('maintenance_logs').update({end_time:new Date().toISOString(), done_date:today(), note}).eq('id',logId));
-  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval)}).eq('id',scheduleId));
-  toast('Pekerjaan selesai, jam kerja tercatat'); loadMtc();
+  await q(db.from('maintenance_logs').insert({schedule_id:id,done_date:today(),done_by:me.id,note}).select());
+  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval)}).eq('id',id));
+  toast('Maintenance dicatat, jadwal berikutnya dibuat'); loadMtc();
 }
 async function delMtc(id){
   if(!confirm('Nonaktifkan jadwal ini?'))return;
@@ -12750,6 +12736,7 @@ function newEmployeeModal(){
     <label>Role</label><select id="neRole">${Object.entries(ROLES).filter(([k])=>k!=='kiosk'||isMgr()).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
     <label>Departemen (kosongkan untuk role non-operasional)</label>
     <select id="neDept"><option value="">-</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+    <label>Tanggal Lahir (opsional)</label><input type="date" id="neBirth">
     <label>Password Awal (min. 6 karakter)</label><input id="nePass" type="text" placeholder="mis. aa12345">
     <p class="small muted" style="margin-top:6px">Sampaikan username &amp; password ini ke karyawan secara langsung. Mereka bisa ganti password sendiri setelah login pertama.</p>
     <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="submitNewEmployee()">Daftarkan</button>`);
@@ -12774,7 +12761,7 @@ async function submitNewEmployee(){
   const newId = data.user?.id;
   if(!newId){ toast('Gagal mendapatkan akun baru, coba lagi'); return; }
   // Trigger di database otomatis bikin baris profiles dasar; sekarang lengkapi.
-  await q(db.from('profiles').update({username:usernameRaw, role, department, active:true}).eq('id',newId));
+  await q(db.from('profiles').update({username:usernameRaw, role, department, birth_date:$('neBirth').value||null, active:true}).eq('id',newId));
   closeModal(); toast('Karyawan berhasil didaftarkan');
   profilesCache = await q(db.from('profiles').select('*'));
   if(page==='users') renderUsers();
