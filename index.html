@@ -11826,7 +11826,7 @@ async function renderPengadaan(){
     </div>
     <div class="row">
       ${isMgr()?`<button class="btn btn-ghost" onclick="exportPengadaanExcel()">⬇ Excel</button>`:''}
-      ${(isMgr()||(me.role==='spv'&&isFieldWorker())||isAccSpv())&&!(me.role==='staff')?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
+      ${(isMgr()||(me.role==='spv'&&me.department&&DIVS[me.department]&&me.department!=='accounting'))?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
     </div>
   </div><div id="pengadaanList"></div>`;
   $('main').innerHTML = h;
