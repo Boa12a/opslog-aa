@@ -10517,11 +10517,16 @@ let _kioskTimer = null;
 function randomToken(){
   return Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
+let _birthdayTimer = null;
 async function renderKioskScreen(isEmergency){
   const wa = await q(db.from('app_settings').select('*').eq('key','wa_hrd_darurat'));
   const waNum = wa[0]?.value || '';
+  const t = today();
+  const allBirths = await q(db.from('profiles').select('*').eq('active',true).not('birth_date','is',null));
+  const todayBirthdays = allBirths.filter(p=> p.birth_date.slice(5,10)===t.slice(5,10));
   $('main').innerHTML = `
     <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--navy);color:#fff;text-align:center;padding:20px">
+      <div id="kioskBirthdayBox"></div>
       <div style="font-size:20px;font-weight:800;margin-bottom:4px">Absensi ${me.department?(ALL_STAFF_DEPTS[me.department]?.label||me.department):''}</div>
       <div class="small" style="opacity:.75;margin-bottom:18px">Buka menu <b>Absen</b> di aplikasi masing-masing, lalu pindai QR ini</div>
       <div id="kioskQrBox" style="background:#fff;padding:18px;border-radius:16px"><p style="color:#333">Memuat QR...</p></div>
@@ -10529,6 +10534,20 @@ async function renderKioskScreen(isEmergency){
       <div class="small" style="opacity:.55;margin-top:24px;max-width:320px">Jika aplikasi/HP bermasalah: foto selfie + kirim ke WhatsApp HRD${waNum?` (<b>${esc(waNum)}</b>)`:''} sebagai bukti, HRD akan catatkan manual.</div>
       ${isEmergency?`<button class="btn btn-ghost" style="margin-top:20px" onclick="exitEmergencyKiosk()">Keluar dari Mode Kios</button>`:''}
     </div>`;
+  clearInterval(_birthdayTimer);
+  if(todayBirthdays.length){
+    let bIdx = 0;
+    const showBirthday = ()=>{
+      const p = todayBirthdays[bIdx % todayBirthdays.length];
+      $('kioskBirthdayBox').innerHTML = `<div style="margin-bottom:18px">
+        <div style="font-size:15px;opacity:.85">🎉 Selamat ulang tahun,</div>
+        <div style="font-size:24px;font-weight:800;color:var(--gold)">${esc(p.name)}!</div>
+        <div class="small" style="opacity:.7;margin-top:2px">Semoga sehat selalu dan sukses terus</div></div>`;
+      bIdx++;
+    };
+    showBirthday();
+    if(todayBirthdays.length>1) _birthdayTimer = setInterval(showBirthday, 4000);
+  }
   await kioskNewToken();
   clearInterval(_kioskTimer);
   _kioskTimer = setInterval(kioskNewToken, 10000);
@@ -10560,7 +10579,7 @@ function activateEmergencyKiosk(){
   renderKioskScreen(true);
 }
 function exitEmergencyKiosk(){
-  clearInterval(_kioskTimer);
+  clearInterval(_kioskTimer); clearInterval(_birthdayTimer);
   $('topbar').classList.remove('hidden');
   go('dashboard');
 }
@@ -11133,7 +11152,28 @@ async function renderDashboard(){
   const needVerif = open.filter(x=> ['diperbaiki','menunggu_verifikasi'].includes(x.status));
   const myDivPending = me.department ? open.filter(x=> x.handling_division===me.department) : [];
 
+  // Ulang Tahun Bulan Ini — tampil untuk SPV ke atas (bukan Staff/Kios)
+  const showBirthdays = ['spv','manager','owner'].includes(me.role);
+  let birthdaysThisMonth = [];
+  if(showBirthdays){
+    const allBirths = await q(db.from('profiles').select('*').eq('active',true).not('birth_date','is',null));
+    const curMonth = Number(t.slice(5,7)), curYear = Number(t.slice(0,4));
+    birthdaysThisMonth = allBirths.filter(p=> Number(p.birth_date.slice(5,7))===curMonth)
+      .map(p=>({...p, _day:Number(p.birth_date.slice(8,10)), _age: curYear - Number(p.birth_date.slice(0,4))}))
+      .sort((a,b)=>a._day-b._day);
+  }
+
   let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
+
+  if(showBirthdays && birthdaysThisMonth.length){
+    h += `<div class="card"><h3>🎂 Ulang Tahun Bulan Ini</h3>`;
+    birthdaysThisMonth.forEach(p=>{
+      h += `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
+        <div><b>${esc(p.name)}</b> ${p.department?divTag(p.department):''}</div>
+        <div class="small muted">${p._day} ${['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'][Number(t.slice(5,7))-1]} · ${p._age} tahun</div></div>`;
+    });
+    h += `</div>`;
+  }
 
   // Notifikasi pekerjaan menggantung untuk divisi milik user (selalu tampil jika user punya divisi)
   if(me.department){
@@ -12669,12 +12709,13 @@ async function renderUsers(){
   let h = `<h2>Kelola Pengguna</h2>
   <p class="small muted" style="margin-bottom:10px">Role <b>Staff</b> setara SPV untuk departemennya (dipakai saat SPV tidak ada). Role <b>Kios Absensi</b> khusus perangkat HP penampil QR absen. Departemen <b>HR</b> dan <b>Accounting</b> — hanya yang ber-role <b>SPV</b> di departemen itu yang dapat akses penuh (Kelola Pengguna/halaman HRD untuk HR; proses Kerusakan &amp; Pengadaan untuk Accounting). Staff di HR/Accounting cuma dapat hak umum (ganti password, ajukan lembur sendiri).</p>
   <button class="btn btn-teal" style="margin-bottom:12px" onclick="newEmployeeModal()">+ Daftarkan Karyawan Baru</button>`;
-  h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Username</th><th>Role</th><th>Dept</th>${isMgr()?'<th>Boleh Setujui Lembur</th>':''}<th>Aktif</th><th></th></tr>`;
+  h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Username</th><th>Role</th><th>Dept</th><th>Tgl Lahir</th>${isMgr()?'<th>Boleh Setujui Lembur</th>':''}<th>Aktif</th><th></th></tr>`;
   profilesCache.forEach(p=>{
     h += `<tr><td data-label="Nama"><input value="${esc(p.name)}" id="un-${p.id}" style="padding:5px 8px;min-width:110px"></td>
       <td data-label="Username"><input value="${esc(p.username||'')}" id="uu-${p.id}" placeholder="mis. lukman" style="padding:5px 8px;min-width:100px"></td>
       <td data-label="Role"><select id="ur-${p.id}" style="padding:5px 8px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${p.role===k?'selected':''}>${v}</option>`).join('')}</select></td>
       <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
+      <td data-label="Tgl Lahir"><input type="date" id="ub-${p.id}" value="${p.birth_date||''}" style="padding:5px 8px"></td>
       ${isMgr()?`<td data-label="Boleh Setujui Lembur">${p.role==='spv'?`<input type="checkbox" id="uc-${p.id}" ${p.can_approve_lembur?'checked':''} style="width:18px;height:18px">`:'<span class="small muted">-</span>'}</td>`:''}
       <td data-label="Aktif"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''} style="width:18px;height:18px"></td>
       <td><button class="btn-sm btn-teal" style="width:100%" onclick="saveUser('${p.id}')">Simpan</button></td></tr>`;
@@ -12692,7 +12733,7 @@ async function saveUser(id){
     if(dup.length && dup[0].id !== id){ toast('Username sudah dipakai orang lain'); return; }
   }
   const upd = {name:$('un-'+id).value.trim(), username: usernameRaw||null, role:$('ur-'+id).value,
-    department:$('ud-'+id).value||null, active:$('ua-'+id).checked};
+    department:$('ud-'+id).value||null, birth_date: $('ub-'+id).value||null, active:$('ua-'+id).checked};
   const cbEl = $('uc-'+id);
   if(cbEl) upd.can_approve_lembur = cbEl.checked; // hanya ada di DOM untuk viewer Manager/Owner
   await q(db.from('profiles').update(upd).eq('id',id));
