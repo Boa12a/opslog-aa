@@ -10532,6 +10532,7 @@ async function renderKioskScreen(isEmergency){
       <div id="kioskLast" class="small" style="opacity:.6;margin-top:20px"></div>
       <div class="small" style="opacity:.55;margin-top:24px;max-width:320px">Jika aplikasi/HP bermasalah: foto selfie + kirim ke WhatsApp HRD${waNum?` (<b>${esc(waNum)}</b>)`:''} sebagai bukti, HRD akan catatkan manual.</div>
       ${isEmergency?`<button class="btn btn-ghost" style="margin-top:20px" onclick="exitEmergencyKiosk()">Keluar dari Mode Kios</button>`:''}
+      <button class="btn btn-ghost btn-sm" style="margin-top:24px;opacity:.5" onclick="doLogout()">Keluar / Ganti Akun</button>
     </div>`;
   clearInterval(_birthdayTimer);
   if(todayBirthdays.length){
