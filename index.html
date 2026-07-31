@@ -11234,6 +11234,23 @@ async function renderDashboard(){
     h += `</div>`;
   }
 
+  // Lembur Menunggu Otorisasi — Manager/Owner lihat semua; SPV berhak setuju lihat departemennya sendiri
+  const canApproveLembur = isMgr() || (me.role==='spv' && me.can_approve_lembur);
+  if(canApproveLembur){
+    let lbQuery = db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date');
+    if(!isMgr()) lbQuery = lbQuery.eq('department', me.department);
+    const pendingLembur = await q(lbQuery);
+    if(pendingLembur.length){
+      h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Lembur Menunggu Otorisasi</h3>`;
+      pendingLembur.forEach(r=>{
+        h += `<div class="item" style="cursor:pointer" onclick="go('lembur')">
+          ${r.department?deptTag(r.department):''} <b>${uname(r.staff_id)}</b> — ${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'}
+          <div class="small muted">${esc(r.reason)} · ${ageHtml(r.created_at)}</div></div>`;
+      });
+      h += `</div>`;
+    }
+  }
+
   if(showBirthdays && birthdaysThisMonth.length){
     h += `<div class="card"><h3>🎂 Ulang Tahun Bulan Ini</h3>`;
     birthdaysThisMonth.forEach(p=>{
@@ -12347,6 +12364,7 @@ async function renderLembur(){
       <div class="filters">
         <select id="lbFilter" onchange="loadLembur()">
           <option value="mine">Pengajuan Saya</option>
+          ${me.role==='spv'?'<option value="dept">Departemen Saya (termasuk yang saya jadwalkan)</option>':''}
           ${canApproveAny?'<option value="approve">Perlu Persetujuan Saya</option>':''}
           ${canViewAll?'<option value="all">Semua</option>':''}
         </select>
@@ -12358,7 +12376,7 @@ async function renderLembur(){
       </div>
     </div><div id="lemburList"></div>`;
   $('main').innerHTML = h;
-  $('lbFilter').value = canViewAll ? 'all' : 'mine';
+  $('lbFilter').value = canViewAll ? 'all' : (me.role==='spv' ? 'dept' : 'mine');
   loadLembur();
 }
 const LSTAT = {diajukan:{l:'Menunggu Persetujuan',c:'#FEF3C7',t:'#92400E'}, disetujui:{l:'Disetujui',c:'#DCFCE7',t:'#166534'}, ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'}};
@@ -12366,6 +12384,7 @@ async function loadLembur(){
   const f = $('lbFilter').value;
   let query = db.from('overtime_requests').select('*').order('requested_date',{ascending:false}).limit(200);
   if(f==='mine') query = query.eq('staff_id', me.id);
+  else if(f==='dept') query = query.eq('department', me.department);
   else if(f==='approve'){
     if(isMgr()) query = query.eq('status','diajukan');
     else query = query.eq('status','diajukan').eq('department', me.department);
@@ -12375,9 +12394,10 @@ async function loadLembur(){
 }
 function lemburRow(r){
   const st = LSTAT[r.status];
+  const byOther = r.created_by && r.created_by!==r.staff_id;
   return `<div class="item" style="border-left-color:${DEPTS[r.department]?.color||'#999'}" onclick="openLembur(${r.id})">
     <div class="row" style="justify-content:space-between">
-      <div>${deptTag(r.department)} <b>${uname(r.staff_id)}</b></div>
+      <div>${deptTag(r.department)} <b>${uname(r.staff_id)}</b>${byOther?` <span class="small muted">(dijadwalkan ${uname(r.created_by)})</span>`:''}</div>
       <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
     <div class="small muted">${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'} · ${esc(r.reason)}</div></div>`;
 }
@@ -12395,10 +12415,13 @@ function newLemburModal(){
 async function submitLembur(){
   const reason = $('lbReason').value.trim();
   if(!reason){ toast('Alasan wajib diisi'); return; }
+  const tgl = $('lbDate').value;
+  const dup = await q(db.from('overtime_requests').select('id').eq('staff_id',me.id).eq('requested_date',tgl).neq('status','ditolak'));
+  if(dup.length){ toast('Kamu sudah punya pengajuan/jadwal lembur di tanggal yang sama'); return; }
   if(!lockBtn($('btnSubmitLembur'))) return;
   await q(db.from('overtime_requests').insert({
-    staff_id: me.id, department: $('lbDept').value, requested_date: $('lbDate').value,
-    planned_start: $('lbStart').value||null, planned_end: $('lbEnd').value||null, reason
+    staff_id: me.id, department: $('lbDept').value, requested_date: tgl,
+    planned_start: $('lbStart').value||null, planned_end: $('lbEnd').value||null, reason, created_by: me.id
   }).select());
   closeModal(); toast('Pengajuan lembur terkirim'); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
@@ -12410,7 +12433,7 @@ async function newJadwalLemburModal(){
     staffList = await q(db.from('profiles').select('*').eq('department',me.department).in('role',['spv','staff']).eq('active',true).order('name'));
   }
   openModal(`<div class="mhead"><h3>Jadwalkan Lembur</h3><button onclick="closeModal()">✕</button></div>
-    <p class="small muted">Ini langsung tercatat sebagai <b>disetujui</b> (kamu yang menjadwalkan), langsung tampil di Dashboard orang yang dipilih.</p>
+    <p class="small muted">${(isMgr()||me.can_approve_lembur)?'Ini langsung tercatat sebagai <b>disetujui</b> (kamu punya hak setujui lembur), langsung tampil di Dashboard orang yang dipilih.':'Karena kamu belum punya hak setujui lembur, ini akan <b>menunggu otorisasi Manager/Owner</b> dulu sebelum resmi.'}</p>
     <label>Karyawan</label><select id="jlStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)} ${p.department?'— '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
     <label>Tanggal</label><input type="date" id="jlDate" value="${today()}">
     <div class="grid2"><div><label>Rencana Mulai</label><input type="time" id="jlStart"></div>
@@ -12421,23 +12444,40 @@ async function newJadwalLemburModal(){
 async function submitJadwalLembur(){
   const reason = $('jlReason').value.trim();
   if(!reason){ toast('Alasan wajib diisi'); return; }
-  if(!lockBtn($('btnSubmitJadwalLembur'))) return;
   const staffSel = $('jlStaff');
   const staffId = staffSel.value;
   const dept = staffSel.selectedOptions[0].dataset.dept || me.department || null;
-  await q(db.from('overtime_requests').insert({
-    staff_id: staffId, department: dept, requested_date: $('jlDate').value,
+  const tgl = $('jlDate').value;
+
+  // Cegah dobel: orang yang sama, tanggal yang sama, yang belum ditolak.
+  const dup = await q(db.from('overtime_requests').select('id').eq('staff_id',staffId).eq('requested_date',tgl).neq('status','ditolak'));
+  if(dup.length){ toast('Sudah ada pengajuan/jadwal lembur untuk orang & tanggal yang sama'); return; }
+  if(!lockBtn($('btnSubmitJadwalLembur'))) return;
+
+  // Cuma otomatis "Disetujui" kalau yang menjadwalkan Manager/Owner, atau SPV
+  // yang memang punya hak setujui lembur. SPV lain: tetap terjadwal, tapi
+  // statusnya "Menunggu Persetujuan" -- akan tampil di antrian Manager/Owner.
+  const autoApprove = isMgr() || (me.role==='spv' && me.can_approve_lembur);
+  const payload = {
+    staff_id: staffId, department: dept, requested_date: tgl,
     planned_start: $('jlStart').value||null, planned_end: $('jlEnd').value||null, reason,
-    status:'disetujui', approver_id: me.id, decided_at: new Date().toISOString(), decision_note:'Dijadwalkan langsung oleh '+me.name
-  }).select());
-  closeModal(); toast('Lembur dijadwalkan & langsung disetujui'); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
+    created_by: me.id
+  };
+  if(autoApprove){
+    payload.status = 'disetujui'; payload.approver_id = me.id;
+    payload.decided_at = new Date().toISOString(); payload.decision_note = 'Dijadwalkan langsung oleh '+me.name;
+  }
+  await q(db.from('overtime_requests').insert(payload).select());
+  closeModal();
+  toast(autoApprove ? 'Lembur dijadwalkan & langsung disetujui' : 'Lembur dijadwalkan, menunggu otorisasi Manager/Owner');
+  if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
 async function openLembur(id){
   const [r] = await q(db.from('overtime_requests').select('*').eq('id',id));
   const canDecide = isMgr() || (me.role==='spv' && me.can_approve_lembur && me.department===r.department);
   let h = `<div class="mhead"><h3>Pengajuan Lembur</h3><button onclick="closeModal()">✕</button></div>
     <div class="row">${deptTag(r.department)} <span class="badge" style="background:${LSTAT[r.status].c};color:${LSTAT[r.status].t}">${LSTAT[r.status].l}</span></div>
-    <p class="small muted">Diajukan oleh ${uname(r.staff_id)} · ${fdt(r.created_at)}</p>
+    <p class="small muted">Untuk: ${uname(r.staff_id)}${r.created_by && r.created_by!==r.staff_id?' · Dijadwalkan oleh '+uname(r.created_by):''} · ${fdt(r.created_at)}</p>
     <p class="small"><b>Tanggal:</b> ${fdate(r.requested_date)}<br>
     <b>Rencana Jam:</b> ${r.planned_start||'-'} – ${r.planned_end||'-'}<br>
     <b>Alasan:</b> ${esc(r.reason)}</p>`;
