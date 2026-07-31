@@ -10865,8 +10865,8 @@ async function loadJadwalGrid(){
     <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span>
     <div class="row">
       ${(canEdit && s.status==='draft')?`<button class="btn btn-navy btn-sm" onclick="submitSchedule(${s.id})">Ajukan ke Manager</button>`:''}
-      ${(isMgr() && s.status==='diajukan')?`<button class="btn btn-teal btn-sm" onclick="authorizeSchedule(${s.id})">✓ Otorisasi (Jadikan Resmi)</button>
-        <button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
+      ${(isMgr() && s.status==='diajukan')?`<button class="btn btn-teal btn-sm" onclick="authorizeSchedule(${s.id})">✓ Otorisasi (Jadikan Resmi)</button>`:''}
+      ${(isMgr() && ['diajukan','disetujui'].includes(s.status))?`<button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
     </div></div>
     <p class="small muted" style="margin-top:6px">Tanggal <span style="color:var(--red);font-weight:700">merah</span> = Sabtu/Minggu/tanggal merah — SPV tidak bisa memberi libur di hari itu, cuma Manager/Owner yang bisa kalau memang perlu.</p></div>`;
 
