@@ -10482,7 +10482,7 @@ function buildNav(){
 
   const grupSdm = [];
   if(isMgr() || isFieldWorker()) grupSdm.push(['lembur','Lembur']);
-  if(isMgr() || inOpsDept || isHrSpv()) grupSdm.push(['cuti','Ijin & Sakit']);
+  if(isMgr() || inOpsDept || isHrSpv()) grupSdm.push(['cuti','Cuti & Sakit']);
   if(isHrdOrMgr()) grupSdm.push(['hrd','HRD'],['users','Pengguna']);
 
   window._navGroups = {Operasional:grupOperasional, Pengadaan:grupPengadaan, SDM:grupSdm};
@@ -11125,10 +11125,27 @@ async function applySwapToSchedule(swapId){
 }
 
 /* ================= IJIN & SAKIT ================= */
+function dayCount(start,end){
+  return Math.round((new Date(end+'T00:00:00')-new Date(start+'T00:00:00'))/86400000)+1;
+}
+// Sisa jatah cuti tahun berjalan untuk 1 staff. Catatan: kalau rentang cuti
+// melewati batas tahun (mis. mulai 30 Des, selesai 2 Jan), penghitungan
+// jumlah hari yang dipakai HANYA mengacu ke tahun tanggal MULAI -- kasus
+// lintas-tahun yang sangat jarang ini belum ditangani presisi per-tahun.
+async function cutiRemainingDays(staffId, year){
+  const [quotaRows, approved] = await Promise.all([
+    q(db.from('cuti_quota').select('*').eq('staff_id',staffId).eq('year',year)),
+    q(db.from('leave_requests').select('start_date,end_date').eq('staff_id',staffId).eq('leave_type','cuti').eq('status','disetujui_manager'))
+  ]);
+  const total = quotaRows[0] ? Number(quotaRows[0].total_days) : 0;
+  const used = approved.filter(r=>Number(r.start_date.slice(0,4))===year).reduce((sum,r)=>sum+dayCount(r.start_date,r.end_date),0);
+  return {total, used, remaining: total-used};
+}
 async function renderCuti(){
-  let h = `<h2>Ijin &amp; Sakit</h2>
+  let h = `<h2>Cuti &amp; Sakit</h2>
     <div class="row" style="justify-content:flex-end;margin-bottom:12px">
-    ${isFieldWorker()?`<button class="btn btn-teal btn-sm" onclick="newCutiModal()">+ Ajukan Ijin/Sakit</button>`:''}
+    ${isFieldWorker()?`<button class="btn btn-teal btn-sm" onclick="newCutiModal()">+ Ajukan Cuti/Ijin/Sakit</button>`:''}
+    ${isHrdOrMgr()?`<button class="btn btn-ghost btn-sm" onclick="cutiQuotaModal()">Atur Jatah Cuti</button>`:''}
     </div><div id="cutiList"></div>`;
   $('main').innerHTML = h;
   const wa = await q(db.from('app_settings').select('*').eq('key','wa_hrd_darurat'));
@@ -11137,20 +11154,24 @@ async function renderCuti(){
 }
 const CUTISTAT = {
   diajukan:{l:'Menunggu SPV',c:'#FEF3C7',t:'#92400E'},
-  disetujui_spv:{l:'Menunggu HRD',c:'#DBEAFE',t:'#1D4ED8'},
+  disetujui_spv:{l:'Menunggu Keputusan Final',c:'#DBEAFE',t:'#1D4ED8'},
   ditolak_spv:{l:'Ditolak SPV',c:'#FEE2E2',t:'#B91C1C'},
   disetujui_hrd:{l:'Disetujui',c:'#DCFCE7',t:'#166534'},
-  ditolak_hrd:{l:'Ditolak HRD',c:'#FEE2E2',t:'#B91C1C'}
+  ditolak_hrd:{l:'Ditolak HRD',c:'#FEE2E2',t:'#B91C1C'},
+  disetujui_manager:{l:'Disetujui',c:'#DCFCE7',t:'#166534'},
+  ditolak_manager:{l:'Ditolak Manager',c:'#FEE2E2',t:'#B91C1C'}
 };
+const LEAVE_TYPE_LABEL = {ijin:{l:'Ijin',c:'#E0E7FF',t:'#4338CA'}, sakit:{l:'Sakit',c:'#FEE2E2',t:'#B91C1C'}, cuti:{l:'Cuti',c:'#FEF9C3',t:'#854D0E'}};
 async function loadCutiList(){
   let query = db.from('leave_requests').select('*').order('created_at',{ascending:false}).limit(100);
   if(!isMgr() && !isHrSpv()) query = isFieldWorker() ? query.eq('department', me.department) : query.eq('staff_id', me.id);
   const list = await q(query);
   $('cutiList').innerHTML = list.length ? list.map(r=>{
     const st = CUTISTAT[r.status];
+    const lt = LEAVE_TYPE_LABEL[r.leave_type] || {l:r.leave_type,c:'#F3F4F6',t:'#374151'};
     return `<div class="item" style="cursor:pointer" onclick="openCuti(${r.id})">
       <div class="row" style="justify-content:space-between">
-        ${deptTag(r.department)} <span class="badge" style="background:${r.leave_type==='sakit'?'#FEE2E2':'#E0E7FF'};color:${r.leave_type==='sakit'?'#B91C1C':'#4338CA'}">${r.leave_type==='sakit'?'Sakit':'Ijin'}</span>
+        ${deptTag(r.department)} <span class="badge" style="background:${lt.c};color:${lt.t}">${lt.l}</span>
         <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
       <div class="small"><b>${uname(r.staff_id)}</b>: ${fdate(r.start_date)} – ${fdate(r.end_date)}</div>
       <div class="small muted">${esc(r.reason)}</div></div>`;
@@ -11158,18 +11179,35 @@ async function loadCutiList(){
 }
 function newCutiModal(){
   const staffList = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active && p.department===me.department);
-  openModal(`<div class="mhead"><h3>Ajukan Ijin / Sakit</h3><button onclick="closeModal()">✕</button></div>
-    <label>Karyawan</label><select id="cuStaff">${staffList.map(p=>`<option value="${p.id}" ${p.id===me.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
-    <label>Jenis</label><select id="cuType" onchange="toggleSakitNote()"><option value="ijin">Ijin</option><option value="sakit">Sakit</option></select>
+  openModal(`<div class="mhead"><h3>Ajukan Cuti / Ijin / Sakit</h3><button onclick="closeModal()">✕</button></div>
+    <label>Karyawan</label><select id="cuStaff" onchange="toggleCutiNote()">${staffList.map(p=>`<option value="${p.id}" ${p.id===me.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
+    <label>Jenis</label><select id="cuType" onchange="toggleCutiNote()"><option value="ijin">Ijin</option><option value="sakit">Sakit</option><option value="cuti">Cuti</option></select>
     <div id="sakitNote" class="hidden" style="background:#FEF3C7;padding:10px;border-radius:8px;margin-top:8px">
       <p class="small" style="color:#92400E">⚠ Wajib kirim foto keterangan dokter ke WhatsApp HRD${window._waHrd?' ('+esc(window._waHrd)+')':''} sebagai bukti. HRD akan verifikasi sebelum menyetujui.</p></div>
+    <div id="cutiQuotaNote" class="hidden small muted" style="margin-top:8px"></div>
     <label>Tanggal Mulai</label><input type="date" id="cuStart">
     <label>Tanggal Selesai</label><input type="date" id="cuEnd">
     <label>Alasan</label><textarea id="cuReason" rows="2"></textarea>
     <button class="btn btn-teal" id="btnSubmitCuti" style="margin-top:14px;width:100%" onclick="submitCuti()">Ajukan</button>`);
+  toggleCutiNote();
 }
-function toggleSakitNote(){
-  $('sakitNote').classList.toggle('hidden', $('cuType').value!=='sakit');
+async function toggleCutiNote(){
+  const type = $('cuType').value;
+  $('sakitNote').classList.toggle('hidden', type!=='sakit');
+  const noteEl = $('cutiQuotaNote');
+  if(type==='cuti'){
+    const staffId = $('cuStaff').value;
+    const staff = profilesCache.find(p=>p.id===staffId);
+    if(staff && staff.cuti_enabled){
+      const {total,used,remaining} = await cutiRemainingDays(staffId, new Date().getFullYear());
+      noteEl.innerHTML = `Jatah cuti ${new Date().getFullYear()}: <b>${remaining}</b> hari tersisa (dari ${total}, sudah dipakai ${used}).`;
+    } else {
+      noteEl.innerHTML = `${staff?esc(staff.name):'Karyawan ini'} belum diaktifkan jatah cuti — pengajuan tetap bisa diajukan, tapi tidak mengurangi jatah apa pun.`;
+    }
+    noteEl.classList.remove('hidden');
+  } else {
+    noteEl.classList.add('hidden');
+  }
 }
 async function submitCuti(){
   const start = $('cuStart').value, end = $('cuEnd').value, reason = $('cuReason').value.trim();
@@ -11184,10 +11222,12 @@ async function submitCuti(){
 async function openCuti(id){
   const [r] = await q(db.from('leave_requests').select('*').eq('id',id));
   const st = CUTISTAT[r.status];
-  let h = `<div class="mhead"><h3>${r.leave_type==='sakit'?'Sakit':'Ijin'}</h3><button onclick="closeModal()">✕</button></div>
+  const lt = LEAVE_TYPE_LABEL[r.leave_type] || {l:r.leave_type};
+  const isCuti = r.leave_type==='cuti';
+  let h = `<div class="mhead"><h3>${lt.l}</h3><button onclick="closeModal()">✕</button></div>
     <div class="row">${deptTag(r.department)} <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
     <p class="small" style="margin-top:8px"><b>Karyawan:</b> ${uname(r.staff_id)}<br>
-    <b>Tanggal:</b> ${fdate(r.start_date)} – ${fdate(r.end_date)}<br>
+    <b>Tanggal:</b> ${fdate(r.start_date)} – ${fdate(r.end_date)} (${dayCount(r.start_date,r.end_date)} hari)<br>
     <b>Alasan:</b> ${esc(r.reason)}</p>`;
   if(r.leave_type==='sakit'){
     h += `<p class="small">Bukti foto dokter via WA: ${r.doctor_note_received?'<b style="color:var(--green)">✓ Sudah diterima</b>':'<b style="color:var(--red)">Belum diterima</b>'}</p>`;
@@ -11195,12 +11235,24 @@ async function openCuti(id){
       h += `<button class="btn btn-ghost btn-sm" onclick="toggleDoctorNote(${r.id},${!r.doctor_note_received})">${r.doctor_note_received?'Batalkan tanda terima':'✓ Tandai Foto Sudah Diterima'}</button>`;
     }
   }
+  if(isCuti && r.status==='disetujui_manager'){
+    const staff = profilesCache.find(p=>p.id===r.staff_id);
+    if(staff && staff.cuti_enabled){
+      const {remaining} = await cutiRemainingDays(r.staff_id, Number(r.start_date.slice(0,4)));
+      h += `<p class="small muted">Sisa jatah cuti ${r.start_date.slice(0,4)} setelah ini: <b>${remaining}</b> hari.</p>`;
+    }
+  }
   if(r.status==='diajukan' && (isMgr() || (me.role==='spv' && me.department===r.department))){
     h += `<div class="row" style="margin-top:10px">
       <button class="btn btn-teal btn-sm" onclick="decideCutiSpv(${r.id},true)">✓ Setujui (SPV)</button>
       <button class="btn btn-ghost btn-sm" onclick="decideCutiSpv(${r.id},false)">Tolak</button></div>`;
   }
-  if(r.status==='disetujui_spv' && (isHrSpv()||isMgr())){
+  if(r.status==='disetujui_spv' && isCuti && isMgr()){
+    h += `<div class="row" style="margin-top:10px">
+      <button class="btn btn-teal btn-sm" onclick="decideCutiManager(${r.id},true)">✓ Setujui (Manager)</button>
+      <button class="btn btn-ghost btn-sm" onclick="decideCutiManager(${r.id},false)">Tolak</button></div>`;
+  }
+  if(r.status==='disetujui_spv' && !isCuti && (isHrSpv()||isMgr())){
     const canApproveHrd = r.leave_type!=='sakit' || r.doctor_note_received;
     h += `<div class="row" style="margin-top:10px">
       <button class="btn btn-teal btn-sm" ${canApproveHrd?'':'disabled title="Tandai foto diterima dulu"'} onclick="decideCutiHrd(${r.id},true)">✓ Setujui (HRD)</button>
@@ -11217,7 +11269,7 @@ async function decideCutiSpv(id, approve){
   await q(db.from('leave_requests').update({
     status: approve?'disetujui_spv':'ditolak_spv', spv_decision_by:me.id, spv_decision_at:new Date().toISOString(), spv_decision_note:note
   }).eq('id',id));
-  toast(approve?'Disetujui, diteruskan ke HRD':'Ditolak'); closeModal(); loadCutiList();
+  toast(approve?'Disetujui, diteruskan ke tahap final':'Ditolak'); closeModal(); loadCutiList();
 }
 async function decideCutiHrd(id, approve){
   let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
@@ -11225,6 +11277,38 @@ async function decideCutiHrd(id, approve){
     status: approve?'disetujui_hrd':'ditolak_hrd', hrd_decision_by:me.id, hrd_decision_at:new Date().toISOString(), hrd_decision_note:note
   }).eq('id',id));
   toast(approve?'Disetujui HRD':'Ditolak'); closeModal(); loadCutiList();
+}
+// Keputusan final KHUSUS Cuti -- terpisah dari HRD, cuma Manager/Owner
+// (ditegakkan juga di database lewat trigger, lihat migration_cuti.sql).
+async function decideCutiManager(id, approve){
+  let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
+  await q(db.from('leave_requests').update({
+    status: approve?'disetujui_manager':'ditolak_manager', manager_decision_by:me.id, manager_decision_at:new Date().toISOString(), manager_decision_note:note
+  }).eq('id',id));
+  toast(approve?'Cuti disetujui':'Cuti ditolak'); closeModal(); loadCutiList();
+}
+// Atur jatah cuti tahunan per karyawan (HRD/Manager).
+function cutiQuotaModal(){
+  const staffList = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active);
+  const yr = new Date().getFullYear();
+  openModal(`<div class="mhead"><h3>Atur Jatah Cuti ${yr}</h3><button onclick="closeModal()">✕</button></div>
+    <label>Karyawan</label><select id="cqStaff" onchange="loadCutiQuotaCurrent()">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}${p.cuti_enabled?'':' (belum aktif)'}</option>`).join('')}</select>
+    <label>Jatah Hari (tahun ${yr})</label><input type="number" step="0.5" id="cqDays" placeholder="mis. 12">
+    <p class="small muted" id="cqCurrentNote" style="margin-top:6px"></p>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="saveCutiQuota()">Simpan</button>`);
+  loadCutiQuotaCurrent();
+}
+async function loadCutiQuotaCurrent(){
+  const staffId = $('cqStaff').value, yr = new Date().getFullYear();
+  const {total,used,remaining} = await cutiRemainingDays(staffId, yr);
+  $('cqDays').value = total || '';
+  $('cqCurrentNote').textContent = `Saat ini: ${total} hari jatah, ${used} sudah dipakai, sisa ${remaining}.`;
+}
+async function saveCutiQuota(){
+  const staffId = $('cqStaff').value, yr = new Date().getFullYear();
+  const days = Number($('cqDays').value||0);
+  await q(db.from('cuti_quota').upsert({staff_id:staffId, year:yr, total_days:days, updated_by:me.id, updated_at:new Date().toISOString()}, {onConflict:'staff_id,year'}).select());
+  toast('Jatah cuti tersimpan'); loadCutiQuotaCurrent();
 }
 
 /* ================= DASHBOARD ================= */
@@ -13035,10 +13119,11 @@ async function delCatalog(id){
 /* ================= PENGGUNA (Owner) ================= */
 async function renderUsers(){
   profilesCache = await q(db.from('profiles').select('*').order('created_at'));
+  const acctShifts = await q(db.from('shifts').select('*').eq('department','accounting').eq('active',true).order('sort_order'));
   let h = `<h2>Kelola Pengguna</h2>
   <p class="small muted" style="margin-bottom:10px">Role <b>Staff</b> setara SPV untuk departemennya (dipakai saat SPV tidak ada). Role <b>Kios Absensi</b> khusus perangkat HP penampil QR absen. Departemen <b>HR</b> dan <b>Accounting</b> — hanya yang ber-role <b>SPV</b> di departemen itu yang dapat akses penuh (Kelola Pengguna/halaman HRD untuk HR; proses Kerusakan &amp; Pengadaan untuk Accounting). Staff di HR/Accounting cuma dapat hak umum (ganti password, ajukan lembur sendiri).</p>
   <button class="btn btn-teal" style="margin-bottom:12px" onclick="newEmployeeModal()">+ Daftarkan Karyawan Baru</button>`;
-  h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Username</th><th>Role</th><th>Dept</th><th>Tgl Lahir</th>${isMgr()?'<th>Boleh Setujui Lembur</th>':''}<th>Aktif</th><th></th></tr>`;
+  h += `<div class="card"><table class="respTable"><tr><th>Nama</th><th>Username</th><th>Role</th><th>Dept</th><th>Tgl Lahir</th>${isMgr()?'<th>Boleh Setujui Lembur</th>':''}${isHrdOrMgr()?'<th>Shift Tetap (Accounting)</th><th>Cuti Aktif</th>':''}<th>Aktif</th><th></th></tr>`;
   profilesCache.forEach(p=>{
     h += `<tr><td data-label="Nama"><input value="${esc(p.name)}" id="un-${p.id}" style="padding:5px 8px;min-width:110px"></td>
       <td data-label="Username"><input value="${esc(p.username||'')}" id="uu-${p.id}" placeholder="mis. lukman" style="padding:5px 8px;min-width:100px"></td>
@@ -13046,6 +13131,8 @@ async function renderUsers(){
       <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
       <td data-label="Tgl Lahir"><input type="date" id="ub-${p.id}" value="${p.birth_date||''}" style="padding:5px 8px"></td>
       ${isMgr()?`<td data-label="Boleh Setujui Lembur">${p.role==='spv'?`<input type="checkbox" id="uc-${p.id}" ${p.can_approve_lembur?'checked':''} style="width:18px;height:18px">`:'<span class="small muted">-</span>'}</td>`:''}
+      ${isHrdOrMgr()?`<td data-label="Shift Tetap (Accounting)">${p.department==='accounting'?`<select id="uss-${p.id}" style="padding:5px 8px"><option value="">- belum diatur -</option>${acctShifts.map(s=>`<option value="${s.id}" ${p.default_shift_id===s.id?'selected':''}>${esc(s.shift_name)}</option>`).join('')}</select>`:'<span class="small muted">-</span>'}</td>
+      <td data-label="Cuti Aktif"><input type="checkbox" id="uce-${p.id}" ${p.cuti_enabled?'checked':''} style="width:18px;height:18px"></td>`:''}
       <td data-label="Aktif"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''} style="width:18px;height:18px"></td>
       <td><button class="btn-sm btn-teal" style="width:100%" onclick="saveUser('${p.id}')">Simpan</button></td></tr>`;
   });
@@ -13065,6 +13152,10 @@ async function saveUser(id){
     department:$('ud-'+id).value||null, birth_date: $('ub-'+id).value||null, active:$('ua-'+id).checked};
   const cbEl = $('uc-'+id);
   if(cbEl) upd.can_approve_lembur = cbEl.checked; // hanya ada di DOM untuk viewer Manager/Owner
+  const ssEl = $('uss-'+id);
+  if(ssEl) upd.default_shift_id = ssEl.value ? Number(ssEl.value) : null; // shift tetap Accounting, hanya ada di DOM untuk dept Accounting
+  const uceEl = $('uce-'+id);
+  if(uceEl) upd.cuti_enabled = uceEl.checked; // hanya ada di DOM untuk viewer HRD/Manager/Owner
   await q(db.from('profiles').update(upd).eq('id',id));
   toast('Pengguna diperbarui');
   profilesCache = await q(db.from('profiles').select('*'));
