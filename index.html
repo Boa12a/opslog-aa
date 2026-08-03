@@ -10349,6 +10349,13 @@ const $ = id => document.getElementById(id);
 const esc = s => (s??'').toString().replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const rp = n => 'Rp ' + Number(n||0).toLocaleString('id-ID');
 const today = () => new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD lokal
+// PENTING: scanned_at/created_at dari Supabase adalah timestamptz (UTC).
+// today() pakai timezone LOKAL perangkat. Ambil tanggal kalender dari sebuah
+// timestamp HARUS lewat fungsi ini (bukan .slice(0,10) mentah pada string
+// ISO), supaya kedua sisi konsisten -- kalau tidak, scan jam 00:00-06:59 WIB
+// bisa salah dianggap "hari kemarin" (karena UTC-nya memang masih tanggal
+// sebelumnya), padahal secara lokal sudah masuk hari baru.
+function localDateOf(iso){ return new Date(iso).toLocaleDateString('sv-SE'); }
 const fdate = d => d ? new Date(d+'T00:00:00').toLocaleDateString('id-ID',{day:'numeric',month:'short',year:'numeric'}) : '-';
 const fdt = d => d ? new Date(d).toLocaleString('id-ID',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '-';
 const ageDays = d => Math.floor((Date.now() - new Date(d).getTime())/86400000);
@@ -10601,7 +10608,7 @@ async function absenGateState(){
   ]);
   // Kehadiran: cuma dikunci ke "Absen Pulang saja" kalau sesi Absen Datang
   // yang belum ditutup itu terjadi HARI INI (sesuai kata-katamu "di hari yang sama").
-  const openKehadiranToday = !!(lastK.length && lastK[0].fase==='mulai' && lastK[0].scanned_at.slice(0,10)===t0);
+  const openKehadiranToday = !!(lastK.length && lastK[0].fase==='mulai' && localDateOf(lastK[0].scanned_at)===t0);
   // Treatment: TIDAK dibatasi hari (bisa ganti hari) -- selama belum ada
   // Selesai Treatment yang menutup sesi mulai terakhir, tetap terbuka.
   const openTreatment = !!(lastT.length && lastT[0].fase==='mulai');
@@ -12535,7 +12542,7 @@ async function computeLemburForRequest(req){
   const dateStr = req.requested_date;
   const from = addDays(dateStr,-1), to = addDays(dateStr,1)+'T23:59:59';
   const logs = await q(db.from('attendance_logs').select('*').eq('staff_id',req.staff_id).eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
-  const sessions = pairSessions(logs, l=>'k').filter(s=>s.start && s.start.slice(0,10)===dateStr).sort((a,b)=>new Date(a.start)-new Date(b.start));
+  const sessions = pairSessions(logs, l=>'k').filter(s=>s.start && localDateOf(s.start)===dateStr).sort((a,b)=>new Date(a.start)-new Date(b.start));
   if(!sessions.length) return 0;
   const normal = await jamNormalForDate(staff, dateStr);
   const normalDur = normal ? normalDurationHours(normal.mulai, normal.selesai) : 0;
@@ -12869,7 +12876,7 @@ async function loadHrdAttendance(){
     h += `<table class="respTable"><tr><th>Tanggal</th><th>Nama</th><th>Dept</th><th>Datang</th><th>Pulang</th><th>Status</th></tr>`;
     sessions.slice(0,50).forEach(s=>{
       const incomplete = !s.end;
-      h += `<tr><td data-label="Tanggal">${fdate((s.start||s.end).slice(0,10))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
+      h += `<tr><td data-label="Tanggal">${fdate(localDateOf(s.start||s.end))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
         <td data-label="Dept">${s.department?divTag(s.department):'-'}</td>
         <td data-label="Datang">${s.start?fdt(s.start):'-'}</td><td data-label="Pulang">${s.end?fdt(s.end):'-'}</td>
         <td data-label="Status">${incomplete?'<span class="age-red">⚠ Belum Pulang</span>':'Lengkap'}</td></tr>`;
@@ -12894,7 +12901,7 @@ async function loadHrdTreatment(){
     sessions.slice(0,50).forEach(s=>{
       const poolName = pools.find(p=>p.id===s.pool_type_id)?.name || '-';
       const durasi = (s.start && s.end) ? (((new Date(s.end)-new Date(s.start))/3600000).toFixed(1)+' jam') : '-';
-      h += `<tr><td data-label="Tanggal">${fdate((s.start||s.end).slice(0,10))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
+      h += `<tr><td data-label="Tanggal">${fdate(localDateOf(s.start||s.end))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
         <td data-label="Kolam">${esc(poolName)}</td><td data-label="Mulai">${s.start?fdt(s.start):'-'}</td>
         <td data-label="Selesai">${s.end?fdt(s.end):'<span class="age-red">⚠ Belum Selesai</span>'}</td>
         <td data-label="Durasi">${durasi}</td></tr>`;
@@ -12910,7 +12917,7 @@ async function exportKehadiranExcel(){
   const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
   const sessions = pairSessions(logs, l=>'k');
   const rows = sessions.map(s=>({
-    Tanggal: (s.start||s.end).slice(0,10), Nama: uname(s.staff_id),
+    Tanggal: localDateOf(s.start||s.end), Nama: uname(s.staff_id),
     Departemen: s.department?(DIVS[s.department]?.label||s.department):'-',
     Datang: s.start?fdt(s.start):'', Pulang: s.end?fdt(s.end):'',
     Status: s.end?'Lengkap':'Belum Pulang'
@@ -12929,7 +12936,7 @@ async function exportTreatmentExcel(){
   ]);
   const sessions = pairSessions(logs, l=>'p'+l.pool_type_id);
   const rows = sessions.map(s=>({
-    Tanggal: (s.start||s.end).slice(0,10), Nama: uname(s.staff_id),
+    Tanggal: localDateOf(s.start||s.end), Nama: uname(s.staff_id),
     Kolam: pools.find(p=>p.id===s.pool_type_id)?.name || '-',
     Mulai: s.start?fdt(s.start):'', Selesai: s.end?fdt(s.end):'',
     'Durasi (jam)': (s.start&&s.end)?((new Date(s.end)-new Date(s.start))/3600000).toFixed(1):''
