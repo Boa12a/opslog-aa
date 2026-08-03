@@ -10588,8 +10588,6 @@ function exitEmergencyKiosk(){
 const ABSEN_TYPES = {
   kehadiran_mulai:{l:'Absen Datang', kategori:'kehadiran', fase:'mulai'},
   kehadiran_selesai:{l:'Absen Pulang', kategori:'kehadiran', fase:'selesai'},
-  lembur_mulai:{l:'Mulai Lembur', kategori:'lembur', fase:'mulai'},
-  lembur_selesai:{l:'Selesai Lembur', kategori:'lembur', fase:'selesai'},
   treatment_mulai:{l:'Mulai Treatment', kategori:'treatment', fase:'mulai'},
   treatment_selesai:{l:'Selesai Treatment', kategori:'treatment', fase:'selesai'}
 };
@@ -10723,17 +10721,8 @@ async function submitAttendance(tokenId){
     token_id: tokenId, input_method:'qr', input_by: me.id
   };
 
-  // Tautkan ke pengajuan lembur yang disetujui (kalau ada).
-  // Khusus Staff: WAJIB ada persetujuan SPV dulu, kalau tidak ada -> ditolak total.
-  if(type.kategori==='lembur'){
-    const t0 = today();
-    const ov = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').eq('requested_date',t0));
-    if(ov.length) payload.overtime_request_id = ov[0].id;
-    else if(me.role==='staff'){
-      toast('Belum ada persetujuan SPV untuk lembur hari ini — ajukan dulu di menu Lembur');
-      closeModal(); return;
-    }
-  }
+  // (Lembur tidak lagi discan terpisah — dihapus dari sini. Perhitungan jam
+  // lembur sekarang otomatis dari sesi Absen Datang/Pulang, lihat computeLemburForRequest().)
 
   // Snapshot kelengkapan checklist — hanya untuk SPV, saat Absen Pulang
   if(type.kategori==='kehadiran' && type.fase==='selesai' && me.role==='spv' && me.department){
@@ -10824,12 +10813,15 @@ async function renderJadwalBulanan(){
 async function loadJadwalGrid(){
   const dept = $('jwDept').value, month = $('jwMonth').value;
   const canEdit = isMgr() || (me.role==='spv' && me.department===dept);
-  const [sched, shifts, staffList, holidays] = await Promise.all([
+  const [sched, shifts, staffList, holidays, offRules] = await Promise.all([
     q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('department',dept).eq('period_month',month)),
     q(db.from('shifts').select('*').eq('department',dept).eq('active',true).order('sort_order')),
     q(db.from('profiles').select('*').eq('department',dept).in('role',['spv','staff']).eq('active',true)),
-    q(db.from('public_holidays').select('*').gte('holiday_date', month+'-01').lte('holiday_date', month+'-31'))
+    q(db.from('public_holidays').select('*').gte('holiday_date', month+'-01').lte('holiday_date', month+'-31')),
+    q(db.from('department_off_rules').select('*').eq('department',dept))
   ]);
+  // Default 'manager_override' kalau departemen belum ada baris di tabel (aman, sama seperti perilaku lama).
+  const weekendOffRule = offRules[0]?.weekend_off_rule || 'manager_override';
   let s = sched[0];
 
   if(!s){
@@ -10865,7 +10857,7 @@ async function loadJadwalGrid(){
       ${(isMgr() && s.status==='diajukan')?`<button class="btn btn-teal btn-sm" onclick="authorizeSchedule(${s.id})">✓ Otorisasi (Jadikan Resmi)</button>`:''}
       ${(isMgr() && ['diajukan','disetujui'].includes(s.status))?`<button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
     </div></div>
-    <p class="small muted" style="margin-top:6px">Tanggal <span style="color:var(--red);font-weight:700">merah</span> = Sabtu/Minggu/tanggal merah — SPV tidak bisa memberi libur di hari itu, cuma Manager/Owner yang bisa kalau memang perlu.</p>
+    <p class="small muted" style="margin-top:6px">Tanggal <span style="color:var(--red);font-weight:700">merah</span> = Sabtu/Minggu/tanggal merah — ${weekendOffRule==='forbidden' ? 'departemen ini TIDAK BOLEH memberi libur di hari itu sama sekali, termasuk Manager/Owner.' : 'SPV tidak bisa memberi libur di hari itu, cuma Manager/Owner yang bisa kalau memang perlu.'}</p>
     ${(missingCount>0 && s.status!=='draft')?`<div class="row" style="justify-content:space-between;margin-top:8px;background:#FEF3C7;padding:8px 10px;border-radius:8px">
       <span class="small" style="color:#92400E">⚠ Ada staff yang belum punya entri di jadwal resmi ini (mis. baru ditambahkan setelah jadwal dibuat).</span>
       ${isMgr()?`<button class="btn btn-navy btn-sm" onclick="fillMissingSchedule(${s.id},'${dept}','${month}')">Lengkapi Sekarang</button>`:''}
@@ -10896,8 +10888,11 @@ async function loadJadwalGrid(){
         const entry = s.work_schedule_entries.find(e=>e.staff_id===p.id && e.work_date===dateStr);
         const restricted = isRestricted(dateStr, dowIdx);
         const dateStyle = restricted ? 'color:var(--red);font-weight:700' : '';
-        // SPV tidak boleh set Libur di hari terlarang; Manager/Owner tetap bebas.
-        const lockedForSpv = restricted && !isMgr();
+        // Aturan per-departemen: 'forbidden' = terkunci untuk SEMUA ORANG termasuk Manager/Owner;
+        // 'manager_override' (default lama) = SPV terkunci, Manager/Owner tetap bebas; 'none' = tidak terkunci.
+        const lockedForSpv = restricted && weekendOffRule==='manager_override' && !isMgr();
+        const lockedForAll = restricted && weekendOffRule==='forbidden';
+        const cellLocked = lockedForSpv || lockedForAll;
         if(canEditGrid){
           const isOffNow = entry && entry.is_off;
           const noSpecificShift = entry && !entry.is_off && !entry.shift_id;
@@ -10905,7 +10900,7 @@ async function loadJadwalGrid(){
           const fg = !entry ? '#374151' : (isOffNow ? '#6B7280' : '#166534');
           h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${d}</div>
             <select class="calSelect" style="background:${bg};color:${fg}" onchange="setScheduleCell(${s.id},'${p.id}','${dateStr}',this.value,this)">
-              ${lockedForSpv?'':`<option value="off" ${isOffNow?'selected':''}>L</option>`}
+              ${cellLocked?'':`<option value="off" ${isOffNow?'selected':''}>L</option>`}
               <option value="kerja" ${(!entry || noSpecificShift)?'selected':''}>${shifts.length?'Kerja (belum pilih shift)':'K'}</option>
               ${shifts.map(sh=>`<option value="${sh.id}" ${entry&&!entry.is_off&&entry.shift_id===sh.id?'selected':''}>${esc(sh.shift_name)}</option>`).join('')}
             </select></td>`;
@@ -11223,7 +11218,7 @@ async function renderDashboard(){
   let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
 
   // Jadwal Lembur Anda — tampil untuk siapa pun yang dijadwalkan lembur (disetujui, tanggal hari ini/mendatang)
-  const myLembur = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').gte('requested_date', t).order('requested_date'));
+  const myLembur = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').is('voided_at',null).gte('requested_date', t).order('requested_date'));
   if(myLembur.length){
     h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>⏰ Jadwal Lembur Anda</h3>`;
     myLembur.forEach(r=>{
@@ -11234,12 +11229,9 @@ async function renderDashboard(){
     h += `</div>`;
   }
 
-  // Lembur Menunggu Otorisasi — Manager/Owner lihat semua; SPV berhak setuju lihat departemennya sendiri
-  const canApproveLembur = isMgr() || (me.role==='spv' && me.can_approve_lembur);
-  if(canApproveLembur){
-    let lbQuery = db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date');
-    if(!isMgr()) lbQuery = lbQuery.eq('department', me.department);
-    const pendingLembur = await q(lbQuery);
+  // Lembur Menunggu Otorisasi — cuma Manager/Owner (SPV tidak lagi memutuskan pengajuan siapa pun)
+  if(isMgr()){
+    const pendingLembur = await q(db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date'));
     if(pendingLembur.length){
       h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Lembur Menunggu Otorisasi</h3>`;
       pendingLembur.forEach(r=>{
@@ -11588,12 +11580,17 @@ async function exportLogsExcel(){
 }
 async function exportLemburExcel(){
   const list = await q(db.from('overtime_requests').select('*').order('requested_date'));
-  const rows = list.map(r=>({
-    Tanggal: r.requested_date, Departemen: DEPTS[r.department]?DEPTS[r.department].label:r.department,
-    Nama: uname(r.staff_id), 'Rencana Mulai': r.planned_start||'', 'Rencana Selesai': r.planned_end||'',
-    Alasan: r.reason, Status: LSTAT[r.status].l, 'Jam Aktual': r.actual_hours??'',
-    Penyetuju: r.approver_id?uname(r.approver_id):'', 'Catatan Keputusan': r.decision_note||''
-  }));
+  const rows = [];
+  for(const r of list){
+    const jamLembur = r.status==='disetujui' ? await computeLemburForRequest(r) : '';
+    rows.push({
+      Tanggal: r.requested_date, Departemen: DEPTS[r.department]?DEPTS[r.department].label:r.department,
+      Nama: uname(r.staff_id), 'Rencana Mulai': r.planned_start||'', 'Rencana Selesai': r.planned_end||'',
+      Alasan: r.reason, Status: r.voided_at?'Dibatalkan (Void)':LSTAT[r.status].l, 'Jam Lembur (Otomatis)': jamLembur,
+      Penyetuju: r.approver_id?uname(r.approver_id):'', 'Catatan Keputusan': r.decision_note||'',
+      'Void Oleh': r.voided_by?uname(r.voided_by):'', 'Alasan Void': r.void_reason||''
+    });
+  }
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Lembur');
@@ -12343,40 +12340,108 @@ async function delMtc(id){
   loadMtc();
 }
 
-/* ================= LEMBUR (PENGAJUAN + PERSETUJUAN) ================= */
-// Lembur WAJIB diajukan & disetujui SEBELUM dikerjakan. SPV tertentu bisa
-// diberi hak menyetujui (can_approve_lembur); kalau departemennya tidak
-// punya SPV berhak, pengajuan otomatis jadi urusan Manager/Owner.
-function empoweredSpvFor(dept){
-  return profilesCache.find(p=>p.role==='spv' && p.department===dept && p.can_approve_lembur && p.active);
+/* ================= LEMBUR (CATAT LANGSUNG / PENGAJUAN) ================= */
+// Cuma SPV & Manager/Owner yang bisa membuat catatan lembur -- staff tidak
+// bisa mengajukan sendiri sama sekali. Lembur berlaku untuk staff & SPV di
+// semua departemen (Manager/Owner sendiri tidak ada lembur).
+// - SPV mengajukan untuk ANAK BUAH: kalau SPV itu punya can_approve_lembur
+//   ("Boleh Setujui Lembur" di Kelola Pengguna) -> langsung tercatat 'disetujui'
+//   (hak #1, catat langsung, tanpa ke Manager). Kalau tidak dicentang -> masuk
+//   antrian Manager (hak #2).
+// - SPV mengajukan untuk DIRI SENDIRI -> SELALU ke Manager, tidak peduli
+//   status can_approve_lembur miliknya.
+// - Manager/Owner membuat untuk siapa pun -> langsung 'disetujui' (Manager
+//   adalah approver tertinggi; ini juga cara mengurus lembur staff Engineering
+//   & General Affair yang tidak punya SPV sama sekali).
+// Jam lembur TIDAK di-scan terpisah -- dihitung otomatis dari selisih sesi
+// Absen Datang/Pulang vs jam kerja normal, dibatasi maksimal sesuai jam yang
+// diajukan (planned_start/planned_end). Lihat computeLemburForRequest().
+function dayTypeOf(dateStr){
+  const dow = new Date(dateStr+'T00:00:00').getDay();
+  return (dow===0||dow===6) ? 'weekend' : 'weekday';
 }
-function myApprovableDepts(){
-  if(isMgr()) return null; // null = semua dept (mgr/owner lihat semua)
-  if(me.role==='spv' && me.can_approve_lembur && me.department) return [me.department];
-  return [];
+function hmToMinutes(hm){ const [h,m]=hm.split(':').map(Number); return h*60+m; }
+function normalDurationHours(jamMulai, jamSelesai){
+  let mins = hmToMinutes(jamSelesai) - hmToMinutes(jamMulai);
+  if(mins<=0) mins += 24*60; // lintas tengah malam (mis. shift malam Security)
+  return mins/60;
+}
+// Jam kerja normal staff untuk 1 tanggal tertentu -- sumbernya beda per golongan:
+// Security & Accounting pakai shift (jam_mulai/jam_selesai di tabel shifts),
+// departemen lain pakai department_default_hours (beda weekday/weekend).
+async function jamNormalForDate(staff, dateStr){
+  if(!staff.department) return null;
+  if(staff.department==='security'){
+    const month = dateStr.slice(0,7);
+    const sched = await q(db.from('work_schedules').select('id').eq('department','security').eq('period_month',month));
+    if(!sched.length) return null;
+    const entries = await q(db.from('work_schedule_entries').select('*').eq('schedule_id',sched[0].id).eq('staff_id',staff.id).eq('work_date',dateStr));
+    const entry = entries[0];
+    if(!entry || entry.is_off || !entry.shift_id) return null;
+    const sh = (await q(db.from('shifts').select('*').eq('id',entry.shift_id)))[0];
+    return (sh && sh.jam_mulai && sh.jam_selesai) ? {mulai:sh.jam_mulai, selesai:sh.jam_selesai} : null;
+  }
+  if(staff.department==='accounting'){
+    if(!staff.default_shift_id) return null;
+    const sh = (await q(db.from('shifts').select('*').eq('id',staff.default_shift_id)))[0];
+    return (sh && sh.jam_mulai && sh.jam_selesai) ? {mulai:sh.jam_mulai, selesai:sh.jam_selesai} : null;
+  }
+  const dt = dayTypeOf(dateStr);
+  const row = (await q(db.from('department_default_hours').select('*').eq('department',staff.department).eq('day_type',dt)))[0];
+  return row ? {mulai:row.jam_mulai, selesai:row.jam_selesai} : null;
+}
+// Hitung jam lembur otomatis untuk 1 pengajuan yang sudah disetujui.
+// - Sesi PERTAMA hari itu: cuma kelebihan dari jam normal yang dihitung
+//   (menutup kasus lembur lanjutan MAUPUN datang lebih awal sekaligus,
+//   karena keduanya sama-sama "total jam kerja hari itu lebih lama dari
+//   jam normal").
+// - Sesi KE-2 dst di hari yang sama (balik lagi lembur setelah Absen Pulang,
+//   wajib Absen Datang lagi) -> seluruh durasinya dihitung, tidak ada jam
+//   normal untuk dikurangi.
+// - Semua sesi yang belum ada Absen Pulang-nya (end null) diabaikan dulu.
+// - Total dibatasi maksimal sesuai planned_start/planned_end pengajuan.
+async function computeLemburForRequest(req){
+  if(req.voided_at) return 0;
+  const staff = (await q(db.from('profiles').select('*').eq('id',req.staff_id)))[0];
+  if(!staff) return 0;
+  const dateStr = req.requested_date;
+  const from = addDays(dateStr,-1), to = addDays(dateStr,1)+'T23:59:59';
+  const logs = await q(db.from('attendance_logs').select('*').eq('staff_id',req.staff_id).eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
+  const sessions = pairSessions(logs, l=>'k').filter(s=>s.start && s.start.slice(0,10)===dateStr).sort((a,b)=>new Date(a.start)-new Date(b.start));
+  if(!sessions.length) return 0;
+  const normal = await jamNormalForDate(staff, dateStr);
+  const normalDur = normal ? normalDurationHours(normal.mulai, normal.selesai) : 0;
+  let total = 0;
+  sessions.forEach((s,idx)=>{
+    if(!s.end) return;
+    const durHours = (new Date(s.end)-new Date(s.start))/3600000;
+    total += (idx===0 && normal) ? Math.max(0, durHours-normalDur) : durHours;
+  });
+  if(req.planned_start && req.planned_end){
+    total = Math.min(total, normalDurationHours(req.planned_start, req.planned_end));
+  }
+  return Math.round(total*100)/100;
 }
 async function renderLembur(){
-  const canApproveAny = isMgr() || (me.role==='spv' && me.can_approve_lembur);
+  const canManage = isMgr() || me.role==='spv'; // staff tidak dapat akses buat baru sama sekali
   const canViewAll = isMgr() || isHrSpv();
-  const canScheduleForOthers = isMgr() || me.role==='spv';
-  let h = `<h2>Pengajuan Lembur</h2>
+  let h = `<h2>Lembur</h2>
     <div class="row" style="margin-bottom:12px;justify-content:space-between;flex-wrap:wrap">
       <div class="filters">
         <select id="lbFilter" onchange="loadLembur()">
-          <option value="mine">Pengajuan Saya</option>
-          ${me.role==='spv'?'<option value="dept">Departemen Saya (termasuk yang saya jadwalkan)</option>':''}
-          ${canApproveAny?'<option value="approve">Perlu Persetujuan Saya</option>':''}
+          ${me.role==='spv'?'<option value="dept">Departemen Saya</option>':''}
+          ${isMgr()?'<option value="approve">Perlu Persetujuan Saya</option>':''}
           ${canViewAll?'<option value="all">Semua</option>':''}
+          <option value="mine">Punya Saya</option>
         </select>
       </div>
       <div class="row">
         ${canViewAll?`<button class="btn btn-ghost" onclick="exportLemburExcel()">⬇ Excel</button>`:''}
-        ${isFieldWorker()?`<button class="btn btn-teal" onclick="newLemburModal()">+ Ajukan Lembur</button>`:''}
-        ${canScheduleForOthers?`<button class="btn btn-navy" onclick="newJadwalLemburModal()">+ Jadwalkan Lembur${isMgr()?'':' Staff'}</button>`:''}
+        ${canManage?`<button class="btn btn-teal" onclick="newLemburModal()">+ Catat / Ajukan Lembur</button>`:''}
       </div>
     </div><div id="lemburList"></div>`;
   $('main').innerHTML = h;
-  $('lbFilter').value = canViewAll ? 'all' : (me.role==='spv' ? 'dept' : 'mine');
+  $('lbFilter').value = canViewAll ? 'all' : (me.role==='spv' ? 'dept' : (isMgr()?'approve':'mine'));
   loadLembur();
 }
 const LSTAT = {diajukan:{l:'Menunggu Persetujuan',c:'#FEF3C7',t:'#92400E'}, disetujui:{l:'Disetujui',c:'#DCFCE7',t:'#166534'}, ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'}};
@@ -12385,99 +12450,88 @@ async function loadLembur(){
   let query = db.from('overtime_requests').select('*').order('requested_date',{ascending:false}).limit(200);
   if(f==='mine') query = query.eq('staff_id', me.id);
   else if(f==='dept') query = query.eq('department', me.department);
-  else if(f==='approve'){
-    if(isMgr()) query = query.eq('status','diajukan');
-    else query = query.eq('status','diajukan').eq('department', me.department);
-  }
+  else if(f==='approve') query = query.eq('status','diajukan');
   const list = await q(query);
-  $('lemburList').innerHTML = list.length ? list.map(lemburRow).join('') : '<p class="muted">Tidak ada pengajuan.</p>';
+  $('lemburList').innerHTML = list.length ? list.map(lemburRow).join('') : '<p class="muted">Tidak ada catatan.</p>';
 }
 function lemburRow(r){
   const st = LSTAT[r.status];
   const byOther = r.created_by && r.created_by!==r.staff_id;
   return `<div class="item" style="border-left-color:${DEPTS[r.department]?.color||'#999'}" onclick="openLembur(${r.id})">
     <div class="row" style="justify-content:space-between">
-      <div>${deptTag(r.department)} <b>${uname(r.staff_id)}</b>${byOther?` <span class="small muted">(dijadwalkan ${uname(r.created_by)})</span>`:''}</div>
-      <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+      <div>${deptTag(r.department)} <b>${uname(r.staff_id)}</b>${byOther?` <span class="small muted">(dicatat ${uname(r.created_by)})</span>`:''}</div>
+      <span class="badge" style="background:${r.voided_at?'#FEE2E2':st.c};color:${r.voided_at?'#B91C1C':st.t}">${r.voided_at?'Dibatalkan (Void)':st.l}</span></div>
     <div class="small muted">${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'} · ${esc(r.reason)}</div></div>`;
 }
-function newLemburModal(){
-  const d0 = me.department && DEPTS[me.department] ? me.department : 'pool';
-  openModal(`<div class="mhead"><h3>Ajukan Lembur</h3><button onclick="closeModal()">✕</button></div>
-    <p class="small muted">Ajukan SEBELUM lembur dikerjakan. Butuh persetujuan SPV berhak atau Manager/Owner.</p>
-    <label>Departemen</label><select id="lbDept">${deptOptions(d0)}</select>
-    <label>Tanggal</label><input type="date" id="lbDate" value="${today()}">
-    <div class="grid2"><div><label>Rencana Mulai</label><input type="time" id="lbStart"></div>
-    <div><label>Rencana Selesai</label><input type="time" id="lbEnd"></div></div>
-    <label>Alasan</label><textarea id="lbReason" rows="3" placeholder="pekerjaan apa yang perlu diselesaikan lembur..."></textarea>
-    <button class="btn btn-teal" id="btnSubmitLembur" style="margin-top:14px;width:100%" onclick="submitLembur()">Ajukan</button>`);
-}
-async function submitLembur(){
-  const reason = $('lbReason').value.trim();
-  if(!reason){ toast('Alasan wajib diisi'); return; }
-  const tgl = $('lbDate').value;
-  const dup = await q(db.from('overtime_requests').select('id').eq('staff_id',me.id).eq('requested_date',tgl).neq('status','ditolak'));
-  if(dup.length){ toast('Kamu sudah punya pengajuan/jadwal lembur di tanggal yang sama'); return; }
-  if(!lockBtn($('btnSubmitLembur'))) return;
-  await q(db.from('overtime_requests').insert({
-    staff_id: me.id, department: $('lbDept').value, requested_date: tgl,
-    planned_start: $('lbStart').value||null, planned_end: $('lbEnd').value||null, reason, created_by: me.id
-  }).select());
-  closeModal(); toast('Pengajuan lembur terkirim'); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
-}
-async function newJadwalLemburModal(){
+async function newLemburModal(){
   let staffList;
   if(isMgr()){
     staffList = await q(db.from('profiles').select('*').in('role',['spv','staff']).eq('active',true).order('name'));
   } else {
-    staffList = await q(db.from('profiles').select('*').eq('department',me.department).in('role',['spv','staff']).eq('active',true).order('name'));
+    // SPV: diri sendiri + staff di departemennya sendiri
+    staffList = await q(db.from('profiles').select('*').eq('department',me.department).eq('role','staff').eq('active',true).order('name'));
+    staffList = [me, ...staffList];
   }
-  openModal(`<div class="mhead"><h3>Jadwalkan Lembur</h3><button onclick="closeModal()">✕</button></div>
-    <p class="small muted">${(isMgr()||me.can_approve_lembur)?'Ini langsung tercatat sebagai <b>disetujui</b> (kamu punya hak setujui lembur), langsung tampil di Dashboard orang yang dipilih.':'Karena kamu belum punya hak setujui lembur, ini akan <b>menunggu otorisasi Manager/Owner</b> dulu sebelum resmi.'}</p>
-    <label>Karyawan</label><select id="jlStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)} ${p.department?'— '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
+  openModal(`<div class="mhead"><h3>Catat / Ajukan Lembur</h3><button onclick="closeModal()">✕</button></div>
+    <label>Karyawan</label><select id="jlStaff" onchange="updateLemburModalNote()">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)}${p.id===me.id?' (Diri Saya Sendiri)':''} ${p.department?'— '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
     <label>Tanggal</label><input type="date" id="jlDate" value="${today()}">
     <div class="grid2"><div><label>Rencana Mulai</label><input type="time" id="jlStart"></div>
     <div><label>Rencana Selesai</label><input type="time" id="jlEnd"></div></div>
     <label>Alasan / Pekerjaan</label><textarea id="jlReason" rows="3" placeholder="pekerjaan apa yang perlu diselesaikan lembur..."></textarea>
-    <button class="btn btn-teal" id="btnSubmitJadwalLembur" style="margin-top:14px;width:100%" onclick="submitJadwalLembur()">Jadwalkan (Langsung Disetujui)</button>`);
+    <p class="small muted" id="jlNote" style="margin-top:6px"></p>
+    <button class="btn btn-teal" id="btnSubmitJadwalLembur" style="margin-top:14px;width:100%" onclick="submitJadwalLembur()">Simpan</button>`);
+  updateLemburModalNote();
+}
+function updateLemburModalNote(){
+  const sel = $('jlStaff'); if(!sel) return;
+  const isSelf = sel.value===me.id;
+  let note;
+  if(isMgr()) note = 'Langsung tercatat <b>Disetujui</b> (Manager/Owner).';
+  else if(isSelf) note = 'Pengajuan untuk diri sendiri <b>selalu</b> menunggu otorisasi Manager/Owner, apa pun hak yang kamu punya.';
+  else if(me.can_approve_lembur) note = 'Langsung tercatat <b>Disetujui</b> (kamu punya hak "Boleh Setujui Lembur").';
+  else note = 'Akan <b>menunggu otorisasi Manager/Owner</b> dulu (kamu belum punya hak "Boleh Setujui Lembur").';
+  $('jlNote').innerHTML = note;
 }
 async function submitJadwalLembur(){
   const reason = $('jlReason').value.trim();
   if(!reason){ toast('Alasan wajib diisi'); return; }
+  const start = $('jlStart').value, end = $('jlEnd').value;
+  if(!start || !end){ toast('Rencana jam mulai & selesai wajib diisi (dipakai untuk membatasi jam lembur yang dihitung)'); return; }
   const staffSel = $('jlStaff');
   const staffId = staffSel.value;
-  const dept = staffSel.selectedOptions[0].dataset.dept || me.department || null;
+  const dept = staffSel.selectedOptions[0].dataset.dept || null;
   const tgl = $('jlDate').value;
+  const isSelf = staffId===me.id;
 
-  // Cegah dobel: orang yang sama, tanggal yang sama, yang belum ditolak.
-  const dup = await q(db.from('overtime_requests').select('id').eq('staff_id',staffId).eq('requested_date',tgl).neq('status','ditolak'));
-  if(dup.length){ toast('Sudah ada pengajuan/jadwal lembur untuk orang & tanggal yang sama'); return; }
+  const dup = await q(db.from('overtime_requests').select('id,voided_at').eq('staff_id',staffId).eq('requested_date',tgl).neq('status','ditolak'));
+  if(dup.some(d=>!d.voided_at)){ toast('Sudah ada catatan/pengajuan lembur untuk orang & tanggal yang sama'); return; }
   if(!lockBtn($('btnSubmitJadwalLembur'))) return;
 
-  // Cuma otomatis "Disetujui" kalau yang menjadwalkan Manager/Owner, atau SPV
-  // yang memang punya hak setujui lembur. SPV lain: tetap terjadwal, tapi
-  // statusnya "Menunggu Persetujuan" -- akan tampil di antrian Manager/Owner.
-  const autoApprove = isMgr() || (me.role==='spv' && me.can_approve_lembur);
+  // Manager/Owner selalu langsung disetujui. SPV untuk diri sendiri SELALU ke
+  // Manager. SPV untuk anak buah: ikut hak can_approve_lembur miliknya.
+  const autoApprove = isMgr() || (!isSelf && me.role==='spv' && me.can_approve_lembur);
   const payload = {
     staff_id: staffId, department: dept, requested_date: tgl,
-    planned_start: $('jlStart').value||null, planned_end: $('jlEnd').value||null, reason,
-    created_by: me.id
+    planned_start: start, planned_end: end, reason, created_by: me.id
   };
   if(autoApprove){
     payload.status = 'disetujui'; payload.approver_id = me.id;
-    payload.decided_at = new Date().toISOString(); payload.decision_note = 'Dijadwalkan langsung oleh '+me.name;
+    payload.decided_at = new Date().toISOString();
+    payload.decision_note = isMgr() ? 'Dicatat langsung oleh '+me.name+' (Manager/Owner)' : 'Dicatat langsung oleh SPV '+me.name;
   }
   await q(db.from('overtime_requests').insert(payload).select());
   closeModal();
-  toast(autoApprove ? 'Lembur dijadwalkan & langsung disetujui' : 'Lembur dijadwalkan, menunggu otorisasi Manager/Owner');
+  toast(autoApprove ? 'Lembur tercatat & langsung disetujui' : 'Lembur diajukan, menunggu otorisasi Manager/Owner');
   if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
 async function openLembur(id){
   const [r] = await q(db.from('overtime_requests').select('*').eq('id',id));
-  const canDecide = isMgr() || (me.role==='spv' && me.can_approve_lembur && me.department===r.department);
-  let h = `<div class="mhead"><h3>Pengajuan Lembur</h3><button onclick="closeModal()">✕</button></div>
-    <div class="row">${deptTag(r.department)} <span class="badge" style="background:${LSTAT[r.status].c};color:${LSTAT[r.status].t}">${LSTAT[r.status].l}</span></div>
-    <p class="small muted">Untuk: ${uname(r.staff_id)}${r.created_by && r.created_by!==r.staff_id?' · Dijadwalkan oleh '+uname(r.created_by):''} · ${fdt(r.created_at)}</p>
+  const canDecide = isMgr(); // SPV tidak lagi memutuskan pengajuan siapa pun -- cuma Manager/Owner
+  let jamLembur = null;
+  if(r.status==='disetujui' && !r.voided_at) jamLembur = await computeLemburForRequest(r);
+  let h = `<div class="mhead"><h3>Lembur</h3><button onclick="closeModal()">✕</button></div>
+    <div class="row">${deptTag(r.department)} <span class="badge" style="background:${r.voided_at?'#FEE2E2':LSTAT[r.status].c};color:${r.voided_at?'#B91C1C':LSTAT[r.status].t}">${r.voided_at?'Dibatalkan (Void)':LSTAT[r.status].l}</span></div>
+    <p class="small muted">Untuk: ${uname(r.staff_id)}${r.created_by && r.created_by!==r.staff_id?' · Dicatat oleh '+uname(r.created_by):''} · ${fdt(r.created_at)}</p>
     <p class="small"><b>Tanggal:</b> ${fdate(r.requested_date)}<br>
     <b>Rencana Jam:</b> ${r.planned_start||'-'} – ${r.planned_end||'-'}<br>
     <b>Alasan:</b> ${esc(r.reason)}</p>`;
@@ -12489,11 +12543,15 @@ async function openLembur(id){
   if(r.status!=='diajukan'){
     h += `<p class="small muted" style="margin-top:8px">Diputuskan oleh ${uname(r.approver_id)} · ${fdt(r.decided_at)}${r.decision_note?' — '+esc(r.decision_note):''}</p>`;
   }
-  if(r.status==='disetujui'){
-    h += `<div style="margin-top:12px"><label>Jam Aktual Lembur (diisi setelah selesai dikerjakan)</label>
-      <div class="row"><input id="lbActual" type="number" step="0.5" placeholder="mis. 2.5" value="${r.actual_hours??''}" style="flex:1">
-      <button class="btn btn-ghost btn-sm" onclick="saveActualLembur(${r.id})">Simpan</button></div>
-      ${r.actual_hours!=null?`<p class="small muted">Terakhir diisi oleh ${uname(r.actual_filled_by)} · ${fdt(r.actual_filled_at)}</p>`:''}</div>`;
+  if(r.status==='disetujui' && !r.voided_at){
+    h += `<div style="margin-top:12px"><p class="small muted">Jam Lembur (dihitung otomatis dari Absen Datang/Pulang, dibatasi sesuai rencana jam)</p>
+      <p style="font-size:1.4em;font-weight:700">${jamLembur} jam</p></div>`;
+  }
+  if(r.voided_at){
+    h += `<div style="margin-top:12px;padding:10px;background:#FEF2F2;border-radius:8px">
+      <p class="small" style="color:#B91C1C"><b>Di-void oleh:</b> ${uname(r.voided_by)} · ${fdt(r.voided_at)}<br><b>Alasan:</b> ${esc(r.void_reason)}</p></div>`;
+  } else if(me.role==='owner'){
+    h += `<button class="btn btn-ghost btn-sm" style="margin-top:12px;color:var(--red)" onclick="voidLembur(${r.id})">Void Lembur Ini</button>`;
   }
   openModal(h);
 }
@@ -12505,10 +12563,15 @@ async function decideLembur(id, approve){
   }).eq('id',id));
   toast(approve?'Lembur disetujui':'Lembur ditolak'); openLembur(id); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
-async function saveActualLembur(id){
-  const val = $('lbActual').value;
-  await q(db.from('overtime_requests').update({actual_hours: val===''?null:Number(val), actual_filled_by: me.id, actual_filled_at: new Date().toISOString()}).eq('id',id));
-  toast('Jam aktual tersimpan'); openLembur(id); if(page==='lembur') loadLembur();
+// Void: khusus Owner, bisa di status manapun, wajib alasan. Ditegakkan juga di
+// level database lewat trigger (lihat migration_overtime_void_and_rls.sql) --
+// jadi walau ada celah lain, kolom void ini tetap terkunci untuk Owner saja.
+async function voidLembur(id){
+  if(me.role!=='owner'){ toast('Cuma Owner yang bisa void lembur'); return; }
+  const reason = prompt('Alasan void (WAJIB diisi):');
+  if(!reason || !reason.trim()){ toast('Void dibatalkan — alasan wajib diisi'); return; }
+  await q(db.from('overtime_requests').update({voided_by:me.id, voided_at:new Date().toISOString(), void_reason:reason.trim()}).eq('id',id));
+  toast('Lembur di-void'); openLembur(id); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
 
 /* ================= REKAP BULANAN ================= */
@@ -12642,8 +12705,19 @@ function pairSessions(logs, matchKey){
     const openByKey = {};
     list.forEach(l=>{
       const key = matchKey(l);
-      if(l.fase==='mulai'){ openByKey[key]=l; }
-      else if(l.fase==='selesai'){
+      if(l.fase==='mulai'){
+        // Kalau sudah ada sesi terbuka dengan key sama (lupa Absen Pulang lalu
+        // Absen Datang lagi -- entah hari lain atau balik lagi hari yang sama
+        // untuk lembur) -- JANGAN ditimpa diam-diam. Dorong dulu jadi sesi
+        // "belum selesai" sebelum buka slot baru. Ini menutup bug lama
+        // (Absen Datang hilang dari rekap HRD) sekaligus mendukung banyak
+        // sesi kehadiran dalam 1 hari yang sama.
+        if(openByKey[key]){
+          const prev = openByKey[key];
+          sessions.push({staff_id:prev.staff_id, department:prev.department, pool_type_id:prev.pool_type_id, start:prev.scanned_at, end:null});
+        }
+        openByKey[key]=l;
+      } else if(l.fase==='selesai'){
         const start = openByKey[key];
         sessions.push({staff_id:l.staff_id, department:l.department, pool_type_id:l.pool_type_id,
           start: start?start.scanned_at:null, end:l.scanned_at});
@@ -12660,7 +12734,7 @@ async function loadHrdAttendance(){
   const m = $('hrMonth').value;
   const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
   const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
-  const sessions = pairSessions(logs, l=>'k'); // 1 sesi kehadiran per hari per orang, tidak perlu kunci tambahan
+  const sessions = pairSessions(logs, l=>'k'); // kunci 'k' aman sekarang -- pairSessions tidak lagi menimpa sesi lama, jadi 1 hari BISA lebih dari 1 sesi (mis. balik lagi untuk lembur)
   let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat Kehadiran</h3>
     <button class="btn btn-ghost btn-sm" onclick="exportKehadiranExcel()">⬇ Excel</button></div>`;
   if(sessions.length){
