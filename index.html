@@ -10591,12 +10591,44 @@ const ABSEN_TYPES = {
   treatment_mulai:{l:'Mulai Treatment', kategori:'treatment', fase:'mulai'},
   treatment_selesai:{l:'Selesai Treatment', kategori:'treatment', fase:'selesai'}
 };
+// Cek status "sesi terbuka" staff saat ini -- dipakai untuk membatasi pilihan
+// di dropdown Absen supaya tidak bisa Absen Datang dobel / lompat urutan.
+async function absenGateState(){
+  const t0 = today();
+  const [lastK, lastT] = await Promise.all([
+    q(db.from('attendance_logs').select('*').eq('staff_id',me.id).eq('kategori','kehadiran').order('scanned_at',{ascending:false}).limit(1)),
+    q(db.from('attendance_logs').select('*').eq('staff_id',me.id).eq('kategori','treatment').order('scanned_at',{ascending:false}).limit(1))
+  ]);
+  // Kehadiran: cuma dikunci ke "Absen Pulang saja" kalau sesi Absen Datang
+  // yang belum ditutup itu terjadi HARI INI (sesuai kata-katamu "di hari yang sama").
+  const openKehadiranToday = !!(lastK.length && lastK[0].fase==='mulai' && lastK[0].scanned_at.slice(0,10)===t0);
+  // Treatment: TIDAK dibatasi hari (bisa ganti hari) -- selama belum ada
+  // Selesai Treatment yang menutup sesi mulai terakhir, tetap terbuka.
+  const openTreatment = !!(lastT.length && lastT[0].fase==='mulai');
+  return {openKehadiranToday, openTreatment};
+}
+function absenTypeOptions(gate){
+  return Object.entries(ABSEN_TYPES).filter(([k,v])=>{
+    if(v.kategori==='kehadiran'){
+      // Treatment masih terbuka -> Absen Datang terkunci total sampai Selesai Treatment dulu.
+      if(gate.openTreatment && v.fase==='mulai') return false;
+      return gate.openKehadiranToday ? v.fase==='selesai' : v.fase==='mulai';
+    }
+    if(v.kategori==='treatment'){
+      return gate.openTreatment ? v.fase==='selesai' : v.fase==='mulai';
+    }
+    return true;
+  }).map(([k,v])=>`<option value="${k}">${v.l}</option>`).join('');
+}
 async function renderAbsen(){
+  const gate = await absenGateState();
+  window._absenGate = gate;
   let h = `<h2>Absen</h2>
     <div class="card">
     <label>Jenis Pencatatan</label>
-    <select id="abType" onchange="loadAbsenExtra()">${Object.entries(ABSEN_TYPES).map(([k,v])=>`<option value="${k}">${v.l}</option>`).join('')}</select>
+    <select id="abType" onchange="loadAbsenExtra()">${absenTypeOptions(gate)}</select>
     <div id="abExtra"></div>
+    ${gate.openTreatment?'<p class="small muted" style="margin-top:6px">⚠ Treatment masih berjalan — Absen Datang terkunci sampai Selesai Treatment dicatat.</p>':''}
     <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="openScanner()">📷 Pindai QR di Kios untuk Konfirmasi</button>
     </div>
     <div class="card"><h3>Riwayat Absen Saya (7 Hari Terakhir)</h3><div id="abHist"></div></div>`;
@@ -10698,6 +10730,18 @@ async function submitAttendance(tokenId){
   const shiftEl = $('abShift'), poolEl = $('abPool');
   const shiftId = shiftEl ? Number(shiftEl.value) : null;
   const poolId = poolEl ? Number(poolEl.value) : null;
+
+  // Validasi ulang gate (Absen Datang terkunci kalau treatment masih terbuka /
+  // kehadiran hari ini masih terbuka) -- jaga-jaga kalau state di layar sudah
+  // basi (mis. dibuka lama sebelum scan, atau ada input manual di antaranya).
+  const gate = await absenGateState();
+  if(type.kategori==='kehadiran' && type.fase==='mulai'){
+    if(gate.openTreatment){ toast('Treatment masih berjalan — selesaikan Treatment dulu sebelum Absen Datang'); closeModal(); return; }
+    if(gate.openKehadiranToday){ toast('Sudah Absen Datang hari ini — cuma bisa Absen Pulang'); closeModal(); return; }
+  }
+  if(type.kategori==='treatment' && type.fase==='mulai' && gate.openTreatment){
+    toast('Masih ada sesi Treatment yang belum Selesai'); closeModal(); return;
+  }
 
   // Cegah dobel-scan tidak sengaja (<2 menit)
   const since = new Date(Date.now()-2*60000).toISOString();
