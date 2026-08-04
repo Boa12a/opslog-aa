@@ -10267,6 +10267,7 @@ table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700
     </div>
     <div class="row" style="gap:12px">
       <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
+      <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="refreshCurrentPage()" title="Muat ulang data halaman ini">🔄</button>
       <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="doLogout()">Keluar</button>
     </div>
   </div>
@@ -10492,7 +10493,9 @@ async function init(){
   $('whoName').textContent = me.name;
   $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+(ALL_STAFF_DEPTS[me.department]?.label||me.department):'');
   buildNav();
-  go('dashboard');
+  let lastPage = 'dashboard';
+  try{ lastPage = localStorage.getItem('lastPage') || 'dashboard'; }catch(e){}
+  go(lastPage);
 }
 
 function buildNav(){
@@ -10541,14 +10544,20 @@ function buildNav(){
 function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
 function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
+  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas};
+  if(!routes[p]) p='dashboard'; // jaga-jaga: halaman tersimpan sudah tidak ada/tidak valid lagi
   page=p;
+  try{ localStorage.setItem('lastPage', p); }catch(e){} // aman kalau localStorage diblokir browser
   document.querySelectorAll('#drawer button').forEach(b=>b.classList.remove('on'));
   const nb=$('nav-'+p); if(nb) nb.classList.add('on');
   closeDrawer();
   $('main').innerHTML = '<p class="muted">Memuat...</p>';
   window.scrollTo(0,0);
-  ({dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas})[p]();
+  routes[p]();
 }
+// Tombol refresh (🔄) di topbar -- muat ulang DATA halaman yang sedang
+// dibuka saat ini, tanpa pindah ke Dashboard.
+function refreshCurrentPage(){ go(page); }
 
 /* ================= KIOS ABSENSI (generate QR) ================= */
 // Dipakai oleh: (a) akun role 'kiosk' (permanen, mengambil alih seluruh layar),
@@ -12019,7 +12028,7 @@ async function openTicket(id){
     const editablePic = t.status!=='selesai' && (isMgr() || (canEdit && t.route!=='c'));
     if(editablePic){
       h += `<label>PIC Internal (karyawan, otomatis jadi Tugas di Dashboard-nya)</label>
-      <select id="tPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active).map(p=>`<option value="${p.id}" ${t.pic_user_id===p.id?'selected':''}>${esc(p.name)}${p.department?' — '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
+      <select id="tPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${(isMgr() ? profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active) : profilesCache.filter(p=>p.role==='staff'&&p.active&&p.department===me.department)).map(p=>`<option value="${p.id}" ${t.pic_user_id===p.id?'selected':''}>${esc(p.name)}${isMgr()&&p.department?' - '+(DIVS[p.department]?DIVS[p.department].label:p.department):''}</option>`).join('')}</select>
       <label>Atau PIC Eksternal (vendor/teknisi luar, teks bebas)</label>
       <input id="tPic" value="${esc(t.pic_user_id?'':(t.pic_followup||''))}" placeholder="nama teknisi / vendor luar">
       <label>Notasi Rencana Perbaikan</label><textarea id="tPlan" rows="2">${esc(t.repair_plan||'')}</textarea>
