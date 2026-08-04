@@ -10252,6 +10252,9 @@ table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700
 .timeline .tl{margin-bottom:10px;position:relative}
 .timeline .tl:before{content:'';width:8px;height:8px;border-radius:50%;background:var(--teal);position:absolute;left:-19px;top:5px}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;padding:11px 20px;border-radius:10px;z-index:60;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.3)}
+#versionBanner{position:fixed;top:0;left:0;right:0;background:var(--gold);color:#1a1200;padding:10px 14px;z-index:70;
+  display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+#versionBanner button{background:var(--navy);color:#fff;padding:6px 14px;border-radius:8px;font-weight:700;font-size:13px}
 .age-red{color:var(--red);font-weight:700}
 .age-amber{color:var(--amber);font-weight:700}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
@@ -10358,6 +10361,39 @@ const PSTAT = {
 const URG = {rendah:{l:'Rendah',c:'#E5E7EB',t:'#374151'},sedang:{l:'Sedang',c:'#FEF3C7',t:'#92400E'},tinggi:{l:'Tinggi',c:'#FEE2E2',t:'#B91C1C'}};
 const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'Bermasalah'};
 
+// Naikkan nilai ini SETIAP kali index.html baru di-upload, dan jalankan:
+// update app_settings set value='...' where key='app_version';
+// (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
+// dianggap versi baru terus-menerus)
+const APP_VERSION = '2026-08-04-2';
+// Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
+// lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
+// otomatis dalam 15 detik -- supaya semua device yang sedang membuka
+// aplikasi ini otomatis dapat versi terbaru tanpa perlu diminta manual.
+let _versionCheckDone = false;
+async function checkAppVersion(){
+  try{
+    const rows = await q(db.from('app_settings').select('*').eq('key','app_version'));
+    const latest = rows[0]?.value;
+    if(latest && latest !== APP_VERSION && !_versionCheckDone){
+      _versionCheckDone = true;
+      showForceReloadBanner();
+    }
+  }catch(e){ /* diam-diam gagal, coba lagi di pengecekan berikutnya */ }
+}
+function showForceReloadBanner(){
+  let seconds = 15;
+  const el = document.createElement('div');
+  el.id = 'versionBanner';
+  el.innerHTML = `<span>🔄 Ada pembaruan aplikasi — dimuat ulang otomatis dalam <b id="vbCount">${seconds}</b> detik...</span>
+    <button onclick="location.reload()">Muat Ulang Sekarang</button>`;
+  document.body.appendChild(el);
+  const timer = setInterval(()=>{
+    seconds--;
+    const c = document.getElementById('vbCount'); if(c) c.textContent = seconds;
+    if(seconds<=0){ clearInterval(timer); location.reload(); }
+  }, 1000);
+}
 let me = null;          // profil user login
 let profilesCache = []; // semua profil (untuk nama)
 let page = 'dashboard';
@@ -10515,6 +10551,11 @@ async function init(){
   let lastPage = 'dashboard';
   try{ lastPage = localStorage.getItem('lastPage') || 'dashboard'; }catch(e){}
   go(lastPage);
+  // Cek versi aplikasi: sekali sekarang, lalu berkala tiap 2 menit, dan
+  // setiap kali tab/app ini dibuka lagi (kembali dari background).
+  checkAppVersion();
+  setInterval(checkAppVersion, 120000);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkAppVersion(); });
 }
 
 function buildNav(){
@@ -11408,15 +11449,30 @@ async function saveCutiQuota(){
 /* ================= DASHBOARD ================= */
 async function renderDashboard(){
   const t = today();
-  const [logs, tickets, dueMtc, pendDisp] = await Promise.all([
+  const showBirthdays = ['spv','manager','owner'].includes(me.role);
+  // SEMUA query yang tidak saling bergantung dijalankan PARALEL (Promise.all),
+  // bukan satu-satu berurutan seperti sebelumnya -- ini penyebab utama
+  // Dashboard (dan reload halaman) terasa lambat: belasan round-trip
+  // database yang harus antre satu-satu, padahal isinya sama sekali tidak
+  // saling butuh hasil satu sama lain.
+  const [logs, tickets, dueMtc, pendDisp,
+         pqAuth, pqAcct, pqPickupAll,
+         allBirths, allAnnouncements, activeQuizzes, quizWinners,
+         myLembur, pendingLembur] = await Promise.all([
     q(db.from('daily_logs').select('*').eq('log_date',t)),
     q(db.from('tickets').select('*, ticket_items(count)').neq('status','selesai').order('created_at')),
     q(db.from('maintenance_schedules').select('*').eq('active',true).lte('next_due', addDays(t,7))),
-    q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending'))
+    q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending')),
+    isMgr() ? q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','menunggu_otorisasi')) : Promise.resolve([]),
+    (isAccSpv() || me.role==='owner') ? q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : Promise.resolve([]),
+    q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id, pickup_assigned_to)').eq('status','siap_diambil')),
+    showBirthdays ? q(db.from('profiles').select('*').eq('active',true).not('birth_date','is',null)) : Promise.resolve([]),
+    q(db.from('announcements').select('*').eq('active',true).order('created_at',{ascending:false})),
+    q(db.from('quizzes').select('*').eq('published',true).order('created_at',{ascending:false})),
+    q(db.from('quiz_winners').select('*')),
+    q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').is('voided_at',null).gte('requested_date', t).order('requested_date')),
+    isMgr() ? q(db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date')) : Promise.resolve([])
   ]);
-  const pqAuth = isMgr() ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','menunggu_otorisasi')) : [];
-  const pqAcct = (isAccSpv() || me.role==='owner') ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : [];
-  const pqPickupAll = await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id, pickup_assigned_to)').eq('status','siap_diambil'));
   const pqPickup = pqPickupAll.filter(it=> isMgr() || it.procurement_requests.pickup_assigned_to===me.id || (me.role==='spv' && me.department===it.procurement_requests.department));
   const pendingLogs = (me.role==='spv' && me.department) ? logs.filter(l=> l.department===me.department && l.needs_authorization && !l.authorized_at) : [];
   const hasCost = x => (x.ticket_items[0]?.count || 0) > 0;
@@ -11429,20 +11485,41 @@ async function renderDashboard(){
   const myDivPending = me.department ? open.filter(x=> x.handling_division===me.department) : [];
 
   // Ulang Tahun Bulan Ini — tampil untuk SPV ke atas (bukan Staff/Kios)
-  const showBirthdays = ['spv','manager','owner'].includes(me.role);
   let birthdaysThisMonth = [];
   if(showBirthdays){
-    const allBirths = await q(db.from('profiles').select('*').eq('active',true).not('birth_date','is',null));
     const curMonth = Number(t.slice(5,7)), curYear = Number(t.slice(0,4));
     birthdaysThisMonth = allBirths.filter(p=> Number(p.birth_date.slice(5,7))===curMonth)
       .map(p=>({...p, _day:Number(p.birth_date.slice(8,10)), _age: curYear - Number(p.birth_date.slice(0,4))}))
       .sort((a,b)=>a._day-b._day);
   }
 
+  // Tugas Hari Ini — generate dulu instance dari template berulang yang jatuh
+  // hari ini (ini SATU-SATUNYA yang tetap harus menunggu duluan, sebelum
+  // task_items dibaca -- baris berikutnya butuh instance yang baru dibuat).
+  await ensureTodayTasksFor(me.id);
+  const [myTasksToday_raw, lateDeptTasks] = await Promise.all([
+    q(db.from('task_items').select('*').eq('staff_id',me.id).lte('task_date',t).eq('status','belum').order('task_date')),
+    (me.role==='spv' && me.department) ? q(db.from('task_items').select('*').eq('department',me.department).eq('status','belum').lt('task_date',t).order('task_date')) : Promise.resolve([])
+  ]);
+  const myTasksToday = myTasksToday_raw.sort((a,b)=> (b.urgent-a.urgent) || a.task_date.localeCompare(b.task_date));
+
+  // Kuis: siapkan feed jawaban untuk kuis yang masih aktif (belum ada
+  // pemenang) SEKALIGUS paralel, bukan 1-per-1 di dalam loop seperti sebelumnya.
+  const sevenDaysAgo = Date.now() - 7*86400000;
+  const visibleQuizzes = activeQuizzes.filter(qz=>{
+    const win = quizWinners.find(w=>w.quiz_id===qz.id);
+    return !win || new Date(win.won_at).getTime() > sevenDaysAgo;
+  });
+  const needFeedQuizzes = visibleQuizzes.filter(qz=>!quizWinners.find(w=>w.quiz_id===qz.id));
+  const quizFeeds = await Promise.all(needFeedQuizzes.map(qz=>
+    q(db.from('quiz_submissions').select('*').eq('quiz_id',qz.id).order('submitted_at',{ascending:true}).limit(50))
+  ));
+  const feedByQuiz = {};
+  needFeedQuizzes.forEach((qz,i)=>{ feedByQuiz[qz.id] = quizFeeds[i]; });
+
   let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
 
   // Pengumuman — tampil paling atas, untuk siapa pun yang cocok target-nya
-  const allAnnouncements = await q(db.from('announcements').select('*').eq('active',true).order('created_at',{ascending:false}));
   const myAnnouncements = allAnnouncements.filter(announcementAppliesToMe);
   if(myAnnouncements.length){
     h += `<div class="card" style="border-left:4px solid #4338CA;background:#EEF2FF">`;
@@ -11455,15 +11532,8 @@ async function renderDashboard(){
 
   // Kuis -- tampil untuk siapa pun kalau ada kuis terbit yang masih aktif
   // (belum ada pemenang) ATAU pemenangnya baru ditentukan <7 hari lalu.
-  const activeQuizzes = await q(db.from('quizzes').select('*').eq('published',true).order('created_at',{ascending:false}));
-  if(activeQuizzes.length){
-    const quizWinners = await q(db.from('quiz_winners').select('*'));
-    const sevenDaysAgo = Date.now() - 7*86400000;
-    const visibleQuizzes = activeQuizzes.filter(qz=>{
-      const win = quizWinners.find(w=>w.quiz_id===qz.id);
-      return !win || new Date(win.won_at).getTime() > sevenDaysAgo;
-    });
-    for(const qz of visibleQuizzes){
+  if(visibleQuizzes.length){
+    visibleQuizzes.forEach(qz=>{
       const win = quizWinners.find(w=>w.quiz_id===qz.id);
       h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>🎯 Kuis: ${esc(qz.title)}</h3>
         <p class="small">${esc(qz.question)}</p>
@@ -11474,19 +11544,15 @@ async function renderDashboard(){
       } else {
         h += `<div class="row"><input id="qzAnswerInput_${qz.id}" placeholder="jawaban kamu..." style="flex:1">
           <button class="btn btn-teal btn-sm" onclick="submitQuizAnswerFromDashboard(${qz.id})">Kirim</button></div>`;
-        const feed = await q(db.from('quiz_submissions').select('*').eq('quiz_id',qz.id).order('submitted_at',{ascending:true}).limit(50));
+        const feed = feedByQuiz[qz.id] || [];
         if(feed.length){
           h += `<div class="small muted" style="margin-top:8px;max-height:150px;overflow-y:auto">${feed.map(s=>`${esc(uname(s.staff_id))}: ${esc(s.answer_text)} · ${fdt(s.submitted_at)}`).join('<br>')}</div>`;
         }
       }
       h += `</div>`;
-    }
+    });
   }
 
-  // Tugas Hari Ini — generate dulu instance dari template berulang yang jatuh hari ini
-  await ensureTodayTasksFor(me.id);
-  let myTasksToday = await q(db.from('task_items').select('*').eq('staff_id',me.id).lte('task_date',t).eq('status','belum').order('task_date'));
-  myTasksToday = myTasksToday.sort((a,b)=> (b.urgent-a.urgent) || a.task_date.localeCompare(b.task_date));
   if(myTasksToday.length){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>📋 Tugas Anda</h3>`;
     myTasksToday.forEach(x=>{
@@ -11500,21 +11566,17 @@ async function renderDashboard(){
 
   // Tugas Anak Buah Terlambat — khusus SPV, tugas di departemennya yang sudah
   // lewat tanggal tapi belum ditandai selesai (bukan tugas SPV itu sendiri).
-  if(me.role==='spv' && me.department){
-    const lateDeptTasks = await q(db.from('task_items').select('*').eq('department',me.department).eq('status','belum').lt('task_date',t).order('task_date'));
-    if(lateDeptTasks.length){
-      h += `<div class="card" style="border-left:4px solid var(--red)"><h3>⚠ Tugas Anak Buah Terlambat</h3>`;
-      lateDeptTasks.forEach(x=>{
-        h += `<div class="item" style="cursor:pointer" onclick="go('tugas')">
-          <b>${uname(x.staff_id)}</b> — ${esc(x.task_text)}
-          <div class="small muted">Harusnya ${fdate(x.task_date)} · ${ageHtml(x.task_date)}</div></div>`;
-      });
-      h += `</div>`;
-    }
+  if(lateDeptTasks.length){
+    h += `<div class="card" style="border-left:4px solid var(--red)"><h3>⚠ Tugas Anak Buah Terlambat</h3>`;
+    lateDeptTasks.forEach(x=>{
+      h += `<div class="item" style="cursor:pointer" onclick="go('tugas')">
+        <b>${uname(x.staff_id)}</b> — ${esc(x.task_text)}
+        <div class="small muted">Harusnya ${fdate(x.task_date)} · ${ageHtml(x.task_date)}</div></div>`;
+    });
+    h += `</div>`;
   }
 
   // Jadwal Lembur Anda — tampil untuk siapa pun yang dijadwalkan lembur (disetujui, tanggal hari ini/mendatang)
-  const myLembur = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').is('voided_at',null).gte('requested_date', t).order('requested_date'));
   if(myLembur.length){
     h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>⏰ Jadwal Lembur Anda</h3>`;
     myLembur.forEach(r=>{
@@ -11526,17 +11588,14 @@ async function renderDashboard(){
   }
 
   // Lembur Menunggu Otorisasi — cuma Manager/Owner (SPV tidak lagi memutuskan pengajuan siapa pun)
-  if(isMgr()){
-    const pendingLembur = await q(db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date'));
-    if(pendingLembur.length){
-      h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Lembur Menunggu Otorisasi</h3>`;
-      pendingLembur.forEach(r=>{
-        h += `<div class="item" style="cursor:pointer" onclick="go('lembur')">
-          ${r.department?deptTag(r.department):''} <b>${uname(r.staff_id)}</b> — ${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'}
-          <div class="small muted">${esc(r.reason)} · ${ageHtml(r.created_at)}</div></div>`;
-      });
-      h += `</div>`;
-    }
+  if(isMgr() && pendingLembur.length){
+    h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Lembur Menunggu Otorisasi</h3>`;
+    pendingLembur.forEach(r=>{
+      h += `<div class="item" style="cursor:pointer" onclick="go('lembur')">
+        ${r.department?deptTag(r.department):''} <b>${uname(r.staff_id)}</b> — ${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'}
+        <div class="small muted">${esc(r.reason)} · ${ageHtml(r.created_at)}</div></div>`;
+    });
+    h += `</div>`;
   }
 
   if(showBirthdays && birthdaysThisMonth.length){
