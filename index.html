@@ -10527,7 +10527,7 @@ function buildNav(){
   if(isMgr() || isFieldWorker()) grupSdm.push(['tugas','Tugas']);
   if(isMgr() || isFieldWorker()) grupSdm.push(['lembur','Lembur']);
   if(isMgr() || inOpsDept || isHrSpv()) grupSdm.push(['cuti','Cuti & Sakit']);
-  if(isHrdOrMgr()) grupSdm.push(['hrd','HRD'],['users','Pengguna']);
+  if(isHrdOrMgr()) grupSdm.push(['pengumuman','Pengumuman'],['hrd','HRD'],['users','Pengguna']);
 
   window._navGroups = {Operasional:grupOperasional, Pengadaan:grupPengadaan, SDM:grupSdm};
   window._navTop = top;
@@ -10544,7 +10544,7 @@ function buildNav(){
 function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
 function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
-  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas};
+  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman};
   if(!routes[p]) p='dashboard'; // jaga-jaga: halaman tersimpan sudah tidak ada/tidak valid lagi
   page=p;
   try{ localStorage.setItem('lastPage', p); }catch(e){} // aman kalau localStorage diblokir browser
@@ -11414,15 +11414,28 @@ async function renderDashboard(){
 
   let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
 
+  // Pengumuman — tampil paling atas, untuk siapa pun yang cocok target-nya
+  const allAnnouncements = await q(db.from('announcements').select('*').eq('active',true).order('created_at',{ascending:false}));
+  const myAnnouncements = allAnnouncements.filter(announcementAppliesToMe);
+  if(myAnnouncements.length){
+    h += `<div class="card" style="border-left:4px solid #4338CA;background:#EEF2FF">`;
+    myAnnouncements.forEach(a=>{
+      h += `<div style="padding:6px 0"><b>📢 ${esc(a.message)}</b>
+        <div class="small muted">${esc(assignerLabel(a.created_by)||uname(a.created_by))} · ${fdt(a.created_at)}</div></div>`;
+    });
+    h += `</div>`;
+  }
+
   // Tugas Hari Ini — generate dulu instance dari template berulang yang jatuh hari ini
   await ensureTodayTasksFor(me.id);
-  const myTasksToday = await q(db.from('task_items').select('*').eq('staff_id',me.id).lte('task_date',t).eq('status','belum').order('task_date'));
+  let myTasksToday = await q(db.from('task_items').select('*').eq('staff_id',me.id).lte('task_date',t).eq('status','belum').order('task_date'));
+  myTasksToday = myTasksToday.sort((a,b)=> (b.urgent-a.urgent) || a.task_date.localeCompare(b.task_date));
   if(myTasksToday.length){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>📋 Tugas Anda</h3>`;
     myTasksToday.forEach(x=>{
       const telat = x.task_date < t;
-      h += `<div class="item" style="cursor:pointer" onclick="go('tugas')">
-        <b>${esc(x.task_text)}</b> ${telat?'<span class="badge" style="background:#FEE2E2;color:#B91C1C">⚠ Terlambat</span>':''}
+      h += `<div class="item" style="cursor:pointer${x.urgent?';border-left-color:var(--red)':''}" onclick="go('tugas')">
+        <b>${x.urgent?'🔴 ':''}${esc(x.task_text)}</b> ${telat?'<span class="badge" style="background:#FEE2E2;color:#B91C1C">⚠ Terlambat</span>':''}
         <div class="small muted">${fdate(x.task_date)}</div></div>`;
     });
     h += `</div>`;
@@ -12979,7 +12992,7 @@ async function ensureTodayTasksFor(staffId){
   const existingTplIds = new Set(existing.map(e=>e.template_id));
   const toCreate = due.filter(tpl=>!existingTplIds.has(tpl.id)).map(tpl=>({
     staff_id: staffId, department: tpl.department, task_text: tpl.task_text, task_date: t0,
-    template_id: tpl.id, created_by: tpl.created_by
+    template_id: tpl.id, urgent: tpl.urgent, created_by: tpl.created_by
   }));
   if(toCreate.length) await q(db.from('task_items').insert(toCreate).select());
 }
@@ -13023,9 +13036,9 @@ function taskRow(t){
   const telat = t.status==='belum' && t.task_date < t0;
   const badge = t.status==='selesai' ? {c:'#DCFCE7',t:'#166534',l:'✓ Selesai'} : (telat ? {c:'#FEE2E2',t:'#B91C1C',l:'⚠ Terlambat'} : {c:'#FEF3C7',t:'#92400E',l:'Belum'});
   const dari = assignerLabel(t.created_by);
-  return `<div class="item" style="cursor:pointer" onclick="openTugas(${t.id})">
+  return `<div class="item" style="cursor:pointer${t.urgent&&t.status!=='selesai'?';border-left-color:var(--red)':''}" onclick="openTugas(${t.id})">
     <div class="row" style="justify-content:space-between">
-      <div>${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b></div>
+      <div>${t.urgent&&t.status!=='selesai'?'🔴 ':''}${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b></div>
       <span class="badge" style="background:${badge.c};color:${badge.t}">${badge.l}</span></div>
     <div class="small">${fdate(t.task_date)} · ${esc(t.task_text)}</div>
     ${dari?`<div class="small muted">Dari: ${esc(dari)}</div>`:''}
@@ -13045,8 +13058,8 @@ async function loadTugas(){
   // mendesak duluan; (2) belum jatuh tempo (tanggal akan datang), belum
   // selesai; (3) sudah selesai, paling bawah.
   const notDone = list.filter(t=>t.status!=='selesai');
-  const todayOrLate = notDone.filter(t=>t.task_date<=t0).sort((a,b)=>a.task_date.localeCompare(b.task_date));
-  const future = notDone.filter(t=>t.task_date>t0).sort((a,b)=>a.task_date.localeCompare(b.task_date));
+  const todayOrLate = notDone.filter(t=>t.task_date<=t0).sort((a,b)=> (b.urgent-a.urgent) || a.task_date.localeCompare(b.task_date));
+  const future = notDone.filter(t=>t.task_date>t0).sort((a,b)=> (b.urgent-a.urgent) || a.task_date.localeCompare(b.task_date));
   const done = list.filter(t=>t.status==='selesai').sort((a,b)=>b.task_date.localeCompare(a.task_date));
   const ordered = [...todayOrLate, ...future, ...done];
   $('tugasList').innerHTML = ordered.length ? ordered.map(taskRow).join('') : '<p class="muted">Belum ada tugas.</p>';
@@ -13058,6 +13071,7 @@ async function newTugasModal(){
   openModal(`<div class="mhead"><h3>Buat Tugas</h3><button onclick="closeModal()">✕</button></div>
     <label>Untuk</label><select id="tgStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)}${p.role==='manager'?' (Manager)':''}</option>`).join('')}</select>
     <label>Jenis Pekerjaan</label><textarea id="tgText" rows="2" placeholder="mis. Cek tekanan filter kolam VIP"></textarea>
+    <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="tgUrgent"> 🔴 Tandai Urgent (tampil paling atas di Dashboard)</label>
     <label><input type="checkbox" id="tgRecur" onchange="toggleTugasRecur()"> Berulang mingguan</label>
     <div id="tgDateWrap"><label>Tanggal</label><input type="date" id="tgDate" value="${today()}"></div>
     <div id="tgDaysWrap" class="hidden"><label>Hari (bisa pilih lebih dari 1)</label>
@@ -13074,16 +13088,17 @@ async function submitTugas(){
   if(!text){ toast('Jenis pekerjaan wajib diisi'); return; }
   const staffSel = $('tgStaff');
   const staffId = staffSel.value, dept = staffSel.selectedOptions[0].dataset.dept || null;
+  const urgent = $('tgUrgent').checked;
   if(!lockBtn($('btnSubmitTugas'))) return;
   if($('tgRecur').checked){
     const days = Array.from(document.querySelectorAll('.tgDow:checked')).map(el=>Number(el.value));
     if(!days.length){ toast('Pilih minimal 1 hari'); return; }
-    await q(db.from('task_templates').insert({staff_id:staffId, department:dept, task_text:text, days_of_week:days, created_by:me.id}).select());
+    await q(db.from('task_templates').insert({staff_id:staffId, department:dept, task_text:text, days_of_week:days, urgent, created_by:me.id}).select());
     await ensureTodayTasksFor(staffId);
     toast('Tugas berulang dibuat');
   } else {
     const tgl = $('tgDate').value;
-    await q(db.from('task_items').insert({staff_id:staffId, department:dept, task_text:text, task_date:tgl, created_by:me.id}).select());
+    await q(db.from('task_items').insert({staff_id:staffId, department:dept, task_text:text, task_date:tgl, urgent, created_by:me.id}).select());
     toast('Tugas dibuat');
   }
   closeModal(); if(page==='tugas') loadTugas();
@@ -13120,6 +13135,61 @@ async function finishTugas(id){
   toast('Tugas selesai'); closeModal(); if(page==='tugas') loadTugas(); if(page==='dashboard') renderDashboard();
 }
 
+
+/* ================= PENGUMUMAN (Manager/Owner/HRD) ================= */
+const ANN_TARGET_LABEL = {all:'Semua Karyawan', spv_only:'SPV Saja', department:'1 Departemen'};
+function announcementAppliesToMe(a){
+  if(a.target_type==='all') return true;
+  if(a.target_type==='spv_only') return me.role==='spv';
+  if(a.target_type==='department') return me.department===a.target_department;
+  return false;
+}
+async function renderPengumuman(){
+  let h = `<h2>Pengumuman</h2>
+    <div class="row" style="justify-content:flex-end;margin-bottom:12px">
+      <button class="btn btn-teal btn-sm" onclick="newPengumumanModal()">+ Buat Pengumuman</button>
+    </div><div id="pengumumanList"></div>`;
+  $('main').innerHTML = h;
+  loadPengumumanList();
+}
+async function loadPengumumanList(){
+  const list = await q(db.from('announcements').select('*').eq('active',true).order('created_at',{ascending:false}));
+  $('pengumumanList').innerHTML = list.length ? list.map(a=>`
+    <div class="item">
+      <div class="row" style="justify-content:space-between">
+        <span class="badge" style="background:#E0E7FF;color:#4338CA">${ANN_TARGET_LABEL[a.target_type]}${a.target_type==='department'?': '+(DIVS[a.target_department]?.label||a.target_department):''}</span>
+        <button class="btn-sm btn-ghost" onclick="deactivateAnnouncement(${a.id})">Nonaktifkan</button></div>
+      <div class="small" style="margin-top:6px">${esc(a.message)}</div>
+      <div class="small muted">oleh ${esc(assignerLabel(a.created_by)||uname(a.created_by))} · ${fdt(a.created_at)}</div></div>`).join('')
+    : '<p class="muted">Belum ada pengumuman aktif.</p>';
+}
+function newPengumumanModal(){
+  openModal(`<div class="mhead"><h3>Buat Pengumuman</h3><button onclick="closeModal()">✕</button></div>
+    <label>Pesan</label><textarea id="anMsg" rows="4" placeholder="tulis pengumuman..."></textarea>
+    <label>Tampilkan untuk</label>
+    <select id="anTarget" onchange="toggleAnnDeptWrap()">
+      <option value="all">Semua Karyawan</option>
+      <option value="spv_only">SPV Saja</option>
+      <option value="department">1 Departemen Tertentu</option>
+    </select>
+    <div id="anDeptWrap" class="hidden"><label>Departemen</label><select id="anDept">${Object.entries(DIVS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select></div>
+    <button class="btn btn-teal" id="btnSubmitAnn" style="margin-top:14px;width:100%" onclick="submitPengumuman()">Terbitkan</button>`);
+}
+function toggleAnnDeptWrap(){ $('anDeptWrap').classList.toggle('hidden', $('anTarget').value!=='department'); }
+async function submitPengumuman(){
+  const message = $('anMsg').value.trim();
+  if(!message){ toast('Pesan wajib diisi'); return; }
+  const target_type = $('anTarget').value;
+  const target_department = target_type==='department' ? $('anDept').value : null;
+  if(!lockBtn($('btnSubmitAnn'))) return;
+  await q(db.from('announcements').insert({message, target_type, target_department, created_by:me.id}).select());
+  closeModal(); toast('Pengumuman diterbitkan'); loadPengumumanList();
+}
+async function deactivateAnnouncement(id){
+  if(!confirm('Nonaktifkan pengumuman ini? Tidak akan tampil lagi di Dashboard siapa pun.')) return;
+  await q(db.from('announcements').update({active:false}).eq('id',id));
+  loadPengumumanList();
+}
 
 /* ================= REKAP BULANAN ================= */
 async function renderRekap(){
