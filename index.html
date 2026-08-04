@@ -12991,7 +12991,7 @@ async function renderTugas(){
       <div class="row" style="gap:8px;flex-wrap:wrap">
         <select id="tgFilter" onchange="loadTugas()">
           <option value="mine">Punya Saya</option>
-          ${canManage?'<option value="dept">Departemen Saya</option>':''}
+          ${me.role==='spv'?'<option value="dept">Departemen Saya</option>':''}
           ${isMgr()?'<option value="all">Semua</option>':''}
         </select>
         ${isMgr()?`<select id="tgDeptFilter" onchange="loadTugas()"><option value="">Semua Departemen</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>`:''}
@@ -12999,14 +12999,14 @@ async function renderTugas(){
       ${canManage?`<button class="btn btn-teal btn-sm" onclick="newTugasModal()">+ Buat Tugas</button>`:''}
     </div><div id="tugasList"></div>`;
   $('main').innerHTML = h;
-  $('tgFilter').value = canManage ? 'dept' : 'mine';
+  $('tgFilter').value = me.role==='spv' ? 'dept' : (canManage ? 'all' : 'mine');
   loadTugas();
 }
 // Generate instance hari ini untuk SEMUA staff di departemen SPV/Manager yang
 // buka halaman ini -- supaya SPV langsung lihat tugas hari ini semua anak buahnya.
 async function ensureTodayTasksForDept(){
   const staffIds = isMgr()
-    ? (await q(db.from('profiles').select('id').in('role',['spv','staff']).eq('active',true))).map(p=>p.id)
+    ? (await q(db.from('profiles').select('id').in('role',['manager','spv','staff']).eq('active',true))).map(p=>p.id)
     : (await q(db.from('profiles').select('id').eq('department',me.department).eq('role','staff').eq('active',true))).map(p=>p.id);
   for(const sid of staffIds) await ensureTodayTasksFor(sid);
 }
@@ -13053,10 +13053,10 @@ async function loadTugas(){
 }
 async function newTugasModal(){
   const staffList = isMgr()
-    ? await q(db.from('profiles').select('*').in('role',['spv','staff']).eq('active',true).order('name'))
+    ? await q(db.from('profiles').select('*').in('role', me.role==='owner' ? ['manager','spv','staff'] : ['spv','staff']).eq('active',true).order('name'))
     : await q(db.from('profiles').select('*').eq('department',me.department).eq('role','staff').eq('active',true).order('name'));
   openModal(`<div class="mhead"><h3>Buat Tugas</h3><button onclick="closeModal()">✕</button></div>
-    <label>Untuk</label><select id="tgStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)}</option>`).join('')}</select>
+    <label>Untuk</label><select id="tgStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)}${p.role==='manager'?' (Manager)':''}</option>`).join('')}</select>
     <label>Jenis Pekerjaan</label><textarea id="tgText" rows="2" placeholder="mis. Cek tekanan filter kolam VIP"></textarea>
     <label><input type="checkbox" id="tgRecur" onchange="toggleTugasRecur()"> Berulang mingguan</label>
     <div id="tgDateWrap"><label>Tanggal</label><input type="date" id="tgDate" value="${today()}"></div>
