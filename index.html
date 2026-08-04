@@ -12527,6 +12527,11 @@ async function fulfillItem(itemId, method){
 }
 async function deletePengadaan(id){
   if(!confirm('Yakin hapus permintaan pengadaan ini beserta seluruh item & riwayatnya?')) return;
+  // Bersihkan dulu semua yang tertaut, jangan andalkan cascade otomatis --
+  // supaya hapus tidak pernah gagal gara-gara ada data anak yang tersisa.
+  await q(db.from('task_items').update({procurement_request_id:null}).eq('procurement_request_id',id));
+  await q(db.from('procurement_updates').delete().eq('request_id',id));
+  await q(db.from('procurement_items').delete().eq('request_id',id));
   await q(db.from('procurement_requests').delete().eq('id',id).select());
   closeModal(); toast('Permintaan dihapus'); if(page==='pengadaan') loadPengadaan();
 }
@@ -13032,6 +13037,7 @@ async function openTugas(id){
     <p class="small">${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b><br>
     <b>Tanggal:</b> ${fdate(t.task_date)}<br><b>Pekerjaan:</b> ${esc(t.task_text)}</p>
     ${t.ticket_id?`<p class="small muted">🔧 Otomatis dari tiket Kerusakan #${t.ticket_id}</p>`:''}
+    ${t.procurement_request_id?`<button class="btn btn-ghost btn-sm" onclick="closeModal();openPengadaan(${t.procurement_request_id})">📦 Lihat Detail Permintaan Barang #${t.procurement_request_id}</button>`:''}
     <p><span class="badge" style="background:${t.status==='selesai'?'#DCFCE7':(telat?'#FEE2E2':'#FEF3C7')};color:${t.status==='selesai'?'#166534':(telat?'#B91C1C':'#92400E')}">${t.status==='selesai'?'✓ Selesai':(telat?'⚠ Terlambat':'Belum')}</span></p>`;
   if(t.status==='selesai'){
     h += `<p class="small"><b>Keterangan:</b> ${esc(t.completion_note||'-')}<br><span class="muted">Selesai ${fdt(t.completed_at)}</span></p>`;
