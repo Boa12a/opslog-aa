@@ -10379,7 +10379,7 @@ async function getGeofenceConfig(){
 function getGeoTag(){
   return new Promise(resolve=>{
     if(!navigator.geolocation){ resolve({geo_lat:null, geo_lng:null, out_of_radius:true}); return; }
-    const timer = setTimeout(()=>resolve({geo_lat:null, geo_lng:null, out_of_radius:true}), 8000);
+    const timer = setTimeout(()=>resolve({geo_lat:null, geo_lng:null, out_of_radius:true}), 16000);
     navigator.geolocation.getCurrentPosition(async pos=>{
       clearTimeout(timer);
       const {latitude:lat, longitude:lng} = pos.coords;
@@ -10387,7 +10387,7 @@ function getGeoTag(){
       const outOfRadius = cfg ? distanceMeters(lat,lng,cfg.lat,cfg.lng) > cfg.radius_m : true;
       resolve({geo_lat:lat, geo_lng:lng, out_of_radius:outOfRadius});
     }, ()=>{ clearTimeout(timer); resolve({geo_lat:null, geo_lng:null, out_of_radius:true}); },
-    {enableHighAccuracy:true, timeout:7000, maximumAge:30000});
+    {enableHighAccuracy:true, timeout:15000, maximumAge:60000});
   });
 }
 const fdate = d => d ? new Date(d+'T00:00:00').toLocaleDateString('id-ID',{day:'numeric',month:'short',year:'numeric'}) : '-';
@@ -10678,6 +10678,11 @@ function absenTypeOptions(gate){
 async function renderAbsen(){
   const gate = await absenGateState();
   window._absenGate = gate;
+  // Mulai minta lokasi GPS SEKARANG (begitu halaman dibuka), bukan nunggu
+  // tombol scan ditekan -- supaya proses izin lokasi + cari sinyal GPS
+  // punya waktu jauh lebih panjang (biasanya beberapa detik sampai user
+  // selesai isi form) sebelum benar-benar dibutuhkan saat submit.
+  window._pendingGeo = getGeoTag();
   let h = `<h2>Absen</h2>
     <div class="card">
     <label>Jenis Pencatatan</label>
@@ -10825,7 +10830,9 @@ async function submitAttendance(tokenId){
     }
   }
 
-  const geo = await getGeoTag();
+  // Pakai lokasi yang sudah mulai diambil sejak halaman dibuka (pre-warm) --
+  // kalau belum ada (mis. submit lewat jalur lain), baru mulai dari nol.
+  const geo = await (window._pendingGeo || getGeoTag());
   const payload = {
     staff_id: me.id, department: me.department, shift_id: shiftId||null,
     kategori: type.kategori, fase: type.fase, pool_type_id: poolId||null,
