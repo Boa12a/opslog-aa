@@ -11563,14 +11563,27 @@ async function renderDashboard(){
 }
 function addDays(d,n){ const x=new Date(d+'T00:00:00'); x.setDate(x.getDate()+n); return x.toLocaleDateString('sv-SE'); }
 function lastDayOfMonth(m){ const days = new Date(Number(m.slice(0,4)), Number(m.slice(5,7)), 0).getDate(); return `${m}-${String(days).padStart(2,'0')}`; }
+// "Bola di siapa" -- indikator jelas siapa yang perlu bertindak sekarang.
+// Sengaja konservatif: kalau tidak yakin statusnya berarti apa, tampilkan
+// kosong (tidak ada teks) daripada menampilkan info yang salah.
+function ticketBallHolder(t){
+  if(t.status==='selesai') return null;
+  if(t.pic_user_id) return 'Menunggu '+uname(t.pic_user_id);
+  if(t.status==='diperbaiki' || t.status==='menunggu_verifikasi') return 'Menunggu SPV '+(DIVS[t.department]?.label||t.department)+' menutup tiket';
+  if(t.status==='menunggu_keputusan') return 'Menunggu Manager/Owner';
+  if(t.status==='usulan' || t.status==='dilaporkan') return 'Menunggu SPV '+(DIVS[t.department]?.label||t.department);
+  return null;
+}
 function ticketRow(x){
   const divSince = x.handling_division_since || x.created_at;
   const divAge = ageDays(divSince);
   const divCls = divAge>7?'age-red':(divAge>3?'age-amber':'muted');
+  const ball = ticketBallHolder(x);
   return `<div class="item" style="border-left-color:${DEPTS[x.department].color}" onclick="openTicket(${x.id})">
     <div class="row" style="justify-content:space-between">
       <div>${deptTag(x.department)} ${x.handling_division?divTag(x.handling_division):''} <b>${esc(x.title)}</b></div>
       <div>${statBadge(x.status)} ${urgBadge(x.urgency)}</div></div>
+    ${ball?`<div class="small" style="color:#1D4ED8;font-weight:600">🔵 ${ball}</div>`:''}
     <div class="small muted">PIC: ${x.pic_user_id?esc(uname(x.pic_user_id)):esc(x.pic_followup||'-')} · dibuat ${fdt(x.created_at)} · ${ageHtml(x.created_at)}
       ${x.handling_division?` · <span class="${divCls}">${divAge} hari di ${DIVS[x.handling_division].label}</span>`:''}</div></div>`;
 }
@@ -11915,6 +11928,7 @@ async function openTicket(id){
 
   let h = `<div class="mhead"><h3>#${t.id} · ${esc(t.title)}</h3><button onclick="closeModal()">✕</button></div>
   <div class="row">${deptTag(t.department)} ${divTag(t.handling_division)} ${statBadge(t.status)} ${urgBadge(t.urgency)} ${ageHtml(t.created_at)}</div>
+  ${ticketBallHolder(t)?`<p class="small" style="color:#1D4ED8;font-weight:600;margin-top:6px">🔵 ${ticketBallHolder(t)}</p>`:''}
   <p class="small" style="margin-top:8px">${esc(t.description||'')}</p>
   <p class="small muted">Aset: ${t.assets?esc(t.assets.name):'-'} · Pelapor: ${uname(t.reported_by)} · ${fdt(t.created_at)}</p>`;
   if(t.handling_division){
