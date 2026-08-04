@@ -10335,6 +10335,7 @@ const PSTAT = {
   menunggu_otorisasi:{l:'Menunggu Otorisasi',c:'#FEF3C7',t:'#92400E'},
   ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'},
   diproses:{l:'Diproses (Accounting)',c:'#DBEAFE',t:'#1D4ED8'},
+  siap_diambil:{l:'Siap Diambil',c:'#FEF9C3',t:'#854D0E'},
   selesai:{l:'Selesai',c:'#DCFCE7',t:'#166534'}
 };
 const URG = {rendah:{l:'Rendah',c:'#E5E7EB',t:'#374151'},sedang:{l:'Sedang',c:'#FEF3C7',t:'#92400E'},tinggi:{l:'Tinggi',c:'#FEE2E2',t:'#B91C1C'}};
@@ -11379,6 +11380,8 @@ async function renderDashboard(){
   ]);
   const pqAuth = isMgr() ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','menunggu_otorisasi')) : [];
   const pqAcct = (isAccSpv() || me.role==='owner') ? await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : [];
+  const pqPickupAll = await q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id, pickup_assigned_to)').eq('status','siap_diambil'));
+  const pqPickup = pqPickupAll.filter(it=> isMgr() || it.procurement_requests.pickup_assigned_to===me.id || (me.role==='spv' && me.department===it.procurement_requests.department));
   const pendingLogs = (me.role==='spv' && me.department) ? logs.filter(l=> l.department===me.department && l.needs_authorization && !l.authorized_at) : [];
   const hasCost = x => (x.ticket_items[0]?.count || 0) > 0;
   const open = tickets;
@@ -11527,6 +11530,13 @@ async function renderDashboard(){
       ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b> · Qty ${it.qty}
       ${it.procurement_requests.ticket_id?`<span class="badge" style="background:#FEE2E2;color:#B91C1C">Dari Tiket #${it.procurement_requests.ticket_id}</span>`:''}
       <div class="small muted">${ageHtml(it.created_at)}</div></div>`);
+    h += `</div>`;
+  }
+  if(pqPickup.length){
+    h += `<div class="card" style="border-left:4px solid #854D0E"><h3>Pengadaan: Siap Diambil, Perlu Konfirmasi</h3>`;
+    pqPickup.forEach(it=> h += `<div class="item" style="cursor:pointer" onclick="go('pengadaan')">
+      ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b>
+      <div class="small muted">${ageHtml(it.fulfilled_at||it.created_at)}</div></div>`);
     h += `</div>`;
   }
   if(isMgr()){
@@ -11739,8 +11749,22 @@ async function loadLogHist(){
   $('logHist').innerHTML = h + '</table>' + (mine.length?'':'<p class="muted small">Belum ada log.</p>');
 }
 /* ================= EXPORT EXCEL (Manager/Owner) ================= */
+function exportTicketsModal(){
+  openModal(`<div class="mhead"><h3>Export Laporan Kerusakan</h3><button onclick="closeModal()">✕</button></div>
+    <label>Divisi Penanganan</label><select id="etDiv"><option value="">Semua Divisi</option>${Object.entries(DIVS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+    <label>Dari Tanggal (dibuat)</label><input type="date" id="etFrom">
+    <label>Sampai Tanggal (dibuat)</label><input type="date" id="etTo" value="${today()}">
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="exportTicketsExcel()">⬇ Export Excel</button>`);
+}
 async function exportTicketsExcel(){
-  const list = await q(db.from('tickets').select('*, ticket_items(*)').order('created_at'));
+  const div = $('etDiv')?.value || '';
+  const from = $('etFrom')?.value || '';
+  const to = $('etTo')?.value || '';
+  let query = db.from('tickets').select('*, ticket_items(*)').order('created_at');
+  if(div) query = query.eq('handling_division', div);
+  if(from) query = query.gte('created_at', from);
+  if(to) query = query.lte('created_at', to+'T23:59:59');
+  const list = await q(query);
   const rows = list.map(t=>({
     ID:t.id,
     Departemen: DEPTS[t.department]?DEPTS[t.department].label:t.department,
@@ -11756,7 +11780,9 @@ async function exportTicketsExcel(){
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Kerusakan');
-  XLSX.writeFile(wb, `Riwayat_Kerusakan_${today()}.xlsx`);
+  const label = div ? (DIVS[div]?.label||div) : 'Semua';
+  XLSX.writeFile(wb, `Laporan_Kerusakan_${label}_${from||'awal'}_${to||today()}.xlsx`);
+  closeModal();
 }
 async function exportPengadaanExcel(){
   const list = await q(db.from('procurement_requests').select('*, procurement_items(*)').order('created_at'));
@@ -11810,19 +11836,30 @@ async function exportLemburExcel(){
 }
 
 /* ================= TIKET KERUSAKAN ================= */
+// Ambil departemen (pelapor+pelaksana) yang MUNCUL di tiket yang bisa dilihat
+// user ini (RLS sudah membatasi query-nya) -- dipakai supaya dropdown filter
+// cuma menampilkan pilihan yang relevan, bukan semua 9 departemen selalu.
+async function myTicketDepts(){
+  const rows = await q(db.from('tickets').select('department,handling_division'));
+  const set = new Set();
+  rows.forEach(r=>{ if(r.department) set.add(r.department); if(r.handling_division) set.add(r.handling_division); });
+  return set;
+}
 async function renderTiket(){
+  const myDepts = isMgr() ? null : await myTicketDepts();
+  const deptOpts = (obj, all) => Object.entries(obj).filter(([k])=> all || myDepts.has(k));
   let h = `<h2>Laporan Kerusakan</h2>
   <div class="row" style="margin-bottom:12px;justify-content:space-between">
     <div class="filters">
       <select id="fDept" onchange="loadTickets()"><option value="">Semua Dept Pelapor</option>
-        ${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+        ${deptOpts(DEPTS, isMgr()).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
       <select id="fHandle" onchange="loadTickets()"><option value="">Semua Divisi Penanganan</option>
-        ${Object.entries(DIVS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+        ${deptOpts(DIVS, isMgr()).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
       <select id="fStat" onchange="loadTickets()"><option value="">Semua Status</option><option value="__open">Belum Selesai</option>
         ${Object.entries(TSTAT).map(([k,v])=>`<option value="${k}">${v.l}</option>`).join('')}</select>
     </div>
     <div class="row">
-      ${isMgr()?`<button class="btn btn-ghost" onclick="exportTicketsExcel()">⬇ Excel</button>`:''}
+      ${isMgr()?`<button class="btn btn-ghost" onclick="exportTicketsModal()">⬇ Excel</button>`:''}
       ${!isAccSpv()?`<button class="btn btn-teal" onclick="newTicketModal()">+ Lapor Kerusakan</button>`:''}
     </div>
   </div><div id="ticketList"></div>`;
@@ -12222,6 +12259,7 @@ function reqStatusInfo(items){
   if(!items.length) return {l:'Kosong',c:'#F3F4F6',t:'#6B7280'};
   if(items.every(i=>['selesai','ditolak'].includes(i.status))) return {l:'Selesai',c:'#DCFCE7',t:'#166534'};
   if(items.some(i=>i.status==='menunggu_otorisasi')) return {l:'Menunggu Otorisasi',c:'#FEF3C7',t:'#92400E'};
+  if(items.some(i=>i.status==='siap_diambil')) return {l:'Siap Diambil',c:'#FEF9C3',t:'#854D0E'};
   return {l:'Diproses',c:'#DBEAFE',t:'#1D4ED8'};
 }
 function reqRow(r){
@@ -12233,12 +12271,19 @@ function reqRow(r){
       <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
     <div class="small muted">${r.procurement_items.length} item (${done} selesai) · oleh ${uname(r.requested_by)} · ${fdt(r.created_at)} · ${ageHtml(r.created_at)}</div></div>`;
 }
+async function myPengadaanDepts(){
+  const rows = await q(db.from('procurement_requests').select('department'));
+  return new Set(rows.map(r=>r.department));
+}
 async function renderPengadaan(){
+  const myDepts = isMgr() ? null : await myPengadaanDepts();
+  const deptOpts = Object.entries(DIVS).filter(([k])=>k!=='accounting' && (isMgr() || myDepts.has(k)));
   let h = `<h2>Permintaan Pengadaan Barang</h2>
-  <div class="row" style="margin-bottom:12px;justify-content:space-between">
-    <div class="filters">
+  <div class="row" style="margin-bottom:12px;justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <div class="filters" style="display:flex;gap:8px;flex-wrap:wrap">
+      <input id="pqfSearch" placeholder="🔍 Cari nama barang / pemohon / no. permintaan" oninput="loadPengadaan()" style="min-width:220px">
       <select id="pqfDept" onchange="loadPengadaan()"><option value="">Semua Dept</option>
-        ${Object.entries(DIVS).filter(([k])=>k!=='accounting').map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+        ${deptOpts.map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
       <select id="pqfStat" onchange="loadPengadaan()"><option value="">Semua Status</option>
         <option value="__open">Belum Selesai</option>
         <option value="menunggu_otorisasi">Menunggu Otorisasi</option>
@@ -12261,6 +12306,14 @@ async function loadPengadaan(){
   const fs = $('pqfStat').value;
   if(fs==='__open') list = list.filter(r=> r.procurement_items.some(i=>!['selesai','ditolak'].includes(i.status)));
   else if(fs) list = list.filter(r=> r.procurement_items.some(i=>i.status===fs));
+  const search = ($('pqfSearch').value||'').trim().toLowerCase();
+  if(search){
+    list = list.filter(r=>
+      String(r.id).includes(search) ||
+      uname(r.requested_by).toLowerCase().includes(search) ||
+      r.procurement_items.some(i=>(i.item_name_custom||i.item_name||'').toLowerCase().includes(search))
+    );
+  }
   $('pengadaanList').innerHTML = list.length ? list.map(reqRow).join('') : '<p class="muted">Tidak ada permintaan.</p>';
 }
 let pqDraft = [];
@@ -12354,11 +12407,15 @@ async function submitPengadaan(){
 }
 async function openPengadaan(id){
   const [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
+  const canAssignPickup = isMgr() || (me.role==='spv' && me.department===r.department);
+  const canConfirmPickup = isMgr() || (me.role==='spv' && me.department===r.department) || r.pickup_assigned_to===me.id;
   let h = `<div class="mhead"><h3>Permintaan #${r.id}</h3><button onclick="closeModal()">✕</button></div>
     <div class="row">${divTag(r.department)}
       ${r.ticket_id?`<button class="btn btn-ghost btn-sm" onclick="closeModal();openTicket(${r.ticket_id})">Lihat Tiket Kerusakan #${r.ticket_id}</button>`:''}</div>
     <p class="small muted">Diajukan oleh ${uname(r.requested_by)} · ${fdt(r.created_at)}</p>`;
   if(r.notes) h += `<p class="small">${esc(r.notes)}</p>`;
+  h += `<div class="small" style="margin-top:8px">👤 Penanggung jawab ambil barang: <b>${r.pickup_assigned_to?esc(uname(r.pickup_assigned_to)):'- belum ditugaskan -'}</b>
+    ${canAssignPickup?`<button class="btn-sm btn-ghost" onclick="assignPickupModal(${r.id},'${r.department}')" style="margin-left:6px">${r.pickup_assigned_to?'Ganti':'Tugaskan'}</button>`:''}</div>`;
   h += `<h3 style="margin-top:14px">Item</h3>`;
   r.procurement_items.forEach(it=>{
     h += `<div class="card" style="padding:10px;margin-bottom:8px">
@@ -12373,15 +12430,27 @@ async function openPengadaan(id){
         <div class="small muted">Perkiraan harga: ${rp(it.est_price)}</div>`;
     }
     if(it.actual_price!=null) h += `<div class="small muted">Harga realisasi: ${rp(it.actual_price)} (${it.fulfillment_method==='gudang'?'ambil dari gudang':'dibeli'})</div>`;
+    if(it.prepared_by) h += `<div class="small" style="color:#0F766E">🔧 Sedang/sudah disiapkan oleh ${esc(uname(it.prepared_by))}</div>`;
     if(it.status==='menunggu_otorisasi' && isMgr()){
       h += `<div class="row" style="margin-top:6px">
         <button class="btn btn-teal btn-sm" onclick="authorizeItem(${it.id},true)">✓ Setujui</button>
         <button class="btn btn-ghost btn-sm" onclick="authorizeItem(${it.id},false)">Tolak</button></div>`;
     }
-    if(it.status==='diproses' && isAccSpv()){
-      h += `<div class="row" style="margin-top:6px">
-        <button class="btn btn-teal btn-sm" onclick="fulfillItem(${it.id},'gudang')">Ambil dari Gudang</button>
-        <button class="btn btn-navy btn-sm" onclick="fulfillItem(${it.id},'beli')">Sudah Dibeli</button></div>`;
+    if(it.status==='diproses'){
+      if(isAccSpv() && !it.prepared_by){
+        h += `<button class="btn-sm btn-ghost" style="margin-top:6px" onclick="assignPrepareModal(${it.id},${r.id})">Tugaskan untuk Menyiapkan</button>`;
+      }
+      if(isAccSpv() || it.prepared_by===me.id){
+        h += `<div class="row" style="margin-top:6px">
+          <button class="btn btn-teal btn-sm" onclick="fulfillItem(${it.id},'gudang')">Ambil dari Gudang</button>
+          <button class="btn btn-navy btn-sm" onclick="fulfillItem(${it.id},'beli')">Sudah Dibeli</button></div>`;
+      }
+    }
+    if(it.status==='siap_diambil'){
+      h += `<p class="small" style="color:#854D0E">Menunggu konfirmasi pengambilan dari sisi peminta.</p>`;
+      if(canConfirmPickup){
+        h += `<button class="btn btn-teal btn-sm" style="margin-top:6px" onclick="confirmReceived(${it.id})">✓ Konfirmasi Sudah Diambil</button>`;
+      }
     }
     if(it.status==='ditolak') h += `<p class="small" style="color:var(--red)">Ditolak</p>`;
     h += `</div>`;
@@ -12394,6 +12463,39 @@ async function openPengadaan(id){
   h += `</div><div class="row"><input id="pqNote" placeholder="tulis catatan..." style="flex:1">
     <button class="btn btn-ghost btn-sm" onclick="addPengadaanUpdate(${r.id})">Kirim</button></div>`;
   openModal(h);
+}
+function assignPickupModal(requestId, dept){
+  const staffList = profilesCache.filter(p=>p.department===dept && p.role==='staff' && p.active);
+  openModal(`<div class="mhead"><h3>Tugaskan Ambil Barang</h3><button onclick="closeModal()">✕</button></div>
+    <label>Anak Buah</label><select id="apStaff">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="assignPickup(${requestId})">Tugaskan</button>`);
+}
+async function assignPickup(requestId){
+  const staffId = $('apStaff').value;
+  await q(db.from('procurement_requests').update({pickup_assigned_to:staffId}).eq('id',requestId));
+  await q(db.from('task_items').insert({staff_id:staffId, department:me.department,
+    task_text:'Ambil barang untuk Permintaan #'+requestId, task_date:today(), created_by:me.id, procurement_request_id:requestId}).select());
+  toast('Anak buah ditugaskan untuk ambil barang'); openPengadaan(requestId); if(page==='pengadaan') loadPengadaan();
+}
+function assignPrepareModal(itemId, requestId){
+  const staffList = profilesCache.filter(p=>p.department==='accounting' && p.role==='staff' && p.active);
+  openModal(`<div class="mhead"><h3>Tugaskan Menyiapkan Barang</h3><button onclick="closeModal()">✕</button></div>
+    <label>Anak Buah (Accounting)</label><select id="apwStaff">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="assignPrepare(${itemId},${requestId})">Tugaskan</button>`);
+}
+async function assignPrepare(itemId, requestId){
+  const staffId = $('apwStaff').value;
+  await q(db.from('procurement_items').update({prepared_by:staffId, prepared_at:new Date().toISOString()}).eq('id',itemId));
+  const [it] = await q(db.from('procurement_items').select('item_name').eq('id',itemId));
+  await q(db.from('task_items').insert({staff_id:staffId, department:'accounting',
+    task_text:'Siapkan barang: '+(it?.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select());
+  toast('Anak buah ditugaskan untuk menyiapkan'); openPengadaan(requestId); if(page==='pengadaan') loadPengadaan();
+}
+async function confirmReceived(itemId){
+  await q(db.from('procurement_items').update({status:'selesai', received_by:me.id, received_at:new Date().toISOString()}).eq('id',itemId));
+  const [it] = await q(db.from('procurement_items').select('request_id,item_name').eq('id',itemId));
+  await q(db.from('procurement_updates').insert({request_id:it.request_id, note:'Dikonfirmasi diterima: '+it.item_name, created_by:me.id}).select());
+  toast('Dikonfirmasi diterima'); openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
 }
 async function authorizeItem(itemId, approve){
   const upd = approve
@@ -12410,10 +12512,10 @@ async function fulfillItem(itemId, method){
     const val = prompt('Harga realisasi pembelian (Rp):'); if(val===null) return;
     actual = Number(val)||0;
   }
-  await q(db.from('procurement_items').update({status:'selesai', fulfillment_method:method, actual_price:actual,
+  await q(db.from('procurement_items').update({status:'siap_diambil', fulfillment_method:method, actual_price:actual,
     fulfilled_by:me.id, fulfilled_at:new Date().toISOString()}).eq('id',itemId));
   const [it] = await q(db.from('procurement_items').select('request_id,item_name,ticket_item_id').eq('id',itemId));
-  await q(db.from('procurement_updates').insert({request_id:it.request_id, note:'Diserahkan ('+(method==='gudang'?'ambil dari gudang':'dibeli')+'): '+it.item_name, created_by:me.id}).select());
+  await q(db.from('procurement_updates').insert({request_id:it.request_id, note:'Siap diambil ('+(method==='gudang'?'ambil dari gudang':'dibeli')+'): '+it.item_name, created_by:me.id}).select());
   // Kalau item ini berasal dari tiket kerusakan, sinkronkan harga realisasi balik ke tiket
   if(it.ticket_item_id){
     await q(db.from('ticket_items').update({actual_price: method==='beli' ? actual : 0}).eq('id',it.ticket_item_id));
