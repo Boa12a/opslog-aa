@@ -10520,6 +10520,7 @@ function buildNav(){
   if(isMgr() || isAccSpv()) grupPengadaan.push(['katalog','Katalog Barang']);
 
   const grupSdm = [];
+  if(isMgr() || isFieldWorker()) grupSdm.push(['tugas','Tugas']);
   if(isMgr() || isFieldWorker()) grupSdm.push(['lembur','Lembur']);
   if(isMgr() || inOpsDept || isHrSpv()) grupSdm.push(['cuti','Cuti & Sakit']);
   if(isHrdOrMgr()) grupSdm.push(['hrd','HRD'],['users','Pengguna']);
@@ -10545,7 +10546,7 @@ function go(p){
   closeDrawer();
   $('main').innerHTML = '<p class="muted">Memuat...</p>';
   window.scrollTo(0,0);
-  ({dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers})[p]();
+  ({dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas})[p]();
 }
 
 /* ================= KIOS ABSENSI (generate QR) ================= */
@@ -11401,6 +11402,20 @@ async function renderDashboard(){
 
   let h = `<h2>Dashboard · ${fdate(t)}</h2>`;
 
+  // Tugas Hari Ini — generate dulu instance dari template berulang yang jatuh hari ini
+  await ensureTodayTasksFor(me.id);
+  const myTasksToday = await q(db.from('task_items').select('*').eq('staff_id',me.id).lte('task_date',t).eq('status','belum').order('task_date'));
+  if(myTasksToday.length){
+    h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>📋 Tugas Anda</h3>`;
+    myTasksToday.forEach(x=>{
+      const telat = x.task_date < t;
+      h += `<div class="item" style="cursor:pointer" onclick="go('tugas')">
+        <b>${esc(x.task_text)}</b> ${telat?'<span class="badge" style="background:#FEE2E2;color:#B91C1C">⚠ Terlambat</span>':''}
+        <div class="small muted">${fdate(x.task_date)}</div></div>`;
+    });
+    h += `</div>`;
+  }
+
   // Jadwal Lembur Anda — tampil untuk siapa pun yang dijadwalkan lembur (disetujui, tanggal hari ini/mendatang)
   const myLembur = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').is('voided_at',null).gte('requested_date', t).order('requested_date'));
   if(myLembur.length){
@@ -11556,7 +11571,7 @@ function ticketRow(x){
     <div class="row" style="justify-content:space-between">
       <div>${deptTag(x.department)} ${x.handling_division?divTag(x.handling_division):''} <b>${esc(x.title)}</b></div>
       <div>${statBadge(x.status)} ${urgBadge(x.urgency)}</div></div>
-    <div class="small muted">PIC: ${esc(x.pic_followup||'-')} · dibuat ${fdt(x.created_at)} · ${ageHtml(x.created_at)}
+    <div class="small muted">PIC: ${x.pic_user_id?esc(uname(x.pic_user_id)):esc(x.pic_followup||'-')} · dibuat ${fdt(x.created_at)} · ${ageHtml(x.created_at)}
       ${x.handling_division?` · <span class="${divCls}">${divAge} hari di ${DIVS[x.handling_division].label}</span>`:''}</div></div>`;
 }
 
@@ -11720,7 +11735,7 @@ async function exportTicketsExcel(){
     Judul:t.title, Deskripsi:t.description||'',
     Urgensi: URG[t.urgency]?URG[t.urgency].l:t.urgency,
     Status: TSTAT[t.status]?TSTAT[t.status].l:t.status,
-    PIC:t.pic_followup||'', 'Target Tanggal': t.target_date||'',
+    PIC: t.pic_user_id?uname(t.pic_user_id):(t.pic_followup||''), 'Target Tanggal': t.target_date||'',
     Pelapor: uname(t.reported_by), Dibuat: fdt(t.created_at),
     'Total Perkiraan': t.ticket_items.reduce((s,i)=>s+i.qty*i.est_price,0),
     'Total Realisasi': t.ticket_items.reduce((s,i)=>s+(i.actual_price!=null?i.qty*i.actual_price:0),0)
@@ -11858,16 +11873,31 @@ async function routeTicket(id, route){
   toast('Jalur ditentukan: '+routeLabel); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 async function decideRouteC(id){
-  const div = $('tcDiv').value, pic = $('tcPic').value.trim(), plan = $('tcPlan').value.trim(), target = $('tcTarget').value;
-  if(!pic || !target){ toast('PIC dan Target Tanggal wajib diisi'); return; }
+  const div = $('tcDiv').value, picUser = $('tcPicUser').value, pic = $('tcPic').value.trim(), plan = $('tcPlan').value.trim(), target = $('tcTarget').value;
+  if(!picUser && !pic){ toast('Isi salah satu: PIC Internal atau PIC Eksternal'); return; }
+  if(!target){ toast('Target Tanggal wajib diisi'); return; }
+  const picLabel = picUser ? uname(picUser) : pic;
   await q(db.from('tickets').update({
-    target_division: div, pic_followup: pic, repair_plan: plan||null, target_date: target,
+    target_division: div, pic_followup: picUser?null:pic, pic_user_id: picUser||null, repair_plan: plan||null, target_date: target,
     handling_division: div, handling_division_since: new Date().toISOString(), status:'dijadwalkan'
   }).eq('id', id));
-  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Manager putuskan: divisi '+(DIVS[div]?.label||div)+', PIC '+pic+(plan?' — '+plan:''), created_by:me.id}).select());
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Manager putuskan: divisi '+(DIVS[div]?.label||div)+', PIC '+picLabel+(plan?' — '+plan:''), created_by:me.id}).select());
+  if(picUser) await assignPicTask(id, picUser, target);
   await createPengadaanFromTicket(id); // otomatis lewati kalau tidak ada rincian biaya
   toast('Keputusan tersimpan, divisi pelaksana & Accounting (kalau ada biaya) langsung dapat notifikasi');
   openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
+// Bikin/perbarui 1 task_item yang tertaut ke tiket ini untuk PIC internal --
+// muncul otomatis di Dashboard-nya sebagai tugas follow-up.
+async function assignPicTask(ticketId, staffId, targetDate){
+  const [tk] = await q(db.from('tickets').select('title, department').eq('id',ticketId));
+  const existing = await q(db.from('task_items').select('id').eq('ticket_id',ticketId).eq('staff_id',staffId));
+  if(existing.length) return; // sudah ada, tidak dobel
+  await q(db.from('task_items').insert({
+    staff_id: staffId, department: tk?.department||null,
+    task_text: 'Follow-up Kerusakan: ' + (tk?.title || ('Tiket #'+ticketId)),
+    task_date: targetDate || today(), created_by: me.id, ticket_id: ticketId
+  }).select());
 }
 async function rejectUsulan(id){
   if(!confirm('Tolak usulan ini? Akan dihapus permanen (belum jadi tiket resmi).')) return;
@@ -11922,12 +11952,15 @@ async function openTicket(id){
     // semua orang (SPV tidak bisa ubah) — kecuali Manager/Owner yang selalu boleh.
     const editablePic = t.status!=='selesai' && (isMgr() || (canEdit && t.route!=='c'));
     if(editablePic){
-      h += `<label>PIC Follow-up (siapa yang mengerjakan)</label><input id="tPic" value="${esc(t.pic_followup||'')}" placeholder="nama teknisi / SPV / vendor">
+      h += `<label>PIC Internal (karyawan, otomatis jadi Tugas di Dashboard-nya)</label>
+      <select id="tPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active).map(p=>`<option value="${p.id}" ${t.pic_user_id===p.id?'selected':''}>${esc(p.name)}${p.department?' — '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
+      <label>Atau PIC Eksternal (vendor/teknisi luar, teks bebas)</label>
+      <input id="tPic" value="${esc(t.pic_user_id?'':(t.pic_followup||''))}" placeholder="nama teknisi / vendor luar">
       <label>Notasi Rencana Perbaikan</label><textarea id="tPlan" rows="2">${esc(t.repair_plan||'')}</textarea>
       <label>Target Tanggal Pasti</label><input type="date" id="tTarget" value="${t.target_date||''}">
       <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="saveTicketPlan(${t.id})">Simpan Rencana</button>`;
     } else {
-      h += `<p class="small"><b>PIC:</b> ${esc(t.pic_followup||'-')} · <b>Target:</b> ${fdate(t.target_date)}<br><b>Rencana:</b> ${esc(t.repair_plan||'-')}</p>`;
+      h += `<p class="small"><b>PIC:</b> ${t.pic_user_id?esc(uname(t.pic_user_id)):esc(t.pic_followup||'-')} · <b>Target:</b> ${fdate(t.target_date)}<br><b>Rencana:</b> ${esc(t.repair_plan||'-')}</p>`;
     }
   }
 
@@ -11977,7 +12010,10 @@ async function openTicket(id){
   } else if(t.status==='menunggu_keputusan'){
     if(isMgr()){
       h += `<label>Divisi Pelaksana</label><select id="tcDiv">${divOptions(t.department)}</select>
-      <label>PIC Follow-up</label><input id="tcPic" placeholder="nama teknisi / SPV / vendor">
+      <label>PIC Internal (karyawan, otomatis jadi Tugas di Dashboard-nya)</label>
+      <select id="tcPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active).map(p=>`<option value="${p.id}">${esc(p.name)}${p.department?' — '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
+      <label>Atau PIC Eksternal (vendor/teknisi luar, teks bebas)</label>
+      <input id="tcPic" placeholder="nama teknisi / vendor luar">
       <label>Notasi Rencana Perbaikan</label><textarea id="tcPlan" rows="2"></textarea>
       <label>Target Tanggal Pasti</label><input type="date" id="tcTarget">
       <button class="btn btn-teal btn-sm" style="margin-top:8px" onclick="decideRouteC(${t.id})">✓ Putuskan</button>
@@ -12116,8 +12152,13 @@ async function deleteTicket(id){
   if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 async function saveTicketPlan(id){
-  await q(db.from('tickets').update({pic_followup:$('tPic').value.trim(), repair_plan:$('tPlan').value.trim(),
-    target_date:$('tTarget').value||null}).eq('id',id));
+  const picUser = $('tPicUser').value;
+  const pic = $('tPic').value.trim();
+  await q(db.from('tickets').update({
+    pic_followup: picUser?null:pic, pic_user_id: picUser||null,
+    repair_plan:$('tPlan').value.trim(), target_date:$('tTarget').value||null
+  }).eq('id',id));
+  if(picUser) await assignPicTask(id, picUser, $('tTarget').value||null);
   toast('Rencana tersimpan'); openTicket(id);
 }
 async function addItem(id){
@@ -12136,6 +12177,11 @@ async function setStatus(id,s){
   if(s==='selesai'){ upd.closed_by=me.id; upd.closed_at=new Date().toISOString(); }
   await q(db.from('tickets').update(upd).eq('id',id));
   await q(db.from('ticket_updates').insert({ticket_id:id,note:'Status → '+TSTAT[s].l,created_by:me.id}).select());
+  // Kalau ditandai diperbaiki/selesai, task Tugas yang otomatis dibuat dari
+  // PIC internal tiket ini ikut ditutup -- tidak perlu tutup manual 2 tempat.
+  if(s==='diperbaiki' || s==='selesai'){
+    await q(db.from('task_items').update({status:'selesai', completed_at:new Date().toISOString()}).eq('ticket_id',id).eq('status','belum'));
+  }
   toast('Status diperbarui'); openTicket(id);
   if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
@@ -12551,7 +12597,8 @@ function normalDurationHours(jamMulai, jamSelesai){
   return mins/60;
 }
 // Jam kerja normal staff untuk 1 tanggal tertentu -- sumbernya beda per golongan:
-// Security & Accounting pakai shift (jam_mulai/jam_selesai di tabel shifts),
+// Security & Accounting pakai shift (start_time/end_time di tabel shifts --
+// kolom yang SUDAH ADA dari halaman Checklist & Shift, bukan kolom terpisah),
 // departemen lain pakai department_default_hours (beda weekday/weekend).
 async function jamNormalForDate(staff, dateStr){
   if(!staff.department) return null;
@@ -12563,12 +12610,12 @@ async function jamNormalForDate(staff, dateStr){
     const entry = entries[0];
     if(!entry || entry.is_off || !entry.shift_id) return null;
     const sh = (await q(db.from('shifts').select('*').eq('id',entry.shift_id)))[0];
-    return (sh && sh.jam_mulai && sh.jam_selesai) ? {mulai:sh.jam_mulai, selesai:sh.jam_selesai} : null;
+    return (sh && sh.start_time && sh.end_time) ? {mulai:sh.start_time, selesai:sh.end_time} : null;
   }
   if(staff.department==='accounting'){
     if(!staff.default_shift_id) return null;
     const sh = (await q(db.from('shifts').select('*').eq('id',staff.default_shift_id)))[0];
-    return (sh && sh.jam_mulai && sh.jam_selesai) ? {mulai:sh.jam_mulai, selesai:sh.jam_selesai} : null;
+    return (sh && sh.start_time && sh.end_time) ? {mulai:sh.start_time, selesai:sh.end_time} : null;
   }
   const dt = dayTypeOf(dateStr);
   const row = (await q(db.from('department_default_hours').select('*').eq('department',staff.department).eq('day_type',dt)))[0];
@@ -12757,6 +12804,133 @@ async function voidLembur(id){
   await q(db.from('overtime_requests').update({voided_by:me.id, voided_at:new Date().toISOString(), void_reason:reason.trim()}).eq('id',id));
   toast('Lembur di-void'); openLembur(id); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
+
+/* ================= TUGAS (TASK/CHECKLIST PER-STAFF) ================= */
+// Modul berdiri sendiri, terpisah dari Log Harian/Checklist departemen.
+// SPV bikin tugas untuk anak buahnya, Manager/Owner bisa untuk siapa saja.
+// Sekali (harian) atau berulang mingguan (pilih hari + jenis pekerjaan).
+// Muncul di Dashboard staff yang bersangkutan, ada status "terlambat" untuk
+// SPV/Manager, dan staff bisa isi keterangan saat menyelesaikan.
+const DOW_LABEL = ['Minggu','Senin','Selasa','Rabu','Kamis',"Jum'at",'Sabtu'];
+// Pastikan instance tugas HARI INI sudah dibuat dari template berulang yang
+// aktif untuk 1 staff (dipanggil lazim saat Dashboard/Tugas dibuka -- tidak
+// ada cron job di arsitektur ini, jadi generate on-demand saat diperlukan).
+async function ensureTodayTasksFor(staffId){
+  const t0 = today();
+  const dow = new Date(t0+'T00:00:00').getDay();
+  const templates = await q(db.from('task_templates').select('*').eq('staff_id',staffId).eq('active',true));
+  const due = templates.filter(tpl=>(tpl.days_of_week||[]).includes(dow));
+  if(!due.length) return;
+  const existing = await q(db.from('task_items').select('template_id').eq('staff_id',staffId).eq('task_date',t0));
+  const existingTplIds = new Set(existing.map(e=>e.template_id));
+  const toCreate = due.filter(tpl=>!existingTplIds.has(tpl.id)).map(tpl=>({
+    staff_id: staffId, department: tpl.department, task_text: tpl.task_text, task_date: t0,
+    template_id: tpl.id, created_by: tpl.created_by
+  }));
+  if(toCreate.length) await q(db.from('task_items').insert(toCreate).select());
+}
+async function renderTugas(){
+  const canManage = isMgr() || me.role==='spv';
+  if(canManage) await ensureTodayTasksForDept(); else await ensureTodayTasksFor(me.id);
+  let h = `<h2>Tugas</h2>
+    <div class="row" style="justify-content:space-between;margin-bottom:12px;flex-wrap:wrap">
+      <select id="tgFilter" onchange="loadTugas()">
+        <option value="mine">Punya Saya</option>
+        ${canManage?'<option value="dept">Departemen Saya</option>':''}
+        ${isMgr()?'<option value="all">Semua</option>':''}
+      </select>
+      ${canManage?`<button class="btn btn-teal btn-sm" onclick="newTugasModal()">+ Buat Tugas</button>`:''}
+    </div><div id="tugasList"></div>`;
+  $('main').innerHTML = h;
+  $('tgFilter').value = canManage ? 'dept' : 'mine';
+  loadTugas();
+}
+// Generate instance hari ini untuk SEMUA staff di departemen SPV/Manager yang
+// buka halaman ini -- supaya SPV langsung lihat tugas hari ini semua anak buahnya.
+async function ensureTodayTasksForDept(){
+  const staffIds = isMgr()
+    ? (await q(db.from('profiles').select('id').in('role',['spv','staff']).eq('active',true))).map(p=>p.id)
+    : (await q(db.from('profiles').select('id').eq('department',me.department).eq('role','staff').eq('active',true))).map(p=>p.id);
+  for(const sid of staffIds) await ensureTodayTasksFor(sid);
+}
+async function loadTugas(){
+  const f = $('tgFilter').value;
+  let query = db.from('task_items').select('*').order('task_date',{ascending:false}).limit(150);
+  if(f==='mine') query = query.eq('staff_id', me.id);
+  else if(f==='dept') query = query.eq('department', me.department);
+  const list = await q(query);
+  const t0 = today();
+  $('tugasList').innerHTML = list.length ? list.map(t=>{
+    const telat = t.status==='belum' && t.task_date < t0;
+    const badge = t.status==='selesai' ? {c:'#DCFCE7',t:'#166534',l:'✓ Selesai'} : (telat ? {c:'#FEE2E2',t:'#B91C1C',l:'⚠ Terlambat'} : {c:'#FEF3C7',t:'#92400E',l:'Belum'});
+    return `<div class="item" style="cursor:pointer" onclick="openTugas(${t.id})">
+      <div class="row" style="justify-content:space-between">
+        <div>${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b></div>
+        <span class="badge" style="background:${badge.c};color:${badge.t}">${badge.l}</span></div>
+      <div class="small">${fdate(t.task_date)} · ${esc(t.task_text)}</div>
+      ${t.ticket_id?'<div class="small muted">🔧 Follow-up tiket Kerusakan #'+t.ticket_id+'</div>':''}</div>`;
+  }).join('') : '<p class="muted">Belum ada tugas.</p>';
+}
+async function newTugasModal(){
+  const staffList = isMgr()
+    ? await q(db.from('profiles').select('*').in('role',['spv','staff']).eq('active',true).order('name'))
+    : await q(db.from('profiles').select('*').eq('department',me.department).eq('role','staff').eq('active',true).order('name'));
+  openModal(`<div class="mhead"><h3>Buat Tugas</h3><button onclick="closeModal()">✕</button></div>
+    <label>Untuk</label><select id="tgStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)}</option>`).join('')}</select>
+    <label>Jenis Pekerjaan</label><textarea id="tgText" rows="2" placeholder="mis. Cek tekanan filter kolam VIP"></textarea>
+    <label><input type="checkbox" id="tgRecur" onchange="toggleTugasRecur()"> Berulang mingguan</label>
+    <div id="tgDateWrap"><label>Tanggal</label><input type="date" id="tgDate" value="${today()}"></div>
+    <div id="tgDaysWrap" class="hidden"><label>Hari (bisa pilih lebih dari 1)</label>
+      <div class="row" style="flex-wrap:wrap;gap:6px">${DOW_LABEL.map((l,i)=>`<label class="small" style="display:flex;align-items:center;gap:4px"><input type="checkbox" class="tgDow" value="${i}">${l}</label>`).join('')}</div></div>
+    <button class="btn btn-teal" id="btnSubmitTugas" style="margin-top:14px;width:100%" onclick="submitTugas()">Simpan</button>`);
+}
+function toggleTugasRecur(){
+  const recur = $('tgRecur').checked;
+  $('tgDateWrap').classList.toggle('hidden', recur);
+  $('tgDaysWrap').classList.toggle('hidden', !recur);
+}
+async function submitTugas(){
+  const text = $('tgText').value.trim();
+  if(!text){ toast('Jenis pekerjaan wajib diisi'); return; }
+  const staffSel = $('tgStaff');
+  const staffId = staffSel.value, dept = staffSel.selectedOptions[0].dataset.dept || null;
+  if(!lockBtn($('btnSubmitTugas'))) return;
+  if($('tgRecur').checked){
+    const days = Array.from(document.querySelectorAll('.tgDow:checked')).map(el=>Number(el.value));
+    if(!days.length){ toast('Pilih minimal 1 hari'); return; }
+    await q(db.from('task_templates').insert({staff_id:staffId, department:dept, task_text:text, days_of_week:days, created_by:me.id}).select());
+    await ensureTodayTasksFor(staffId);
+    toast('Tugas berulang dibuat');
+  } else {
+    const tgl = $('tgDate').value;
+    await q(db.from('task_items').insert({staff_id:staffId, department:dept, task_text:text, task_date:tgl, created_by:me.id}).select());
+    toast('Tugas dibuat');
+  }
+  closeModal(); if(page==='tugas') loadTugas();
+}
+async function openTugas(id){
+  const [t] = await q(db.from('task_items').select('*').eq('id',id));
+  const t0 = today();
+  const telat = t.status==='belum' && t.task_date < t0;
+  let h = `<div class="mhead"><h3>Tugas</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small">${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b><br>
+    <b>Tanggal:</b> ${fdate(t.task_date)}<br><b>Pekerjaan:</b> ${esc(t.task_text)}</p>
+    ${t.ticket_id?`<p class="small muted">🔧 Otomatis dari tiket Kerusakan #${t.ticket_id}</p>`:''}
+    <p><span class="badge" style="background:${t.status==='selesai'?'#DCFCE7':(telat?'#FEE2E2':'#FEF3C7')};color:${t.status==='selesai'?'#166534':(telat?'#B91C1C':'#92400E')}">${t.status==='selesai'?'✓ Selesai':(telat?'⚠ Terlambat':'Belum')}</span></p>`;
+  if(t.status==='selesai'){
+    h += `<p class="small"><b>Keterangan:</b> ${esc(t.completion_note||'-')}<br><span class="muted">Selesai ${fdt(t.completed_at)}</span></p>`;
+  } else if(t.staff_id===me.id || isMgr() || (me.role==='spv' && me.department===t.department)){
+    h += `<label>Keterangan Penyelesaian</label><textarea id="tgNote" rows="2"></textarea>
+      <button class="btn btn-teal btn-sm" style="margin-top:10px" onclick="finishTugas(${t.id})">✓ Tandai Selesai</button>`;
+  }
+  openModal(h);
+}
+async function finishTugas(id){
+  const note = $('tgNote').value.trim();
+  await q(db.from('task_items').update({status:'selesai', completion_note:note||null, completed_at:new Date().toISOString()}).eq('id',id));
+  toast('Tugas selesai'); closeModal(); if(page==='tugas') loadTugas(); if(page==='dashboard') renderDashboard();
+}
+
 
 /* ================= REKAP BULANAN ================= */
 async function renderRekap(){
