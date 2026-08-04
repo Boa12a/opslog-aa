@@ -11419,6 +11419,21 @@ async function renderDashboard(){
     h += `</div>`;
   }
 
+  // Tugas Anak Buah Terlambat — khusus SPV, tugas di departemennya yang sudah
+  // lewat tanggal tapi belum ditandai selesai (bukan tugas SPV itu sendiri).
+  if(me.role==='spv' && me.department){
+    const lateDeptTasks = await q(db.from('task_items').select('*').eq('department',me.department).eq('status','belum').lt('task_date',t).order('task_date'));
+    if(lateDeptTasks.length){
+      h += `<div class="card" style="border-left:4px solid var(--red)"><h3>⚠ Tugas Anak Buah Terlambat</h3>`;
+      lateDeptTasks.forEach(x=>{
+        h += `<div class="item" style="cursor:pointer" onclick="go('tugas')">
+          <b>${uname(x.staff_id)}</b> — ${esc(x.task_text)}
+          <div class="small muted">Harusnya ${fdate(x.task_date)} · ${ageHtml(x.task_date)}</div></div>`;
+      });
+      h += `</div>`;
+    }
+  }
+
   // Jadwal Lembur Anda — tampil untuk siapa pun yang dijadwalkan lembur (disetujui, tanggal hari ini/mendatang)
   const myLembur = await q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').is('voided_at',null).gte('requested_date', t).order('requested_date'));
   if(myLembur.length){
@@ -12341,7 +12356,7 @@ function pqRenderItems(){
         ${it.category==='umum'
           ? `<select class="pq-name" style="flex:2">
               <option value="">— pilih barang —</option>
-              ${catalog.map(c=>`<option value="${esc(c.item_name)}" ${it.item_name===c.item_name?'selected':''}>${esc(c.item_name)}</option>`).join('')}
+              ${catalog.map(c=>`<option value="${esc(c.item_name)}" ${it.item_name===c.item_name?'selected':''}>${esc(c.item_name)}${c.tier==='khusus'?' (Khusus — perlu otorisasi Manager)':''}</option>`).join('')}
               <option value="__CUSTOM__" ${it.item_name==='__CUSTOM__'?'selected':''}>+ Barang lain (belum ada di katalog)</option>
             </select>`
           : `<input class="pq-name" placeholder="nama barang baru" value="${esc(it.item_name)}" style="flex:2">`}
@@ -12390,16 +12405,25 @@ async function submitPengadaan(){
   if(!valid.length){ toast('Isi minimal 1 nama barang'); return; }
   const r = await q(db.from('procurement_requests').insert({department:dept, requested_by:me.id, notes:$('pqNotes').value.trim()||null}).select());
   const reqId = r[0].id;
-  const items = valid.map(it=>({
-    request_id: reqId,
-    item_name: it.item_name.trim(),
-    category: it.category,
-    qty: Number(it.qty)||1,
-    stok_ada: it.category==='umum' ? (it.stok_ada===''?null:Number(it.stok_ada)) : null,
-    keterangan: it.category==='baru' ? ((it.keterangan||'').trim()||null) : null,
-    est_price: it.category==='baru' ? (it.est_price===''?null:Number(it.est_price)) : null,
-    status: it.category==='baru' ? 'menunggu_otorisasi' : 'diproses'
-  }));
+  const items = valid.map(it=>{
+    // Barang "Umum" di katalog -> tanpa otorisasi. Barang "Khusus" di katalog
+    // ATAU kategori "Baru" -> wajib otorisasi Manager dulu.
+    let needsAuth = it.category==='baru';
+    if(it.category==='umum'){
+      const catItem = (window._catalog||[]).find(c=>c.item_name===it.item_name);
+      if(catItem && catItem.tier==='khusus') needsAuth = true;
+    }
+    return {
+      request_id: reqId,
+      item_name: it.item_name.trim(),
+      category: it.category,
+      qty: Number(it.qty)||1,
+      stok_ada: it.category==='umum' ? (it.stok_ada===''?null:Number(it.stok_ada)) : null,
+      keterangan: it.category==='baru' ? ((it.keterangan||'').trim()||null) : null,
+      est_price: it.category==='baru' ? (it.est_price===''?null:Number(it.est_price)) : null,
+      status: needsAuth ? 'menunggu_otorisasi' : 'diproses'
+    };
+  });
   await q(db.from('procurement_items').insert(items).select());
   await q(db.from('procurement_updates').insert({request_id:reqId, note:'Permintaan diajukan ('+items.length+' item)', created_by:me.id}).select());
   closeModal(); toast('Permintaan pengadaan tersimpan');
@@ -12954,12 +12978,15 @@ async function renderTugas(){
   const canManage = isMgr() || me.role==='spv';
   if(canManage) await ensureTodayTasksForDept(); else await ensureTodayTasksFor(me.id);
   let h = `<h2>Tugas</h2>
-    <div class="row" style="justify-content:space-between;margin-bottom:12px;flex-wrap:wrap">
-      <select id="tgFilter" onchange="loadTugas()">
-        <option value="mine">Punya Saya</option>
-        ${canManage?'<option value="dept">Departemen Saya</option>':''}
-        ${isMgr()?'<option value="all">Semua</option>':''}
-      </select>
+    <div class="row" style="justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <select id="tgFilter" onchange="loadTugas()">
+          <option value="mine">Punya Saya</option>
+          ${canManage?'<option value="dept">Departemen Saya</option>':''}
+          ${isMgr()?'<option value="all">Semua</option>':''}
+        </select>
+        ${isMgr()?`<select id="tgDeptFilter" onchange="loadTugas()"><option value="">Semua Departemen</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>`:''}
+      </div>
       ${canManage?`<button class="btn btn-teal btn-sm" onclick="newTugasModal()">+ Buat Tugas</button>`:''}
     </div><div id="tugasList"></div>`;
   $('main').innerHTML = h;
@@ -12974,23 +13001,46 @@ async function ensureTodayTasksForDept(){
     : (await q(db.from('profiles').select('id').eq('department',me.department).eq('role','staff').eq('active',true))).map(p=>p.id);
   for(const sid of staffIds) await ensureTodayTasksFor(sid);
 }
+// Nama pemberi tugas -- Owner sengaja ditulis "PT" (mewakili perusahaan),
+// bukan nama pribadinya. SPV/Manager tetap pakai nama asli.
+function assignerLabel(creatorId){
+  if(!creatorId) return null;
+  const p = profilesCache.find(x=>x.id===creatorId);
+  if(!p) return null;
+  return p.role==='owner' ? 'PT' : p.name;
+}
+function taskRow(t){
+  const t0 = today();
+  const telat = t.status==='belum' && t.task_date < t0;
+  const badge = t.status==='selesai' ? {c:'#DCFCE7',t:'#166534',l:'✓ Selesai'} : (telat ? {c:'#FEE2E2',t:'#B91C1C',l:'⚠ Terlambat'} : {c:'#FEF3C7',t:'#92400E',l:'Belum'});
+  const dari = assignerLabel(t.created_by);
+  return `<div class="item" style="cursor:pointer" onclick="openTugas(${t.id})">
+    <div class="row" style="justify-content:space-between">
+      <div>${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b></div>
+      <span class="badge" style="background:${badge.c};color:${badge.t}">${badge.l}</span></div>
+    <div class="small">${fdate(t.task_date)} · ${esc(t.task_text)}</div>
+    ${dari?`<div class="small muted">Dari: ${esc(dari)}</div>`:''}
+    ${t.ticket_id?'<div class="small muted">🔧 Follow-up tiket Kerusakan #'+t.ticket_id+'</div>':''}
+    ${t.procurement_request_id?'<div class="small muted">📦 Terkait Permintaan Barang #'+t.procurement_request_id+'</div>':''}</div>`;
+}
 async function loadTugas(){
   const f = $('tgFilter').value;
-  let query = db.from('task_items').select('*').order('task_date',{ascending:false}).limit(150);
+  let query = db.from('task_items').select('*').order('task_date',{ascending:false}).limit(300);
   if(f==='mine') query = query.eq('staff_id', me.id);
   else if(f==='dept') query = query.eq('department', me.department);
+  const deptF = $('tgDeptFilter');
+  if(deptF && deptF.value) query = query.eq('department', deptF.value);
   const list = await q(query);
   const t0 = today();
-  $('tugasList').innerHTML = list.length ? list.map(t=>{
-    const telat = t.status==='belum' && t.task_date < t0;
-    const badge = t.status==='selesai' ? {c:'#DCFCE7',t:'#166534',l:'✓ Selesai'} : (telat ? {c:'#FEE2E2',t:'#B91C1C',l:'⚠ Terlambat'} : {c:'#FEF3C7',t:'#92400E',l:'Belum'});
-    return `<div class="item" style="cursor:pointer" onclick="openTugas(${t.id})">
-      <div class="row" style="justify-content:space-between">
-        <div>${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b></div>
-        <span class="badge" style="background:${badge.c};color:${badge.t}">${badge.l}</span></div>
-      <div class="small">${fdate(t.task_date)} · ${esc(t.task_text)}</div>
-      ${t.ticket_id?'<div class="small muted">🔧 Follow-up tiket Kerusakan #'+t.ticket_id+'</div>':''}</div>`;
-  }).join('') : '<p class="muted">Belum ada tugas.</p>';
+  // Urutan: (1) hari ini + terlambat, belum selesai -- paling atas & paling
+  // mendesak duluan; (2) belum jatuh tempo (tanggal akan datang), belum
+  // selesai; (3) sudah selesai, paling bawah.
+  const notDone = list.filter(t=>t.status!=='selesai');
+  const todayOrLate = notDone.filter(t=>t.task_date<=t0).sort((a,b)=>a.task_date.localeCompare(b.task_date));
+  const future = notDone.filter(t=>t.task_date>t0).sort((a,b)=>a.task_date.localeCompare(b.task_date));
+  const done = list.filter(t=>t.status==='selesai').sort((a,b)=>b.task_date.localeCompare(a.task_date));
+  const ordered = [...todayOrLate, ...future, ...done];
+  $('tugasList').innerHTML = ordered.length ? ordered.map(taskRow).join('') : '<p class="muted">Belum ada tugas.</p>';
 }
 async function newTugasModal(){
   const staffList = isMgr()
@@ -13035,7 +13085,7 @@ async function openTugas(id){
   const telat = t.status==='belum' && t.task_date < t0;
   let h = `<div class="mhead"><h3>Tugas</h3><button onclick="closeModal()">✕</button></div>
     <p class="small">${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b><br>
-    <b>Tanggal:</b> ${fdate(t.task_date)}<br><b>Pekerjaan:</b> ${esc(t.task_text)}</p>
+    <b>Tanggal:</b> ${fdate(t.task_date)}<br><b>Pekerjaan:</b> ${esc(t.task_text)}${assignerLabel(t.created_by)?'<br><b>Dari:</b> '+esc(assignerLabel(t.created_by)):''}</p>
     ${t.ticket_id?`<p class="small muted">🔧 Otomatis dari tiket Kerusakan #${t.ticket_id}</p>`:''}
     ${t.procurement_request_id?`<button class="btn btn-ghost btn-sm" onclick="closeModal();openPengadaan(${t.procurement_request_id})">📦 Lihat Detail Permintaan Barang #${t.procurement_request_id}</button>`:''}
     <p><span class="badge" style="background:${t.status==='selesai'?'#DCFCE7':(telat?'#FEE2E2':'#FEF3C7')};color:${t.status==='selesai'?'#166534':(telat?'#B91C1C':'#92400E')}">${t.status==='selesai'?'✓ Selesai':(telat?'⚠ Terlambat':'Belum')}</span></p>`;
@@ -13045,7 +13095,15 @@ async function openTugas(id){
     h += `<label>Keterangan Penyelesaian</label><textarea id="tgNote" rows="2"></textarea>
       <button class="btn btn-teal btn-sm" style="margin-top:10px" onclick="finishTugas(${t.id})">✓ Tandai Selesai</button>`;
   }
+  if(me.role==='owner'){
+    h += `<button class="btn btn-ghost btn-sm" style="margin-top:12px;color:var(--red)" onclick="deleteTugas(${t.id})">Hapus Tugas Ini</button>`;
+  }
   openModal(h);
+}
+async function deleteTugas(id){
+  if(!confirm('Yakin hapus tugas ini? Tidak bisa dibatalkan.')) return;
+  await q(db.from('task_items').delete().eq('id',id).select());
+  closeModal(); toast('Tugas dihapus'); if(page==='tugas') loadTugas(); if(page==='dashboard') renderDashboard();
 }
 async function finishTugas(id){
   const note = $('tgNote').value.trim();
@@ -13446,25 +13504,32 @@ async function delCk(id){
 
 /* ================= KATALOG BARANG UMUM (Accounting/Manager/Owner) ================= */
 async function renderKatalog(){
-  $('main').innerHTML = `<h2>Katalog Barang Umum</h2>
-    <p class="small muted" style="margin-bottom:10px">Daftar nama barang yang bisa dipilih departemen saat mengajukan permintaan pengadaan kategori "Umum".</p>
+  $('main').innerHTML = `<h2>Katalog Barang</h2>
+    <p class="small muted" style="margin-bottom:10px">Barang <b>Umum</b> bisa diminta operasional langsung ke Accounting tanpa otorisasi Manager. Barang <b>Khusus</b> (walau ada di katalog) tetap wajib otorisasi Manager dulu, sama seperti Barang Baru.</p>
     <div class="card"><div id="catList"></div>
-    <div class="row" style="margin-top:12px"><input id="catNew" placeholder="nama barang baru..." style="flex:1">
-    <button class="btn btn-teal" onclick="addCatalog()">Tambah</button></div></div>`;
+    <div class="row" style="margin-top:12px">
+      <input id="catNew" placeholder="nama barang baru..." style="flex:1">
+      <select id="catTier"><option value="umum">Umum</option><option value="khusus">Khusus</option></select>
+      <button class="btn btn-teal" onclick="addCatalog()">Tambah</button></div></div>`;
   loadCatalog();
 }
 async function loadCatalog(){
   const items = await q(db.from('item_catalog').select('*').eq('active',true).order('item_name'));
   $('catList').innerHTML = items.length ? items.map(i=>
     `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
-      <span>${esc(i.item_name)}</span>
-      <button class="btn-sm btn-ghost" onclick="delCatalog(${i.id})">Hapus</button></div>`).join('')
+      <span>${esc(i.item_name)} <span class="badge" style="background:${i.tier==='khusus'?'#FEE2E2':'#DCFCE7'};color:${i.tier==='khusus'?'#B91C1C':'#166534'}">${i.tier==='khusus'?'Khusus':'Umum'}</span></span>
+      <div class="row">
+        <button class="btn-sm btn-ghost" onclick="toggleCatalogTier(${i.id},'${i.tier==='khusus'?'umum':'khusus'}')">Jadikan ${i.tier==='khusus'?'Umum':'Khusus'}</button>
+        <button class="btn-sm btn-ghost" onclick="delCatalog(${i.id})">Hapus</button></div></div>`).join('')
     : '<p class="muted small">Belum ada barang di katalog.</p>';
 }
 async function addCatalog(){
   const t=$('catNew').value.trim(); if(!t)return;
-  await q(db.from('item_catalog').insert({item_name:t, created_by:me.id}).select());
+  await q(db.from('item_catalog').insert({item_name:t, tier:$('catTier').value, created_by:me.id}).select());
   $('catNew').value=''; loadCatalog();
+}
+async function toggleCatalogTier(id, newTier){
+  await q(db.from('item_catalog').update({tier:newTier}).eq('id',id)); loadCatalog();
 }
 async function delCatalog(id){
   await q(db.from('item_catalog').update({active:false}).eq('id',id)); loadCatalog();
