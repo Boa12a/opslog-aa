@@ -10142,6 +10142,11 @@ label{display:block;font-size:12px;font-weight:700;color:var(--muted);margin:10p
 .toggle .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
 .toggle input:checked + .slider{background:var(--teal)}
 .toggle input:checked + .slider:before{transform:translateX(20px)}
+/* Label checkbox biasa (bukan field-label seperti "Nama"/"Tanggal") --
+   reset total dari gaya label global (kapital/kecil/abu-abu) supaya
+   teksnya kebaca normal. */
+.checkline{display:flex;align-items:center;gap:7px;text-transform:none;font-size:14px;font-weight:600;color:var(--ink);margin:10px 0;letter-spacing:normal}
+.checkline input[type="checkbox"]{width:18px;height:18px;flex-shrink:0}
 h2{font-size:18px;font-weight:800;margin-bottom:10px}
 h3{font-size:15px;font-weight:700;margin-bottom:8px}
 .hidden{display:none!important}
@@ -10229,18 +10234,6 @@ table.calGrid td.calCell{border:1px solid var(--line);padding:3px 2px;text-align
 table.calGrid .calDate{font-size:10px;color:var(--muted);margin-bottom:2px}
 table.calGrid .calBadge{font-size:12px;font-weight:800;border-radius:5px;padding:3px 0}
 table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700;text-align:center;border-radius:5px}
-@media(max-width:640px){
-  /* Kalender jadi 1 kartu per hari ditumpuk ke bawah -- bukan tabel 7 kolom
-     sempit yang susah disentuh di HP. */
-  table.calGrid, table.calGrid tr{display:block;width:100%}
-  table.calGrid tr:first-child{display:none} /* baris header Sen-Sel-...-Min disembunyikan, nama hari sudah ada di tiap sel */
-  table.calGrid td.calEmpty{display:none}
-  table.calGrid td.calCell{display:flex;align-items:center;justify-content:space-between;gap:10px;
-    border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:6px;text-align:left}
-  table.calGrid .calDate{font-size:13px;font-weight:700;margin-bottom:0;color:var(--ink);flex-shrink:0}
-  table.calGrid .calSelect{width:auto;min-width:130px;font-size:13px;padding:7px 8px}
-  table.calGrid .calBadge{width:80px;flex-shrink:0;padding:6px 0}
-}
 /* Di layar kecil, tabel berubah jadi kartu bertumpuk agar tidak ada scroll kiri-kanan */
 @media(max-width:640px){
   table.respTable, table.respTable tbody, table.respTable tr, table.respTable td{display:block;width:100%}
@@ -11043,7 +11036,7 @@ async function loadJadwalGrid(){
           const noSpecificShift = entry && !entry.is_off && !entry.shift_id;
           const bg = !entry ? '#fff' : (isOffNow ? '#F3F4F6' : '#DCFCE7');
           const fg = !entry ? '#374151' : (isOffNow ? '#6B7280' : '#166534');
-          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${HARI[dowIdx]}, ${d}</div>
+          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${d}</div>
             <select class="calSelect" style="background:${bg};color:${fg}" onchange="setScheduleCell(${s.id},'${p.id}','${dateStr}',this.value,this)">
               ${cellLocked?'':`<option value="off" ${isOffNow?'selected':''}>L</option>`}
               <option value="kerja" ${(!entry || noSpecificShift)?'selected':''}>${shifts.length?'Kerja (belum pilih shift)':'K'}</option>
@@ -11052,7 +11045,7 @@ async function loadJadwalGrid(){
         } else {
           const isOff = entry && entry.is_off;
           const label = !entry ? '-' : (isOff ? 'L' : (entry.shift_id ? (shifts.find(sh=>sh.id===entry.shift_id)?.shift_name||'?') : 'K'));
-          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${HARI[dowIdx]}, ${d}</div>
+          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${d}</div>
             <div class="calBadge" style="background:${isOff?'#F3F4F6':'#DCFCE7'};color:${isOff?'#6B7280':'#166534'}">${esc(label)}</div></td>`;
         }
       });
@@ -12438,20 +12431,20 @@ function pqRenderItems(){
   const catalog = window._catalog || [];
   $('pqItemsBox').innerHTML = pqDraft.length ? pqDraft.map((it,idx)=>`
     <div class="pq-row card" style="padding:10px;margin-bottom:8px">
-      <div class="row">
-        ${it.category==='umum'
-          ? `<select class="pq-name" style="flex:2">
-              <option value="">— pilih barang —</option>
-              ${catalog.map(c=>`<option value="${esc(c.item_name)}" ${it.item_name===c.item_name?'selected':''}>${esc(c.item_name)}${c.tier==='khusus'?' (Khusus — perlu otorisasi Manager)':''}</option>`).join('')}
-              <option value="__CUSTOM__" ${it.item_name==='__CUSTOM__'?'selected':''}>+ Barang lain (belum ada di katalog)</option>
-            </select>`
-          : `<input class="pq-name" placeholder="nama barang baru" value="${esc(it.item_name)}" style="flex:2">`}
+      ${it.category==='umum'
+        ? `<select class="pq-name" style="width:100%">
+            <option value="">— pilih barang —</option>
+            ${catalog.map(c=>`<option value="${esc(c.item_name)}" ${it.item_name===c.item_name?'selected':''}>${esc(c.item_name)}${c.tier==='khusus'?' (Khusus — perlu otorisasi Manager)':''}</option>`).join('')}
+            <option value="__CUSTOM__" ${it.item_name==='__CUSTOM__'?'selected':''}>+ Barang lain (belum ada di katalog)</option>
+          </select>`
+        : `<input class="pq-name" placeholder="nama barang baru" value="${esc(it.item_name)}" style="width:100%">`}
+      <div class="row" style="margin-top:8px">
         <select class="pq-cat" onchange="pqCatChange(${idx})" style="flex:1">
           <option value="umum" ${it.category==='umum'?'selected':''}>Umum</option>
           <option value="baru" ${it.category==='baru'?'selected':''}>Baru</option>
         </select>
-        <input class="pq-qty" type="number" value="${it.qty}" placeholder="qty" style="width:70px">
-        <button class="btn btn-ghost btn-sm" onclick="pqRemoveRow(${idx})">✕</button>
+        <input class="pq-qty" type="number" value="${it.qty}" placeholder="qty" style="width:70px;flex-shrink:0">
+        <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="pqRemoveRow(${idx})">✕</button>
       </div>
       ${it.category==='umum' && it.item_name==='__CUSTOM__'
         ? `<div class="row" style="margin-top:6px"><input class="pq-name-custom" placeholder="tulis nama barang" value="${esc(it.item_name_custom)}"></div>`:''}
@@ -13135,11 +13128,11 @@ async function newTugasModal(){
   openModal(`<div class="mhead"><h3>Buat Tugas</h3><button onclick="closeModal()">✕</button></div>
     <label>Untuk</label><select id="tgStaff">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)}${p.role==='manager'?' (Manager)':''}</option>`).join('')}</select>
     <label>Jenis Pekerjaan</label><textarea id="tgText" rows="2" placeholder="mis. Cek tekanan filter kolam VIP"></textarea>
-    <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="tgUrgent"> 🔴 Tandai Urgent (tampil paling atas di Dashboard)</label>
-    <label><input type="checkbox" id="tgRecur" onchange="toggleTugasRecur()"> Berulang mingguan</label>
+    <label class="checkline"><input type="checkbox" id="tgUrgent"> 🔴 Tandai Urgent (tampil paling atas di Dashboard)</label>
+    <label class="checkline"><input type="checkbox" id="tgRecur" onchange="toggleTugasRecur()"> Berulang mingguan</label>
     <div id="tgDateWrap"><label>Tanggal</label><input type="date" id="tgDate" value="${today()}"></div>
     <div id="tgDaysWrap" class="hidden"><label>Hari (bisa pilih lebih dari 1)</label>
-      <div class="row" style="flex-wrap:wrap;gap:6px">${DOW_LABEL.map((l,i)=>`<label class="small" style="display:flex;align-items:center;gap:4px"><input type="checkbox" class="tgDow" value="${i}">${l}</label>`).join('')}</div></div>
+      <div class="row" style="flex-wrap:wrap;gap:10px">${DOW_LABEL.map((l,i)=>`<label class="checkline" style="margin:0;gap:4px"><input type="checkbox" class="tgDow" value="${i}">${l}</label>`).join('')}</div></div>
     <button class="btn btn-teal" id="btnSubmitTugas" style="margin-top:14px;width:100%" onclick="submitTugas()">Simpan</button>`);
 }
 function toggleTugasRecur(){
