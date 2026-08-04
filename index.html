@@ -10356,6 +10356,38 @@ const today = () => new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD lokal
 // bisa salah dianggap "hari kemarin" (karena UTC-nya memang masih tanggal
 // sebelumnya), padahal secara lokal sudah masuk hari baru.
 function localDateOf(iso){ return new Date(iso).toLocaleDateString('sv-SE'); }
+// Jarak antara 2 koordinat GPS (meter), rumus Haversine.
+function distanceMeters(lat1,lng1,lat2,lng2){
+  const R = 6371000;
+  const toRad = d => d*Math.PI/180;
+  const dLat = toRad(lat2-lat1), dLng = toRad(lng2-lng1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLng/2)**2;
+  return R * 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+let _geofenceCache = null;
+async function getGeofenceConfig(){
+  if(_geofenceCache) return _geofenceCache;
+  const rows = await q(db.from('app_settings').select('*').eq('key','geofence_center'));
+  _geofenceCache = rows[0] ? JSON.parse(rows[0].value) : null;
+  return _geofenceCache;
+}
+// Ambil posisi GPS staff saat ini & bandingkan dengan titik pusat geofence.
+// TIDAK PERNAH memblokir absen -- kalau GPS gagal/ditolak/di luar radius,
+// tetap tercatat, cuma ditandai out_of_radius=true untuk ditinjau HRD.
+function getGeoTag(){
+  return new Promise(resolve=>{
+    if(!navigator.geolocation){ resolve({geo_lat:null, geo_lng:null, out_of_radius:true}); return; }
+    const timer = setTimeout(()=>resolve({geo_lat:null, geo_lng:null, out_of_radius:true}), 8000);
+    navigator.geolocation.getCurrentPosition(async pos=>{
+      clearTimeout(timer);
+      const {latitude:lat, longitude:lng} = pos.coords;
+      const cfg = await getGeofenceConfig();
+      const outOfRadius = cfg ? distanceMeters(lat,lng,cfg.lat,cfg.lng) > cfg.radius_m : true;
+      resolve({geo_lat:lat, geo_lng:lng, out_of_radius:outOfRadius});
+    }, ()=>{ clearTimeout(timer); resolve({geo_lat:null, geo_lng:null, out_of_radius:true}); },
+    {enableHighAccuracy:true, timeout:7000, maximumAge:30000});
+  });
+}
 const fdate = d => d ? new Date(d+'T00:00:00').toLocaleDateString('id-ID',{day:'numeric',month:'short',year:'numeric'}) : '-';
 const fdt = d => d ? new Date(d).toLocaleString('id-ID',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '-';
 const ageDays = d => Math.floor((Date.now() - new Date(d).getTime())/86400000);
@@ -10609,13 +10641,17 @@ async function absenGateState(){
   // Kehadiran: cuma dikunci ke "Absen Pulang saja" kalau sesi Absen Datang
   // yang belum ditutup itu terjadi HARI INI (sesuai kata-katamu "di hari yang sama").
   const openKehadiranToday = !!(lastK.length && lastK[0].fase==='mulai' && localDateOf(lastK[0].scanned_at)===t0);
+  // Shift yang tercatat saat Absen Datang -- dipakai lagi otomatis saat Absen
+  // Pulang (mis. untuk cek checklist per-shift), TANPA perlu tanya ulang ke user.
+  const openKehadiranShiftId = openKehadiranToday ? (lastK[0].shift_id || null) : null;
   // Treatment: TIDAK dibatasi hari (bisa ganti hari) -- selama belum ada
   // Selesai Treatment yang menutup sesi mulai terakhir, tetap terbuka.
   const openTreatment = !!(lastT.length && lastT[0].fase==='mulai');
-  return {openKehadiranToday, openTreatment};
+  return {openKehadiranToday, openKehadiranShiftId, openTreatment};
 }
 function absenTypeOptions(gate){
   return Object.entries(ABSEN_TYPES).filter(([k,v])=>{
+    if(v.kategori==='treatment' && me.department==='security') return false; // Security tidak menjalankan Treatment
     if(v.kategori==='kehadiran'){
       // Treatment masih terbuka -> Absen Datang terkunci total sampai Selesai Treatment dulu.
       if(gate.openTreatment && v.fase==='mulai') return false;
@@ -10650,7 +10686,9 @@ async function renderAbsen(){
 async function loadAbsenExtra(){
   const type = ABSEN_TYPES[$('abType').value];
   let h = '';
-  if(type.kategori==='kehadiran' && me.department){
+  // Shift cuma perlu dipilih SEKALI, saat Absen Datang -- bukan lagi saat
+  // Absen Pulang (shift-nya sudah melekat di sesi yang sedang dibuka).
+  if(type.kategori==='kehadiran' && type.fase==='mulai' && me.department){
     const shifts = await q(db.from('shifts').select('*').eq('department',me.department).eq('active',true).order('sort_order'));
     if(shifts.length){
       h += `<label>Shift</label><select id="abShift">${shifts.map(s=>`<option value="${s.id}">${esc(s.shift_name)}</option>`).join('')}</select>`;
@@ -10671,6 +10709,7 @@ async function loadAbsenHist(){
     let ket = a.input_method==='manual' ? 'Input manual' : '';
     if(a.kategori==='lembur' && !a.overtime_request_id) ket = (ket?ket+' · ':'')+'Tanpa Izin';
     if(a.checklist_complete_snapshot===false) ket = (ket?ket+' · ':'')+'⚠ Checklist belum lengkap';
+    if(a.out_of_radius) ket = (ket?ket+' · ':'')+'📍 Di luar radius lokasi';
     h += `<tr><td data-label="Waktu">${fdt(a.scanned_at)}</td><td data-label="Jenis">${label}</td><td data-label="Ket." class="small muted">${ket||'-'}</td></tr>`;
   });
   if(list.length) h += '</table>';
@@ -10735,7 +10774,7 @@ async function handleScannedToken(token){
 async function submitAttendance(tokenId){
   const type = ABSEN_TYPES[$('abType')?.value || 'kehadiran_mulai'];
   const shiftEl = $('abShift'), poolEl = $('abPool');
-  const shiftId = shiftEl ? Number(shiftEl.value) : null;
+  let shiftId = shiftEl ? Number(shiftEl.value) : null;
   const poolId = poolEl ? Number(poolEl.value) : null;
 
   // Validasi ulang gate (Absen Datang terkunci kalau treatment masih terbuka /
@@ -10745,6 +10784,14 @@ async function submitAttendance(tokenId){
   if(type.kategori==='kehadiran' && type.fase==='mulai'){
     if(gate.openTreatment){ toast('Treatment masih berjalan — selesaikan Treatment dulu sebelum Absen Datang'); closeModal(); return; }
     if(gate.openKehadiranToday){ toast('Sudah Absen Datang hari ini — cuma bisa Absen Pulang'); closeModal(); return; }
+  }
+  // Absen Pulang: dropdown Shift sudah tidak ditampilkan lagi (tidak perlu
+  // isi ulang) -- ambil shift_id dari sesi Absen Datang yang sedang dibuka.
+  if(type.kategori==='kehadiran' && type.fase==='selesai'){
+    shiftId = gate.openKehadiranShiftId;
+  }
+  if(type.kategori==='treatment' && me.department==='security'){
+    toast('Departemen Security tidak menjalankan Treatment'); closeModal(); return;
   }
   if(type.kategori==='treatment' && type.fase==='mulai' && gate.openTreatment){
     toast('Masih ada sesi Treatment yang belum Selesai'); closeModal(); return;
@@ -10766,10 +10813,12 @@ async function submitAttendance(tokenId){
     }
   }
 
+  const geo = await getGeoTag();
   const payload = {
     staff_id: me.id, department: me.department, shift_id: shiftId||null,
     kategori: type.kategori, fase: type.fase, pool_type_id: poolId||null,
-    token_id: tokenId, input_method:'qr', input_by: me.id
+    token_id: tokenId, input_method:'qr', input_by: me.id,
+    geo_lat: geo.geo_lat, geo_lng: geo.geo_lng, out_of_radius: geo.out_of_radius
   };
 
   // (Lembur tidak lagi discan terpisah — dihapus dari sini. Perhitungan jam
@@ -12849,18 +12898,19 @@ function pairSessions(logs, matchKey){
         // sesi kehadiran dalam 1 hari yang sama.
         if(openByKey[key]){
           const prev = openByKey[key];
-          sessions.push({staff_id:prev.staff_id, department:prev.department, pool_type_id:prev.pool_type_id, start:prev.scanned_at, end:null});
+          sessions.push({staff_id:prev.staff_id, department:prev.department, pool_type_id:prev.pool_type_id, start:prev.scanned_at, end:null, out_of_radius: !!prev.out_of_radius});
         }
         openByKey[key]=l;
       } else if(l.fase==='selesai'){
         const start = openByKey[key];
         sessions.push({staff_id:l.staff_id, department:l.department, pool_type_id:l.pool_type_id,
-          start: start?start.scanned_at:null, end:l.scanned_at});
+          start: start?start.scanned_at:null, end:l.scanned_at,
+          out_of_radius: !!(l.out_of_radius || (start && start.out_of_radius))});
         delete openByKey[key];
       }
     });
     Object.values(openByKey).forEach(l=>{
-      sessions.push({staff_id:l.staff_id, department:l.department, pool_type_id:l.pool_type_id, start:l.scanned_at, end:null});
+      sessions.push({staff_id:l.staff_id, department:l.department, pool_type_id:l.pool_type_id, start:l.scanned_at, end:null, out_of_radius: !!l.out_of_radius});
     });
   });
   return sessions.sort((a,b)=> new Date(b.start||b.end) - new Date(a.start||a.end));
@@ -12879,7 +12929,7 @@ async function loadHrdAttendance(){
       h += `<tr><td data-label="Tanggal">${fdate(localDateOf(s.start||s.end))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
         <td data-label="Dept">${s.department?divTag(s.department):'-'}</td>
         <td data-label="Datang">${s.start?fdt(s.start):'-'}</td><td data-label="Pulang">${s.end?fdt(s.end):'-'}</td>
-        <td data-label="Status">${incomplete?'<span class="age-red">⚠ Belum Pulang</span>':'Lengkap'}</td></tr>`;
+        <td data-label="Status">${incomplete?'<span class="age-red">⚠ Belum Pulang</span>':'Lengkap'}${s.out_of_radius?' · <span class="age-red">📍 Luar Radius</span>':''}</td></tr>`;
     });
     h += `</table>`;
     if(sessions.length>50) h += `<p class="small muted">Menampilkan 50 dari ${sessions.length} — export Excel untuk semua.</p>`;
@@ -12903,7 +12953,7 @@ async function loadHrdTreatment(){
       const durasi = (s.start && s.end) ? (((new Date(s.end)-new Date(s.start))/3600000).toFixed(1)+' jam') : '-';
       h += `<tr><td data-label="Tanggal">${fdate(localDateOf(s.start||s.end))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
         <td data-label="Kolam">${esc(poolName)}</td><td data-label="Mulai">${s.start?fdt(s.start):'-'}</td>
-        <td data-label="Selesai">${s.end?fdt(s.end):'<span class="age-red">⚠ Belum Selesai</span>'}</td>
+        <td data-label="Selesai">${s.end?fdt(s.end):'<span class="age-red">⚠ Belum Selesai</span>'}${s.out_of_radius?' <span class="age-red">📍</span>':''}</td>
         <td data-label="Durasi">${durasi}</td></tr>`;
     });
     h += `</table>`;
@@ -12920,7 +12970,7 @@ async function exportKehadiranExcel(){
     Tanggal: localDateOf(s.start||s.end), Nama: uname(s.staff_id),
     Departemen: s.department?(DIVS[s.department]?.label||s.department):'-',
     Datang: s.start?fdt(s.start):'', Pulang: s.end?fdt(s.end):'',
-    Status: s.end?'Lengkap':'Belum Pulang'
+    Status: s.end?'Lengkap':'Belum Pulang', Lokasi: s.out_of_radius?'Di luar radius':'Sesuai'
   }));
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
@@ -12939,7 +12989,8 @@ async function exportTreatmentExcel(){
     Tanggal: localDateOf(s.start||s.end), Nama: uname(s.staff_id),
     Kolam: pools.find(p=>p.id===s.pool_type_id)?.name || '-',
     Mulai: s.start?fdt(s.start):'', Selesai: s.end?fdt(s.end):'',
-    'Durasi (jam)': (s.start&&s.end)?((new Date(s.end)-new Date(s.start))/3600000).toFixed(1):''
+    'Durasi (jam)': (s.start&&s.end)?((new Date(s.end)-new Date(s.start))/3600000).toFixed(1):'',
+    Lokasi: s.out_of_radius?'Di luar radius':'Sesuai'
   }));
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
