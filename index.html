@@ -10136,6 +10136,12 @@ button{font-family:inherit;cursor:pointer;border:none;border-radius:9px;font-wei
 input,select,textarea{font-family:inherit;font-size:14px;border:1px solid var(--line);border-radius:9px;padding:9px 11px;width:100%;background:#fff;color:var(--ink)}
 input:focus,select:focus,textarea:focus{outline:2px solid var(--teal);outline-offset:0;border-color:var(--teal)}
 label{display:block;font-size:12px;font-weight:700;color:var(--muted);margin:10px 0 4px;text-transform:uppercase;letter-spacing:.04em}
+.toggle{position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0;margin:0}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#CBD5C9;border-radius:24px;transition:.2s}
+.toggle .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.toggle input:checked + .slider{background:var(--teal)}
+.toggle input:checked + .slider:before{transform:translateX(20px)}
 h2{font-size:18px;font-weight:800;margin-bottom:10px}
 h3{font-size:15px;font-weight:700;margin-bottom:8px}
 .hidden{display:none!important}
@@ -10155,8 +10161,7 @@ h3{font-size:15px;font-weight:700;margin-bottom:8px}
 #topbar{background:var(--navy);color:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:40}
 #topbar .brand{font-weight:800;font-size:16px}
 #topbar .brand span{color:var(--gold)}
-#topbar .who{font-size:12px;opacity:.85;text-align:right}
-#topbar .who b{display:block;font-size:13px;opacity:1}
+#topbarAvatar{width:38px;height:38px;border-radius:50%;background:var(--teal);color:#fff;font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:none}
 #hamburgerBtn{background:rgba(255,255,255,.15);color:#fff;width:38px;height:38px;border-radius:9px;font-size:18px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 #drawerOverlay{position:fixed;inset:0;background:rgba(15,25,35,.5);z-index:48;opacity:0;pointer-events:none;transition:opacity .2s}
 #drawerOverlay.open{opacity:1;pointer-events:auto}
@@ -10166,6 +10171,10 @@ h3{font-size:15px;font-weight:700;margin-bottom:8px}
 #drawer .dHead{background:var(--navy);color:#fff;padding:18px 16px;font-weight:800;font-size:16px;flex-shrink:0}
 #drawer .dHead span{color:var(--gold)}
 #drawer .dBody{overflow-y:auto;padding:8px 0;flex:1}
+#drawer .dProfile{display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--line);margin-bottom:6px}
+#drawer .dProfileAvatar{width:44px;height:44px;border-radius:50%;background:var(--teal);color:#fff;font-weight:800;font-size:17px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+#drawer .dProfile b{display:block;font-size:14px;color:var(--ink)}
+#drawer .dProfile span{font-size:12px;color:var(--muted)}
 #drawer .dTop button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;padding:13px 18px;font-size:14px;font-weight:700;color:var(--ink);border-radius:0}
 #drawer .dTop button.on{background:#EDF6F5;color:var(--teal-d)}
 #drawer .dGroupLabel{padding:14px 18px 6px;font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -10220,6 +10229,18 @@ table.calGrid td.calCell{border:1px solid var(--line);padding:3px 2px;text-align
 table.calGrid .calDate{font-size:10px;color:var(--muted);margin-bottom:2px}
 table.calGrid .calBadge{font-size:12px;font-weight:800;border-radius:5px;padding:3px 0}
 table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700;text-align:center;border-radius:5px}
+@media(max-width:640px){
+  /* Kalender jadi 1 kartu per hari ditumpuk ke bawah -- bukan tabel 7 kolom
+     sempit yang susah disentuh di HP. */
+  table.calGrid, table.calGrid tr{display:block;width:100%}
+  table.calGrid tr:first-child{display:none} /* baris header Sen-Sel-...-Min disembunyikan, nama hari sudah ada di tiap sel */
+  table.calGrid td.calEmpty{display:none}
+  table.calGrid td.calCell{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:6px;text-align:left}
+  table.calGrid .calDate{font-size:13px;font-weight:700;margin-bottom:0;color:var(--ink);flex-shrink:0}
+  table.calGrid .calSelect{width:auto;min-width:130px;font-size:13px;padding:7px 8px}
+  table.calGrid .calBadge{width:80px;flex-shrink:0;padding:6px 0}
+}
 /* Di layar kecil, tabel berubah jadi kartu bertumpuk agar tidak ada scroll kiri-kanan */
 @media(max-width:640px){
   table.respTable, table.respTable tbody, table.respTable tr, table.respTable td{display:block;width:100%}
@@ -10265,20 +10286,22 @@ table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700
       <button id="hamburgerBtn" onclick="openDrawer()">☰</button>
       <div class="brand">OpsLog <span>Arcelio</span></div>
     </div>
-    <div class="row" style="gap:12px">
-      <div class="who"><b id="whoName"></b><span id="whoRole"></span></div>
-      <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="refreshCurrentPage()" title="Muat ulang data halaman ini">🔄</button>
-      <button class="btn btn-sm" style="background:rgba(255,255,255,.15);color:#fff" onclick="doLogout()">Keluar</button>
-    </div>
+    <button id="topbarAvatar" class="row" style="gap:0;background:none" onclick="openDrawer()" title="Buka menu"></button>
   </div>
   <div id="drawerOverlay" onclick="closeDrawer()"></div>
   <div id="drawer">
     <div class="dHead">OpsLog <span>Arcelio</span></div>
     <div class="dBody">
+      <div class="dProfile">
+        <div class="dProfileAvatar" id="drawerAvatar"></div>
+        <div><b id="whoName"></b><span id="whoRole"></span></div>
+      </div>
       <div class="dTop" id="drawerTop"></div>
       <div id="drawerGroups"></div>
       <div class="dGroupLabel">Akun</div>
       <button class="dItem" onclick="closeDrawer();changePasswordModal()">Ganti Password</button>
+      <button class="dItem" onclick="refreshCurrentPage()">🔄 Refresh Halaman Ini</button>
+      <button class="dItem" style="color:var(--red)" onclick="doLogout()">Keluar</button>
     </div>
   </div>
   <main id="main"></main>
@@ -10492,6 +10515,9 @@ async function init(){
 
   $('whoName').textContent = me.name;
   $('whoRole').textContent = ROLES[me.role] + (me.department?' · '+(ALL_STAFF_DEPTS[me.department]?.label||me.department):'');
+  const initial = (me.name||'?').trim().charAt(0).toUpperCase();
+  $('topbarAvatar').textContent = initial;
+  $('drawerAvatar').textContent = initial;
   buildNav();
   let lastPage = 'dashboard';
   try{ lastPage = localStorage.getItem('lastPage') || 'dashboard'; }catch(e){}
@@ -11017,7 +11043,7 @@ async function loadJadwalGrid(){
           const noSpecificShift = entry && !entry.is_off && !entry.shift_id;
           const bg = !entry ? '#fff' : (isOffNow ? '#F3F4F6' : '#DCFCE7');
           const fg = !entry ? '#374151' : (isOffNow ? '#6B7280' : '#166534');
-          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${d}</div>
+          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${HARI[dowIdx]}, ${d}</div>
             <select class="calSelect" style="background:${bg};color:${fg}" onchange="setScheduleCell(${s.id},'${p.id}','${dateStr}',this.value,this)">
               ${cellLocked?'':`<option value="off" ${isOffNow?'selected':''}>L</option>`}
               <option value="kerja" ${(!entry || noSpecificShift)?'selected':''}>${shifts.length?'Kerja (belum pilih shift)':'K'}</option>
@@ -11026,7 +11052,7 @@ async function loadJadwalGrid(){
         } else {
           const isOff = entry && entry.is_off;
           const label = !entry ? '-' : (isOff ? 'L' : (entry.shift_id ? (shifts.find(sh=>sh.id===entry.shift_id)?.shift_name||'?') : 'K'));
-          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${d}</div>
+          h += `<td class="calCell"><div class="calDate" style="${dateStyle}">${HARI[dowIdx]}, ${d}</div>
             <div class="calBadge" style="background:${isOff?'#F3F4F6':'#DCFCE7'};color:${isOff?'#6B7280':'#166534'}">${esc(label)}</div></td>`;
         }
       });
@@ -13756,10 +13782,10 @@ async function renderUsers(){
       <td data-label="Role"><select id="ur-${p.id}" style="padding:5px 8px">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${p.role===k?'selected':''}>${v}</option>`).join('')}</select></td>
       <td data-label="Dept"><select id="ud-${p.id}" style="padding:5px 8px"><option value="">-</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}" ${p.department===k?'selected':''}>${v.label}</option>`).join('')}</select></td>
       <td data-label="Tgl Lahir"><input type="date" id="ub-${p.id}" value="${p.birth_date||''}" style="padding:5px 8px"></td>
-      ${isMgr()?`<td data-label="Boleh Setujui Lembur">${p.role==='spv'?`<input type="checkbox" id="uc-${p.id}" ${p.can_approve_lembur?'checked':''} style="width:18px;height:18px">`:'<span class="small muted">-</span>'}</td>`:''}
+      ${isMgr()?`<td data-label="Boleh Setujui Lembur">${p.role==='spv'?`<label class="toggle"><input type="checkbox" id="uc-${p.id}" ${p.can_approve_lembur?'checked':''}><span class="slider"></span></label>`:'<span class="small muted">-</span>'}</td>`:''}
       ${isHrdOrMgr()?`<td data-label="Shift Tetap (Accounting)">${p.department==='accounting'?`<select id="uss-${p.id}" style="padding:5px 8px"><option value="">- belum diatur -</option>${acctShifts.map(s=>`<option value="${s.id}" ${p.default_shift_id===s.id?'selected':''}>${esc(s.shift_name)}</option>`).join('')}</select>`:'<span class="small muted">-</span>'}</td>
-      <td data-label="Cuti Aktif"><input type="checkbox" id="uce-${p.id}" ${p.cuti_enabled?'checked':''} style="width:18px;height:18px"></td>`:''}
-      <td data-label="Aktif"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''} style="width:18px;height:18px"></td>
+      <td data-label="Cuti Aktif"><label class="toggle"><input type="checkbox" id="uce-${p.id}" ${p.cuti_enabled?'checked':''}><span class="slider"></span></label></td>`:''}
+      <td data-label="Aktif"><label class="toggle"><input type="checkbox" id="ua-${p.id}" ${p.active?'checked':''}><span class="slider"></span></label></td>
       <td><button class="btn-sm btn-teal" style="width:100%" onclick="saveUser('${p.id}')">Simpan</button></td></tr>`;
   });
   h += `</table></div>`;
