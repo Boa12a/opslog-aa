@@ -10527,6 +10527,7 @@ function buildNav(){
   if(isMgr() || isFieldWorker()) grupSdm.push(['tugas','Tugas']);
   if(isMgr() || isFieldWorker()) grupSdm.push(['lembur','Lembur']);
   if(isMgr() || inOpsDept || isHrSpv()) grupSdm.push(['cuti','Cuti & Sakit']);
+  if(isMgr()) grupSdm.push(['quiz','Kuis']);
   if(isHrdOrMgr()) grupSdm.push(['pengumuman','Pengumuman'],['hrd','HRD'],['users','Pengguna']);
 
   window._navGroups = {Operasional:grupOperasional, Pengadaan:grupPengadaan, SDM:grupSdm};
@@ -10544,7 +10545,7 @@ function buildNav(){
 function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
 function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
-  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman};
+  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz};
   if(!routes[p]) p='dashboard'; // jaga-jaga: halaman tersimpan sudah tidak ada/tidak valid lagi
   page=p;
   try{ localStorage.setItem('lastPage', p); }catch(e){} // aman kalau localStorage diblokir browser
@@ -11424,6 +11425,36 @@ async function renderDashboard(){
         <div class="small muted">${esc(assignerLabel(a.created_by)||uname(a.created_by))} · ${fdt(a.created_at)}</div></div>`;
     });
     h += `</div>`;
+  }
+
+  // Kuis -- tampil untuk siapa pun kalau ada kuis terbit yang masih aktif
+  // (belum ada pemenang) ATAU pemenangnya baru ditentukan <7 hari lalu.
+  const activeQuizzes = await q(db.from('quizzes').select('*').eq('published',true).order('created_at',{ascending:false}));
+  if(activeQuizzes.length){
+    const quizWinners = await q(db.from('quiz_winners').select('*'));
+    const sevenDaysAgo = Date.now() - 7*86400000;
+    const visibleQuizzes = activeQuizzes.filter(qz=>{
+      const win = quizWinners.find(w=>w.quiz_id===qz.id);
+      return !win || new Date(win.won_at).getTime() > sevenDaysAgo;
+    });
+    for(const qz of visibleQuizzes){
+      const win = quizWinners.find(w=>w.quiz_id===qz.id);
+      h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>🎯 Kuis: ${esc(qz.title)}</h3>
+        <p class="small">${esc(qz.question)}</p>
+        ${qz.terms?`<p class="small muted"><b>S&amp;K:</b> ${esc(qz.terms)}</p>`:''}
+        ${qz.prize?`<p class="small muted"><b>Hadiah:</b> ${esc(qz.prize)}</p>`:''}`;
+      if(win){
+        h += `<p class="small" style="color:var(--teal-d);font-weight:700">🏆 Pemenang: ${esc(uname(win.staff_id))}</p>`;
+      } else {
+        h += `<div class="row"><input id="qzAnswerInput_${qz.id}" placeholder="jawaban kamu..." style="flex:1">
+          <button class="btn btn-teal btn-sm" onclick="submitQuizAnswerFromDashboard(${qz.id})">Kirim</button></div>`;
+        const feed = await q(db.from('quiz_submissions').select('*').eq('quiz_id',qz.id).order('submitted_at',{ascending:true}).limit(50));
+        if(feed.length){
+          h += `<div class="small muted" style="margin-top:8px;max-height:150px;overflow-y:auto">${feed.map(s=>`${esc(uname(s.staff_id))}: ${esc(s.answer_text)} · ${fdt(s.submitted_at)}`).join('<br>')}</div>`;
+        }
+      }
+      h += `</div>`;
+    }
   }
 
   // Tugas Hari Ini — generate dulu instance dari template berulang yang jatuh hari ini
@@ -13189,6 +13220,96 @@ async function deactivateAnnouncement(id){
   if(!confirm('Nonaktifkan pengumuman ini? Tidak akan tampil lagi di Dashboard siapa pun.')) return;
   await q(db.from('announcements').update({active:false}).eq('id',id));
   loadPengumumanList();
+}
+
+/* ================= QUIZ (Manager/Owner) ================= */
+async function renderQuiz(){
+  let h = `<h2>Kuis</h2>
+    <div class="row" style="justify-content:flex-end;margin-bottom:12px">
+      <button class="btn btn-teal btn-sm" onclick="newQuizModal()">+ Buat Kuis</button>
+    </div><div id="quizList"></div>`;
+  $('main').innerHTML = h;
+  loadQuizList();
+}
+async function loadQuizList(){
+  const [quizzes, winners] = await Promise.all([
+    q(db.from('quizzes').select('*').order('created_at',{ascending:false})),
+    q(db.from('quiz_winners').select('*'))
+  ]);
+  $('quizList').innerHTML = quizzes.length ? quizzes.map(qz=>{
+    const win = winners.find(w=>w.quiz_id===qz.id);
+    return `<div class="item" style="cursor:pointer" onclick="openQuizAdmin(${qz.id})">
+      <div class="row" style="justify-content:space-between">
+        <b>${esc(qz.title)}</b>
+        <span class="badge" style="background:${qz.published?'#DCFCE7':'#F3F4F6'};color:${qz.published?'#166534':'#6B7280'}">${qz.published?'Terbit':'Draft'}</span></div>
+      <div class="small muted">${fdt(qz.created_at)}</div>
+      ${win?`<div class="small" style="color:var(--teal-d)">🏆 Pemenang: ${esc(uname(win.staff_id))} · ${fdt(win.won_at)}</div>`:'<div class="small muted">Belum ada pemenang</div>'}</div>`;
+  }).join('') : '<p class="muted">Belum ada kuis.</p>';
+}
+function newQuizModal(){
+  openModal(`<div class="mhead"><h3>Buat Kuis</h3><button onclick="closeModal()">✕</button></div>
+    <label>Judul</label><input id="qzTitle" placeholder="mis. Kuis Ulang Tahun Aquapark">
+    <label>Syarat dan Ketentuan</label><textarea id="qzTerms" rows="2" placeholder="mis. berlaku untuk semua karyawan aktif..."></textarea>
+    <label>Hadiah</label><input id="qzPrize" placeholder="mis. Rp200.000">
+    <label>Kuis (pertanyaan)</label><textarea id="qzQuestion" rows="2" placeholder="tebak-tebakannya apa..."></textarea>
+    <label>Kunci Jawaban Benar (opsional)</label><input id="qzAnswer" placeholder="kosongkan kalau mau pilih pemenang manual">
+    <p class="small muted">Diisi = pemenang otomatis begitu ada yang cocok. Dikosongkan = kamu pilih sendiri pemenangnya dari daftar jawaban yang masuk.</p>
+    <button class="btn btn-teal" id="btnSubmitQuiz" style="margin-top:14px;width:100%" onclick="submitQuiz()">Simpan sebagai Draft</button>`);
+}
+async function submitQuiz(){
+  const title = $('qzTitle').value.trim(), question = $('qzQuestion').value.trim(), answer = $('qzAnswer').value.trim();
+  if(!title || !question){ toast('Judul dan Kuis wajib diisi'); return; }
+  if(!lockBtn($('btnSubmitQuiz'))) return;
+  const r = await q(db.from('quizzes').insert({title, terms:$('qzTerms').value.trim()||null, prize:$('qzPrize').value.trim()||null,
+    question, created_by:me.id}).select());
+  if(answer) await q(db.from('quiz_answer_keys').insert({quiz_id:r[0].id, correct_answer:answer}).select());
+  closeModal(); toast('Kuis dibuat sebagai draft — terbitkan dari daftar Kuis kalau sudah siap'); loadQuizList();
+}
+async function openQuizAdmin(id){
+  const [qz] = await q(db.from('quizzes').select('*').eq('id',id));
+  const [win] = await q(db.from('quiz_winners').select('*').eq('quiz_id',id));
+  const submissions = await q(db.from('quiz_submissions').select('*').eq('quiz_id',id).order('submitted_at',{ascending:true}));
+  let h = `<div class="mhead"><h3>${esc(qz.title)}</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small"><b>Syarat &amp; Ketentuan:</b> ${esc(qz.terms||'-')}<br><b>Hadiah:</b> ${esc(qz.prize||'-')}<br><b>Kuis:</b> ${esc(qz.question)}</p>
+    <button class="btn ${qz.published?'btn-ghost':'btn-teal'} btn-sm" onclick="toggleQuizPublish(${qz.id},${!qz.published})">${qz.published?'Batal Terbitkan (Draft)':'Terbitkan Sekarang'}</button>`;
+  if(win){
+    h += `<p class="small" style="color:var(--teal-d);margin-top:10px">🏆 <b>Pemenang: ${esc(uname(win.staff_id))}</b> · ${fdt(win.won_at)}</p>`;
+  } else {
+    h += `<p class="small muted" style="margin-top:10px">Belum ada yang menjawab benar.</p>`;
+  }
+  h += `<h3 style="margin-top:14px">Jawaban yang Masuk (${submissions.length})</h3><div class="timeline">`;
+  submissions.forEach(s=>{
+    h += `<div class="tl"><span class="small muted">${fdt(s.submitted_at)} · ${esc(uname(s.staff_id))}</span>${s.is_correct?' <span class="badge" style="background:#DCFCE7;color:#166534">✓ Benar</span>':''}<br>${esc(s.answer_text)}
+      ${!win?`<br><button class="btn-sm btn-ghost" style="margin-top:4px" onclick="manualDeclareWinner(${qz.id},'${s.staff_id}')">Jadikan Pemenang</button>`:''}</div>`;
+  });
+  h += `</div>
+    <button class="btn btn-ghost btn-sm" style="margin-top:12px;color:var(--red)" onclick="deleteQuiz(${qz.id})">Hapus Kuis Ini</button>`;
+  openModal(h);
+}
+async function manualDeclareWinner(quizId, staffId){
+  if(!confirm('Tetapkan orang ini sebagai pemenang kuis? Jawaban benar (otomatis) tidak berlaku lagi setelah ini kalau nanti ada yang cocok.')) return;
+  await q(db.from('quiz_winners').upsert({quiz_id:quizId, staff_id:staffId, won_at:new Date().toISOString()}, {onConflict:'quiz_id'}).select());
+  toast('Pemenang ditetapkan'); openQuizAdmin(quizId); loadQuizList();
+}
+async function toggleQuizPublish(id, publish){
+  await q(db.from('quizzes').update({published:publish}).eq('id',id));
+  toast(publish?'Kuis diterbitkan, tampil di Dashboard karyawan':'Kuis kembali jadi draft');
+  openQuizAdmin(id); loadQuizList();
+}
+async function deleteQuiz(id){
+  if(!confirm('Hapus kuis ini beserta seluruh jawaban & datanya? Tidak bisa dibatalkan.')) return;
+  await q(db.from('quizzes').delete().eq('id',id).select());
+  closeModal(); toast('Kuis dihapus'); loadQuizList();
+}
+// Dipanggil dari kartu Dashboard staff/SPV saat submit jawaban.
+async function submitQuizAnswerFromDashboard(quizId){
+  const val = ($('qzAnswerInput_'+quizId)||{}).value;
+  const answer = (val||'').trim();
+  if(!answer){ toast('Isi jawaban dulu'); return; }
+  const {data, error} = await db.rpc('submit_quiz_answer', {p_quiz_id: quizId, p_answer: answer});
+  if(error){ toast('Error: '+error.message); return; }
+  if(data){ toast('🎉 Jawaban BENAR! Kamu pemenangnya!'); } else { toast('Jawaban tercatat, belum benar — coba lagi'); }
+  renderDashboard();
 }
 
 /* ================= REKAP BULANAN ================= */
