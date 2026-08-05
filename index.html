@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-04-2';
+const APP_VERSION = '2026-08-04-3';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10749,7 +10749,9 @@ async function renderAbsen(){
     <select id="abType" onchange="loadAbsenExtra()">${absenTypeOptions(gate)}</select>
     <div id="abExtra"></div>
     ${gate.openTreatment?'<p class="small muted" style="margin-top:6px">⚠ Treatment masih berjalan — Absen Datang terkunci sampai Selesai Treatment dicatat.</p>':''}
-    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="openScanner()">📷 Pindai QR di Kios untuk Konfirmasi</button>
+    <div id="gpsWarning"></div>
+    <p id="gpsChecking" class="small muted" style="margin-top:6px">📍 Memeriksa GPS...</p>
+    <button class="btn btn-teal" id="btnOpenScanner" style="margin-top:14px;width:100%" onclick="openScanner()">📷 Pindai QR di Kios untuk Konfirmasi</button>
     </div>
     <div class="card"><h3>Riwayat Absen Saya (7 Hari Terakhir)</h3><div id="abHist"></div></div>`;
   if(isHrdOrMgr()){
@@ -10759,6 +10761,19 @@ async function renderAbsen(){
   $('main').innerHTML = h;
   loadAbsenExtra();
   loadAbsenHist();
+  // GPS WAJIB aktif untuk bisa Absen -- kalau gagal dapat lokasi sama sekali
+  // (GPS mati/izin ditolak/dll), tombol scan dikunci total sampai beres.
+  // (Ini beda dari "di luar radius" -- itu tetap boleh Absen, cuma ditandai.)
+  window._pendingGeo.then(geo=>{
+    const chk = $('gpsChecking'); if(chk) chk.remove();
+    const warnEl = $('gpsWarning'); const btn = $('btnOpenScanner');
+    if(!warnEl || !btn) return; // user sudah pindah halaman sebelum GPS selesai dicek
+    if(geo.geo_lat==null){
+      warnEl.innerHTML = `<p class="small" style="background:#FEE2E2;color:#B91C1C;padding:10px;border-radius:8px;font-weight:700;margin-top:6px">
+        📍 GPS Anda MATI / tidak terdeteksi. Nyalakan GPS/Lokasi di Pengaturan HP dulu, lalu kembali ke halaman ini (buka ulang) sebelum bisa Absen.</p>`;
+      btn.disabled = true; btn.style.opacity = '.5'; btn.style.cursor = 'not-allowed';
+    }
+  });
 }
 async function loadAbsenExtra(){
   const type = ABSEN_TYPES[$('abType').value];
@@ -10893,6 +10908,13 @@ async function submitAttendance(tokenId){
   // Pakai lokasi yang sudah mulai diambil sejak halaman dibuka (pre-warm) --
   // kalau belum ada (mis. submit lewat jalur lain), baru mulai dari nol.
   const geo = await (window._pendingGeo || getGeoTag());
+  // WAJIB GPS aktif untuk bisa Absen -- ini beda dari "di luar radius" (itu
+  // tetap boleh, cuma ditandai). Ini cuma untuk GPS yang benar-benar mati/
+  // gagal total (geo_lat null). Lapis kedua selain yang sudah dikunci di UI.
+  if(geo.geo_lat==null){
+    toast('Absen ditolak — GPS Anda mati/tidak terdeteksi. Nyalakan GPS dulu di Pengaturan HP.');
+    closeModal(); return;
+  }
   const payload = {
     staff_id: me.id, department: me.department, shift_id: shiftId||null,
     kategori: type.kategori, fase: type.fase, pool_type_id: poolId||null,
