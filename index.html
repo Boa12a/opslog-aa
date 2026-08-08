@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-04-3';
+const APP_VERSION = '2026-08-08-1';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10712,7 +10712,12 @@ async function absenGateState(){
   ]);
   // Kehadiran: cuma dikunci ke "Absen Pulang saja" kalau sesi Absen Datang
   // yang belum ditutup itu terjadi HARI INI (sesuai kata-katamu "di hari yang sama").
-  const openKehadiranToday = !!(lastK.length && lastK[0].fase==='mulai' && localDateOf(lastK[0].scanned_at)===t0);
+  // PENTING: sengaja TIDAK dibatasi "harus hari ini" -- itu bug yang bikin
+  // shift malam (Absen Datang jam 23:00, Absen Pulang jam 06:00 besok) salah
+  // dianggap "belum ada sesi terbuka" begitu tanggal kalender berganti,
+  // padahal sesinya masih berjalan. Sesi dianggap terbuka SELAMA belum ada
+  // Absen Pulang yang menutupnya, berapa hari pun berlalu.
+  const openKehadiranToday = !!(lastK.length && lastK[0].fase==='mulai');
   // Shift yang tercatat saat Absen Datang -- dipakai lagi otomatis saat Absen
   // Pulang (mis. untuk cek checklist per-shift), TANPA perlu tanya ulang ke user.
   const openKehadiranShiftId = openKehadiranToday ? (lastK[0].shift_id || null) : null;
