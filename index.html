@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-08-1';
+const APP_VERSION = '2026-08-08-2';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11524,10 +11524,14 @@ async function renderDashboard(){
   // hari ini (ini SATU-SATUNYA yang tetap harus menunggu duluan, sebelum
   // task_items dibaca -- baris berikutnya butuh instance yang baru dibuat).
   await ensureTodayTasksFor(me.id);
-  const [myTasksToday_raw, lateDeptTasks] = await Promise.all([
+  const [myTasksToday_raw, lateDeptTasksAll] = await Promise.all([
     q(db.from('task_items').select('*').eq('staff_id',me.id).lte('task_date',t).eq('status','belum').order('task_date')),
     (me.role==='spv' && me.department) ? q(db.from('task_items').select('*').eq('department',me.department).eq('status','belum').lt('task_date',t).order('task_date')) : Promise.resolve([])
   ]);
+  // Tugas yang otomatis tertaut Tiket Kerusakan/Permintaan Barang tidak
+  // dihitung "terlambat" di sini -- itu menunggu proses lain (barang belum
+  // siap dsb), bukan kelalaian anak buah.
+  const lateDeptTasks = lateDeptTasksAll.filter(x=>!x.ticket_id && !x.procurement_request_id);
   const myTasksToday = myTasksToday_raw.sort((a,b)=> (b.urgent-a.urgent) || a.task_date.localeCompare(b.task_date));
 
   // Kuis: siapkan feed jawaban untuk kuis yang masih aktif (belum ada
@@ -11583,7 +11587,7 @@ async function renderDashboard(){
   if(myTasksToday.length){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>📋 Tugas Anda</h3>`;
     myTasksToday.forEach(x=>{
-      const telat = x.task_date < t;
+      const telat = x.task_date < t && !x.ticket_id && !x.procurement_request_id;
       h += `<div class="item" style="cursor:pointer${x.urgent?';border-left-color:var(--red)':''}" onclick="go('tugas')">
         <b>${x.urgent?'🔴 ':''}${esc(x.task_text)}</b> ${telat?'<span class="badge" style="background:#FEE2E2;color:#B91C1C">⚠ Terlambat</span>':''}
         <div class="small muted">${fdate(x.task_date)}</div></div>`;
@@ -12712,7 +12716,19 @@ async function fulfillItem(itemId, method){
     await q(db.from('ticket_updates').insert({ticket_id:ti.ticket_id,
       note:'Pengadaan selesai ('+(method==='gudang'?'ambil dari gudang':'dibeli')+'): '+it.item_name, created_by:me.id}).select());
   }
-  toast('Item diserahkan'); openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
+  toast('Item diserahkan'); openPengadaan(it.request_id);
+  // Kalau SEMUA item di permintaan ini sudah siap diambil/selesai (tidak ada
+  // lagi yang masih menunggu otorisasi/diproses), baru sekarang tugas "Ambil
+  // barang" jadi benar-benar bisa dikerjakan -- reset tanggalnya ke hari ini
+  // supaya TIDAK langsung tertandai "Terlambat" cuma karena sudah beberapa
+  // hari sejak DITUGASKAN (padahal barangnya baru sekarang siap).
+  const siblingItems = await q(db.from('procurement_items').select('status').eq('request_id',it.request_id));
+  const allReady = siblingItems.every(si=>['siap_diambil','selesai','ditolak'].includes(si.status));
+  if(allReady){
+    await q(db.from('task_items').update({task_date: today()})
+      .eq('procurement_request_id', it.request_id).eq('status','belum').ilike('task_text','Ambil barang%'));
+  }
+  if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
 }
 async function deletePengadaan(id){
   if(!confirm('Yakin hapus permintaan pengadaan ini beserta seluruh item & riwayatnya?')) return;
@@ -13176,7 +13192,12 @@ function assignerLabel(creatorId){
 }
 function taskRow(t){
   const t0 = today();
-  const telat = t.status==='belum' && t.task_date < t0;
+  // Tugas yang otomatis tertaut ke Tiket Kerusakan / Permintaan Barang itu
+  // "menunggu proses lain" (barang belum siap, dsb) -- BUKAN kelalaian
+  // orangnya. Jangan ditandai Terlambat cuma karena sudah lewat beberapa
+  // hari sejak ditugaskan, supaya tidak membingungkan/menuduh keliru.
+  const isLinked = !!(t.ticket_id || t.procurement_request_id);
+  const telat = t.status==='belum' && t.task_date < t0 && !isLinked;
   const badge = t.status==='selesai' ? {c:'#DCFCE7',t:'#166534',l:'✓ Selesai'} : (telat ? {c:'#FEE2E2',t:'#B91C1C',l:'⚠ Terlambat'} : {c:'#FEF3C7',t:'#92400E',l:'Belum'});
   const dari = assignerLabel(t.created_by);
   return `<div class="item" style="cursor:pointer${t.urgent&&t.status!=='selesai'?';border-left-color:var(--red)':''}" onclick="openTugas(${t.id})">
@@ -13186,7 +13207,7 @@ function taskRow(t){
     <div class="small">${fdate(t.task_date)} · ${esc(t.task_text)}</div>
     ${dari?`<div class="small muted">Dari: ${esc(dari)}</div>`:''}
     ${t.ticket_id?'<div class="small muted">🔧 Follow-up tiket Kerusakan #'+t.ticket_id+'</div>':''}
-    ${t.procurement_request_id?'<div class="small muted">📦 Terkait Permintaan Barang #'+t.procurement_request_id+'</div>':''}</div>`;
+    ${t.procurement_request_id?'<div class="small muted">📦 Terkait Permintaan Barang #'+t.procurement_request_id+' — menunggu barang siap, bukan keterlambatan</div>':''}</div>`;
 }
 async function loadTugas(){
   const f = $('tgFilter').value;
@@ -13249,7 +13270,7 @@ async function submitTugas(){
 async function openTugas(id){
   const [t] = await q(db.from('task_items').select('*').eq('id',id));
   const t0 = today();
-  const telat = t.status==='belum' && t.task_date < t0;
+  const telat = t.status==='belum' && t.task_date < t0 && !t.ticket_id && !t.procurement_request_id;
   let h = `<div class="mhead"><h3>Tugas</h3><button onclick="closeModal()">✕</button></div>
     <p class="small">${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b><br>
     <b>Tanggal:</b> ${fdate(t.task_date)}<br><b>Pekerjaan:</b> ${esc(t.task_text)}${assignerLabel(t.created_by)?'<br><b>Dari:</b> '+esc(assignerLabel(t.created_by)):''}</p>
