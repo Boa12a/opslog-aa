@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-08-2';
+const APP_VERSION = '2026-08-08-4';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -13168,11 +13168,40 @@ async function renderTugas(){
         </select>
         ${isMgr()?`<select id="tgDeptFilter" onchange="loadTugas()"><option value="">Semua Departemen</option>${Object.entries(ALL_STAFF_DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>`:''}
       </div>
-      ${canManage?`<button class="btn btn-teal btn-sm" onclick="newTugasModal()">+ Buat Tugas</button>`:''}
+      <div class="row" style="gap:8px">
+        ${canManage?`<button class="btn btn-ghost btn-sm" onclick="renderTaskTemplates()">🔁 Kelola Tugas Berulang</button>`:''}
+        ${canManage?`<button class="btn btn-teal btn-sm" onclick="newTugasModal()">+ Buat Tugas</button>`:''}
+      </div>
     </div><div id="tugasList"></div>`;
   $('main').innerHTML = h;
   $('tgFilter').value = me.role==='spv' ? 'dept' : (canManage ? 'all' : 'mine');
   loadTugas();
+}
+// Halaman kelola Tugas Berulang -- selama ini cuma bisa DIBUAT, belum bisa
+// DIHENTIKAN, jadi kalau dihapus instance hariannya, otomatis dibuat lagi
+// terus tiap hari karena template-nya masih aktif di belakang layar.
+async function renderTaskTemplates(){
+  let h = `<h2>Tugas Berulang</h2><p class="small muted" style="margin-bottom:12px">Ini daftar "cetakan" tugas mingguan yang masih aktif. Hapus/hentikan di sini kalau tidak mau dibuatkan salinan harian baru lagi.</p><div id="ttList"></div>`;
+  $('main').innerHTML = h;
+  loadTaskTemplates();
+}
+async function loadTaskTemplates(){
+  let query = db.from('task_templates').select('*').eq('active',true).order('created_at',{ascending:false});
+  if(!isMgr()) query = query.eq('department', me.department);
+  const list = await q(query);
+  $('ttList').innerHTML = list.length ? list.map(tpl=>`
+    <div class="item">
+      <div class="row" style="justify-content:space-between">
+        <div>${tpl.department?deptTag(tpl.department):''} <b>${uname(tpl.staff_id)}</b>${tpl.urgent?' 🔴':''}</div>
+        <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="stopTaskTemplate(${tpl.id})">Hentikan</button></div>
+      <div class="small">${esc(tpl.task_text)}</div>
+      <div class="small muted">Hari: ${tpl.days_of_week.map(d=>DOW_LABEL[d]).join(', ')} · Dari: ${esc(assignerLabel(tpl.created_by)||uname(tpl.created_by))}</div></div>`).join('')
+    : '<p class="muted">Tidak ada tugas berulang aktif.</p>';
+}
+async function stopTaskTemplate(id){
+  if(!confirm('Hentikan tugas berulang ini? Salinan harian yang SUDAH ada tetap tersimpan (tidak dihapus), tapi tidak akan dibuatkan lagi ke depannya.')) return;
+  await q(db.from('task_templates').update({active:false}).eq('id',id));
+  toast('Tugas berulang dihentikan'); loadTaskTemplates();
 }
 // Generate instance hari ini untuk SEMUA staff di departemen SPV/Manager yang
 // buka halaman ini -- supaya SPV langsung lihat tugas hari ini semua anak buahnya.
@@ -13691,11 +13720,27 @@ async function saveWaNumber(){
 async function loadWaChecklistFlags(){
   const list = await q(db.from('attendance_logs').select('*').eq('checklist_complete_snapshot',false).is('reviewed_at',null).order('scanned_at',{ascending:false}));
   if(!list.length){ $('checklistFlagArea').innerHTML=''; return; }
-  let h = `<div class="card" style="border-left:4px solid var(--gold)"><h3>⚠ Checklist Belum Lengkap Saat Pulang (${list.length})</h3>`;
-  list.forEach(a=>{
+  // Untuk tiap flag, cari item checklist mana spesifiknya yang belum
+  // dicentang (paralel, bukan satu-satu) -- sebelumnya cuma nampilin nama
+  // orang & jam, tanpa detail apa yang kurang.
+  const details = await Promise.all(list.map(async a=>{
+    const logDate = localDateOf(a.scanned_at);
+    const itemsQ = db.from('checklist_items').select('*').eq('department',a.department).eq('active',true).order('sort_order');
+    let logQ = db.from('daily_logs').select('*, daily_log_checks(*)').eq('department',a.department).eq('log_date',logDate);
+    logQ = a.shift_id ? logQ.eq('shift_id',a.shift_id) : logQ.is('shift_id',null);
+    const [items, logs] = await Promise.all([q(itemsQ), q(logQ)]);
+    const relevant = items.filter(it=>!it.shift_id || it.shift_id===a.shift_id);
+    const log = logs[0];
+    const missing = relevant.filter(it=>!(log && log.daily_log_checks.find(c=>c.item_id===it.id && c.checked)));
+    return {a, missing, hasLog: !!log};
+  }));
+  let h = `<div class="card" style="border-left:4px solid var(--gold)"><h3>⚠ Checklist Belum Lengkap Saat Pulang (${list.length})</h3>
+    <p class="small muted">"Tandai Sudah Ditinjau" cuma menandai Manager/Owner SUDAH LIHAT peringatan ini (untuk arsip/histori) — TIDAK melengkapi checklist-nya. Kalau perlu ditindaklanjuti, hubungi orangnya/SPV-nya langsung.</p>`;
+  details.forEach(({a, missing, hasLog})=>{
     h += `<div class="item" style="cursor:default">
       ${a.department?divTag(a.department):''} <b>${uname(a.staff_id)}</b>
       <div class="small muted">${fdt(a.scanned_at)}</div>
+      <div class="small" style="margin-top:4px;color:#92400E">${!hasLog ? 'Belum ada Log Harian sama sekali untuk shift ini.' : (missing.length ? 'Belum dicentang: '+missing.map(m=>esc(m.item_text)).join(', ') : '(tidak ditemukan detail item spesifik — mungkin checklist sudah berubah sejak saat itu)')}</div>
       <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="reviewChecklistFlag(${a.id})">Tandai Sudah Ditinjau</button></div>`;
   });
   $('checklistFlagArea').innerHTML = h + '</div>';
