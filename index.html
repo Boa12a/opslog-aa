@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-08-5';
+const APP_VERSION = '2026-08-08-6';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11532,7 +11532,7 @@ async function renderDashboard(){
   // Tugas yang otomatis tertaut Tiket Kerusakan/Permintaan Barang tidak
   // dihitung "terlambat" di sini -- itu menunggu proses lain (barang belum
   // siap dsb), bukan kelalaian anak buah.
-  const lateDeptTasks = lateDeptTasksAll.filter(x=>!x.ticket_id && !x.procurement_request_id);
+  const lateDeptTasks = lateDeptTasksAll.filter(x=>!x.ticket_id && !x.procurement_request_id && !x.maintenance_schedule_id);
   const myTasksToday = myTasksToday_raw.sort((a,b)=> (b.urgent-a.urgent) || a.task_date.localeCompare(b.task_date));
 
   // Kuis: siapkan feed jawaban untuk kuis yang masih aktif (belum ada
@@ -11588,7 +11588,7 @@ async function renderDashboard(){
   if(myTasksToday.length){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>📋 Tugas Anda</h3>`;
     myTasksToday.forEach(x=>{
-      const telat = x.task_date < t && !x.ticket_id && !x.procurement_request_id;
+      const telat = x.task_date < t && !x.ticket_id && !x.procurement_request_id && !x.maintenance_schedule_id;
       h += `<div class="item" style="cursor:pointer${x.urgent?';border-left-color:var(--red)':''}" onclick="go('tugas')">
         <b>${x.urgent?'🔴 ':''}${esc(x.task_text)}</b> ${telat?'<span class="badge" style="background:#FEE2E2;color:#B91C1C">⚠ Terlambat</span>':''}
         <div class="small muted">${fdate(x.task_date)}</div></div>`;
@@ -12849,18 +12849,94 @@ async function loadMtc(){
   const t = today();
   let h = list.length?'':'<p class="muted">Belum ada jadwal maintenance.</p>';
   list.forEach(s=>{
-    const canDo = isMgr() || (isFieldWorker()&&me.department===s.department);
+    const canManage = isMgr() || (me.role==='spv' && me.department===s.department);
+    const isAssignedStaff = s.assigned_to===me.id;
     const due = s.next_due<=t;
     h += `<div class="item" style="border-left-color:${DEPTS[s.department].color};cursor:default">
       <div class="row" style="justify-content:space-between">
         <div>${deptTag(s.department)} <b>${esc(s.task_name)}</b>${s.assets?` <span class="small muted">(${esc(s.assets.name)})</span>`:''}</div>
         <span class="small ${due?'age-red':(s.next_due<=addDays(t,7)?'age-amber':'muted')}">${due?'JATUH TEMPO · ':''}${fdate(s.next_due)}</span></div>
-      <div class="small muted">Setiap ${s.interval_days} hari</div>
-      ${canDo?`<div class="row" style="margin-top:6px">
-        <button class="btn btn-teal btn-sm" onclick="doneMtc(${s.id},${s.interval_days})">✓ Tandai Selesai Dikerjakan</button>
-        ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="delMtc(${s.id})">Nonaktifkan</button>`:''}</div>`:''}</div>`;
+      <div class="small muted">Setiap ${s.interval_days} hari</div>`;
+    if(s.assigned_to && !s.pending_completion_by){
+      h += `<div class="small" style="color:#0F766E;margin-top:4px">👤 Ditugaskan ke ${esc(uname(s.assigned_to))}</div>`;
+    }
+    if(s.pending_completion_by){
+      h += `<div class="small" style="background:#FEF3C7;padding:8px;border-radius:8px;margin-top:6px">
+        ⏳ Menunggu otorisasi — laporan dari <b>${esc(uname(s.pending_completion_by))}</b> (${fdt(s.pending_completion_at)}):<br>
+        <i>${esc(s.pending_report)}</i></div>`;
+      if(canManage){
+        h += `<button class="btn btn-teal btn-sm" style="margin-top:6px" onclick="authorizeMtc(${s.id})">✓ Baca &amp; Otorisasi Selesai</button>`;
+      }
+    } else {
+      if(isAssignedStaff){
+        h += `<button class="btn btn-teal btn-sm" style="margin-top:6px" onclick="reportMtcModal(${s.id})">Isi Laporan &amp; Tandai Selesai</button>`;
+      }
+      if(canManage){
+        h += `<div class="row" style="margin-top:6px">
+          <button class="btn btn-ghost btn-sm" onclick="assignMtcModal(${s.id},'${s.department}')">${s.assigned_to?'Ganti Penugasan':'Tugaskan ke Staff'}</button>
+          <button class="btn btn-navy btn-sm" onclick="doneMtcDirect(${s.id},${s.interval_days})">✓ Saya Kerjakan Sendiri</button>
+          <button class="btn btn-ghost btn-sm" onclick="delMtc(${s.id})">Nonaktifkan</button></div>`;
+      }
+    }
+    h += `</div>`;
   });
   $('mtcList').innerHTML = h;
+}
+async function assignMtcModal(id, dept){
+  const staffList = await q(db.from('profiles').select('*').eq('department',dept).eq('role','staff').eq('active',true).order('name'));
+  if(!staffList.length){ toast('Tidak ada staff aktif di departemen ini'); return; }
+  openModal(`<div class="mhead"><h3>Tugaskan Maintenance</h3><button onclick="closeModal()">✕</button></div>
+    <label>Staff</label><select id="amStaff">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="assignMtc(${id})">Tugaskan</button>`);
+}
+async function assignMtc(id){
+  const staffId = $('amStaff').value;
+  const [sched] = await q(db.from('maintenance_schedules').select('task_name,department').eq('id',id));
+  await q(db.from('maintenance_schedules').update({assigned_to:staffId, assigned_by:me.id, assigned_at:new Date().toISOString(),
+    pending_completion_by:null, pending_completion_at:null, pending_report:null}).eq('id',id));
+  await q(db.from('task_items').insert({staff_id:staffId, department:sched.department, task_text:'Maintenance: '+sched.task_name,
+    task_date:today(), created_by:me.id, maintenance_schedule_id:id}).select());
+  closeModal(); toast('Ditugaskan ke staff'); loadMtc();
+}
+function reportMtcModal(id){
+  openModal(`<div class="mhead"><h3>Laporan Pekerjaan Maintenance</h3><button onclick="closeModal()">✕</button></div>
+    <label>Laporan Pekerjaan (wajib diisi)</label><textarea id="mtcReport" rows="4" placeholder="apa yang dikerjakan, kondisi yang ditemukan, dsb."></textarea>
+    <button class="btn btn-teal" id="btnMtcReport" style="margin-top:14px;width:100%" onclick="submitMtcReport(${id})">Kirim Laporan</button>`);
+}
+async function submitMtcReport(id){
+  const report = $('mtcReport').value.trim();
+  if(!report){ toast('Laporan pekerjaan wajib diisi'); return; }
+  if(!lockBtn($('btnMtcReport'))) return;
+  await q(db.from('maintenance_schedules').update({pending_completion_by:me.id, pending_completion_at:new Date().toISOString(), pending_report:report}).eq('id',id));
+  await q(db.from('task_items').update({status:'selesai', completed_at:new Date().toISOString(), completion_note:report})
+    .eq('maintenance_schedule_id',id).eq('staff_id',me.id).eq('status','belum'));
+  closeModal(); toast('Laporan terkirim, menunggu otorisasi SPV/Manager'); if(page==='mtc') loadMtc(); if(page==='dashboard') renderDashboard();
+}
+// Otorisasi final oleh SPV/Manager -- sekaligus isi penilaian (1-5) & keterangan,
+// dipakai sebagai catatan kualitas pekerjaan (selesai sempurna / ada kekurangan dst).
+async function authorizeMtc(id){
+  const [s] = await q(db.from('maintenance_schedules').select('*').eq('id',id));
+  const ratingStr = prompt('Penilaian pekerjaan, 1-5 (5 = selesai sempurna, 1 = banyak kekurangan):','5');
+  if(ratingStr===null) return;
+  const rating = Math.min(5, Math.max(1, Number(ratingStr)||3));
+  const note = prompt('Keterangan/catatan penilaian (opsional):') || null;
+  await q(db.from('maintenance_logs').insert({schedule_id:id, done_date:today(), done_by:s.pending_completion_by,
+    note:s.pending_report, rating, authorized_by:me.id, authorized_note:note}).select());
+  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),s.interval_days),
+    assigned_to:null, assigned_by:null, assigned_at:null, pending_completion_by:null, pending_completion_at:null, pending_report:null}).eq('id',id));
+  toast('Maintenance diotorisasi, jadwal berikutnya dibuat'); loadMtc();
+}
+// SPV/Manager kerjakan & finalisasi sendiri langsung (tanpa delegasi) --
+// tetap wajib isi penilaian supaya datanya konsisten dengan yang didelegasikan.
+async function doneMtcDirect(id, interval){
+  const ratingStr = prompt('Penilaian pekerjaan, 1-5 (5 = selesai sempurna, 1 = banyak kekurangan):','5');
+  if(ratingStr===null) return;
+  const rating = Math.min(5, Math.max(1, Number(ratingStr)||3));
+  const note = prompt('Catatan pengerjaan (opsional):') || null;
+  await q(db.from('maintenance_logs').insert({schedule_id:id, done_date:today(), done_by:me.id, note, rating, authorized_by:me.id}).select());
+  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval),
+    assigned_to:null, assigned_by:null, assigned_at:null, pending_completion_by:null, pending_completion_at:null, pending_report:null}).eq('id',id));
+  toast('Maintenance dicatat, jadwal berikutnya dibuat'); loadMtc();
 }
 async function newMtcModal(){
   const assets = await q(db.from('assets').select('id,name,department').eq('status','aktif').order('name'));
@@ -12884,12 +12960,6 @@ async function createMtc(){
   await q(db.from('maintenance_schedules').insert({department:$('nmDept').value,asset_id:$('nmAsset').value||null,
     task_name:n,interval_days:Number($('nmInt').value)||30,next_due:$('nmDue').value}).select());
   closeModal(); toast('Jadwal tersimpan'); loadMtc();
-}
-async function doneMtc(id,interval){
-  const note = prompt('Catatan pengerjaan (opsional):') || null;
-  await q(db.from('maintenance_logs').insert({schedule_id:id,done_date:today(),done_by:me.id,note}).select());
-  await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval)}).eq('id',id));
-  toast('Maintenance dicatat, jadwal berikutnya dibuat'); loadMtc();
 }
 async function delMtc(id){
   if(!confirm('Nonaktifkan jadwal ini?'))return;
@@ -13226,7 +13296,7 @@ function taskRow(t){
   // "menunggu proses lain" (barang belum siap, dsb) -- BUKAN kelalaian
   // orangnya. Jangan ditandai Terlambat cuma karena sudah lewat beberapa
   // hari sejak ditugaskan, supaya tidak membingungkan/menuduh keliru.
-  const isLinked = !!(t.ticket_id || t.procurement_request_id);
+  const isLinked = !!(t.ticket_id || t.procurement_request_id || t.maintenance_schedule_id);
   const telat = t.status==='belum' && t.task_date < t0 && !isLinked;
   const badge = t.status==='selesai' ? {c:'#DCFCE7',t:'#166534',l:'✓ Selesai'} : (telat ? {c:'#FEE2E2',t:'#B91C1C',l:'⚠ Terlambat'} : {c:'#FEF3C7',t:'#92400E',l:'Belum'});
   const dari = assignerLabel(t.created_by);
@@ -13237,7 +13307,8 @@ function taskRow(t){
     <div class="small">${fdate(t.task_date)} · ${esc(t.task_text)}</div>
     ${dari?`<div class="small muted">Dari: ${esc(dari)}</div>`:''}
     ${t.ticket_id?'<div class="small muted">🔧 Follow-up tiket Kerusakan #'+t.ticket_id+'</div>':''}
-    ${t.procurement_request_id?'<div class="small muted">📦 Terkait Permintaan Barang #'+t.procurement_request_id+' — menunggu barang siap, bukan keterlambatan</div>':''}</div>`;
+    ${t.procurement_request_id?'<div class="small muted">📦 Terkait Permintaan Barang #'+t.procurement_request_id+' — menunggu barang siap, bukan keterlambatan</div>':''}
+    ${t.maintenance_schedule_id?'<div class="small muted">🔧 Tugas Maintenance — menunggu otorisasi SPV, bukan keterlambatan</div>':''}</div>`;
 }
 async function loadTugas(){
   const f = $('tgFilter').value;
@@ -13300,12 +13371,13 @@ async function submitTugas(){
 async function openTugas(id){
   const [t] = await q(db.from('task_items').select('*').eq('id',id));
   const t0 = today();
-  const telat = t.status==='belum' && t.task_date < t0 && !t.ticket_id && !t.procurement_request_id;
+  const telat = t.status==='belum' && t.task_date < t0 && !t.ticket_id && !t.procurement_request_id && !t.maintenance_schedule_id;
   let h = `<div class="mhead"><h3>Tugas</h3><button onclick="closeModal()">✕</button></div>
     <p class="small">${t.department?deptTag(t.department):''} <b>${uname(t.staff_id)}</b><br>
     <b>Tanggal:</b> ${fdate(t.task_date)}<br><b>Pekerjaan:</b> ${esc(t.task_text)}${assignerLabel(t.created_by)?'<br><b>Dari:</b> '+esc(assignerLabel(t.created_by)):''}</p>
     ${t.ticket_id?`<p class="small muted">🔧 Otomatis dari tiket Kerusakan #${t.ticket_id}</p>`:''}
     ${t.procurement_request_id?`<button class="btn btn-ghost btn-sm" onclick="closeModal();openPengadaan(${t.procurement_request_id})">📦 Lihat Detail Permintaan Barang #${t.procurement_request_id}</button>`:''}
+    ${t.maintenance_schedule_id?`<button class="btn btn-ghost btn-sm" onclick="closeModal();go('mtc')">📅 Buka Halaman Maintenance</button>`:''}
     <p><span class="badge" style="background:${t.status==='selesai'?'#DCFCE7':(telat?'#FEE2E2':'#FEF3C7')};color:${t.status==='selesai'?'#166534':(telat?'#B91C1C':'#92400E')}">${t.status==='selesai'?'✓ Selesai':(telat?'⚠ Terlambat':'Belum')}</span></p>`;
   if(t.status==='selesai'){
     h += `<p class="small"><b>Keterangan:</b> ${esc(t.completion_note||'-')}<br><span class="muted">Selesai ${fdt(t.completed_at)}</span></p>`;
@@ -13613,7 +13685,7 @@ async function computeStaffMetricsForMonth(staffId, month){
   const tugasTotal = taskItems.length;
   const tugasSelesai = taskItems.filter(t=>t.status==='selesai').length;
   const tugasTepatWaktu = taskItems.filter(t=>t.status==='selesai' &&
-    (t.ticket_id || t.procurement_request_id || (t.completed_at && localDateOf(t.completed_at)<=t.task_date))).length;
+    (t.ticket_id || t.procurement_request_id || t.maintenance_schedule_id || (t.completed_at && localDateOf(t.completed_at)<=t.task_date))).length;
 
   // Lembur
   let totalLemburJam = 0;
