@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-11-5';
+const APP_VERSION = '2026-08-11-6';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11933,6 +11933,9 @@ async function loadLogForm(){
         h += `<p class="small age-amber">⚠ Diisi Staff, menunggu otorisasi SPV/Manager sebelum dianggap resmi.</p>`;
       }
     }
+    if(me.role==='owner'){
+      h += `<button class="btn-sm btn-ghost" style="color:var(--red);margin-bottom:8px" onclick="deleteLog(${log.id})">Hapus Log Ini</button>`;
+    }
   }
   if(!canFill){ h += `<p class="muted small">Anda tidak memiliki akses mengisi log departemen ini.</p>`; $('logFormArea').innerHTML=h; return; }
 
@@ -12068,6 +12071,12 @@ async function saveLog(existingId){
 async function authorizeLog(logId){
   await q(db.from('daily_logs').update({authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',logId));
   toast('Log diotorisasi'); loadLogForm(); if(page==='dashboard') renderDashboard();
+}
+async function deleteLog(id){
+  if(!confirm('Hapus Log Harian ini beserta checklist-nya SECARA PERMANEN? Tidak bisa dikembalikan.')) return;
+  await q(db.from('daily_log_checks').delete().eq('log_id',id).select());
+  await q(db.from('daily_logs').delete().eq('id',id).select());
+  toast('Log dihapus'); loadLogForm(); loadLogHist();
 }
 function rejectLogModal(logId){
   openModal(`<div class="mhead"><h3>Tolak Log Ini</h3><button onclick="closeModal()">✕</button></div>
