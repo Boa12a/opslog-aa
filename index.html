@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-11-3';
+const APP_VERSION = '2026-08-11-5';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10722,10 +10722,11 @@ async function absenGateState(){
   // Shift yang tercatat saat Absen Datang -- dipakai lagi otomatis saat Absen
   // Pulang (mis. untuk cek checklist per-shift), TANPA perlu tanya ulang ke user.
   const openKehadiranShiftId = openKehadiranToday ? (lastK[0].shift_id || null) : null;
+  const openKehadiranDate = openKehadiranToday ? localDateOf(lastK[0].scanned_at) : null;
   // Treatment: TIDAK dibatasi hari (bisa ganti hari) -- selama belum ada
   // Selesai Treatment yang menutup sesi mulai terakhir, tetap terbuka.
   const openTreatment = !!(lastT.length && lastT[0].fase==='mulai');
-  return {openKehadiranToday, openKehadiranShiftId, openTreatment};
+  return {openKehadiranToday, openKehadiranShiftId, openKehadiranDate, openTreatment};
 }
 function absenTypeOptions(gate){
   return Object.entries(ABSEN_TYPES).filter(([k,v])=>{
@@ -10755,6 +10756,7 @@ async function renderAbsen(){
     <select id="abType" onchange="loadAbsenExtra()">${absenTypeOptions(gate)}</select>
     <div id="abExtra"></div>
     ${gate.openTreatment?'<p class="small muted" style="margin-top:6px">⚠ Treatment masih berjalan — Absen Datang terkunci sampai Selesai Treatment dicatat.</p>':''}
+    <div id="handoverWarning"></div>
     <div id="gpsWarning"></div>
     <p id="gpsChecking" class="small muted" style="margin-top:6px">📍 Memeriksa GPS...</p>
     <button class="btn btn-teal" id="btnOpenScanner" style="margin-top:14px;width:100%" onclick="openScanner()">📷 Pindai QR di Kios untuk Konfirmasi</button>
@@ -10767,6 +10769,19 @@ async function renderAbsen(){
   $('main').innerHTML = h;
   loadAbsenExtra();
   loadAbsenHist();
+  // Security wajib isi Serah Terima sebelum bisa Absen Pulang -- kasih tahu
+  // dari awal (bukan cuma nunggu ditolak pas scan) supaya tidak kaget.
+  if(me.department==='security' && gate.openKehadiranToday){
+    let hoQuery = db.from('shift_handovers').select('id').eq('department','security').eq('log_date', gate.openKehadiranDate);
+    hoQuery = gate.openKehadiranShiftId ? hoQuery.eq('shift_id', gate.openKehadiranShiftId) : hoQuery.is('shift_id', null);
+    q(hoQuery).then(hoCheck=>{
+      const el = $('handoverWarning'); if(!el) return;
+      if(!hoCheck.length){
+        el.innerHTML = `<p class="small" style="background:#FEE2E2;color:#B91C1C;padding:10px;border-radius:8px;font-weight:700;margin-top:6px">
+          📋 Serah Terima shift ini belum diisi — wajib diisi dulu di menu <b>Log Harian</b> sebelum bisa Absen Pulang.</p>`;
+      }
+    });
+  }
   // GPS WAJIB aktif untuk bisa Absen -- kalau gagal dapat lokasi sama sekali
   // (GPS mati/izin ditolak/dll), tombol scan dikunci total sampai beres.
   // (Ini beda dari "di luar radius" -- itu tetap boleh Absen, cuma ditandai.)
@@ -10893,6 +10908,19 @@ async function submitAttendance(tokenId){
   }
   if(type.kategori==='treatment' && type.fase==='mulai' && gate.openTreatment){
     toast('Masih ada sesi Treatment yang belum Selesai'); closeModal(); return;
+  }
+
+  // WAJIB Serah Terima dulu untuk Security -- semua Security (SPV & staff)
+  // tidak bisa Absen Pulang sebelum ada catatan Serah Terima untuk shift &
+  // tanggal sesi kehadiran yang sedang ditutup ini.
+  if(type.kategori==='kehadiran' && type.fase==='selesai' && me.department==='security'){
+    let hoQuery = db.from('shift_handovers').select('id').eq('department','security').eq('log_date', gate.openKehadiranDate);
+    hoQuery = gate.openKehadiranShiftId ? hoQuery.eq('shift_id', gate.openKehadiranShiftId) : hoQuery.is('shift_id', null);
+    const hoCheck = await q(hoQuery);
+    if(!hoCheck.length){
+      toast('Absen Pulang ditolak — isi Serah Terima Shift dulu di menu Log Harian sebelum pulang.');
+      closeModal(); return;
+    }
   }
 
   // Cegah dobel-scan tidak sengaja (<2 menit)
@@ -11504,7 +11532,8 @@ async function renderDashboard(){
     (me.role==='spv' && me.department) ? q(db.from('logbook_entries').select('*').eq('department',me.department).neq('urgency','tinggi').is('voided_at',null).is('authorized_at',null).order('created_at',{ascending:false})) : Promise.resolve([])
   ]);
   const pqPickup = pqPickupAll.filter(it=> isMgr() || it.procurement_requests.pickup_assigned_to===me.id || (me.role==='spv' && me.department===it.procurement_requests.department));
-  const pendingLogs = (me.role==='spv' && me.department) ? logs.filter(l=> l.department===me.department && l.needs_authorization && !l.authorized_at) : [];
+  const pendingLogs = (me.role==='spv' && me.department) ? logs.filter(l=> l.department===me.department && l.needs_authorization && !l.authorized_at && !l.rejected_at) : [];
+  const rejectedLogs = me.department ? logs.filter(l=> l.department===me.department && l.rejected_at) : [];
   const hasCost = x => (x.ticket_items[0]?.count || 0) > 0;
   const open = tickets;
   const needUsulan = open.filter(x=> x.status==='usulan' && (isMgr() || (me.role==='spv' && me.department===x.department)));
@@ -11709,6 +11738,13 @@ async function renderDashboard(){
       <div class="small muted">${fdate(l.log_date)} · ${fdt(l.created_at)} · ${ageHtml(l.created_at)}</div></div>`);
     h += `</div>`;
   }
+  if(rejectedLogs.length){
+    h += `<div class="card" style="border-left:4px solid var(--red)"><h3>❌ Log Harian Ditolak, Perlu Diperbaiki</h3>`;
+    rejectedLogs.forEach(l=> h += `<div class="item" style="cursor:pointer" onclick="openSpecificLog('${l.department}','${l.log_date}',${l.shift_id||'null'})">
+      ${deptTag(l.department)} <b>${uname(l.filled_by)}</b> — ditolak ${uname(l.rejected_by)}
+      <div class="small muted">${esc(l.rejection_note)}</div></div>`);
+    h += `</div>`;
+  }
   if(needUsulan.length){
     h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>Usulan Kerusakan Menunggu Otorisasi</h3>`;
     needUsulan.forEach(x=> h += ticketRow(x));
@@ -11877,27 +11913,49 @@ async function loadLogForm(){
   const [items, logs] = await Promise.all([q(itemsQuery), q(logQuery)]);
   const log = logs[0];
   const canFill = isMgr() || (isFieldWorker() && me.department===d);
+  const canAuthorize = isMgr() || (me.role==='spv' && me.department===d);
 
   // Banner serah terima dari shift sebelumnya (jika ada dan belum dikonfirmasi)
   await loadHandoverBanner(d, t, shiftId);
 
   let h = '';
+  if(log && log.rejected_at){
+    h += `<div class="small" style="background:#FEE2E2;color:#B91C1C;padding:10px;border-radius:8px;margin-bottom:8px">
+      ❌ <b>Ditolak oleh ${uname(log.rejected_by)}</b> (${fdt(log.rejected_at)})<br>Alasan: ${esc(log.rejection_note)}<br>
+      <span class="small">Perbaiki isian di bawah lalu simpan ulang.</span></div>`;
+  }
   if(log){
     h += `<p class="small" style="color:var(--green);font-weight:700">✓ Sudah diisi oleh ${uname(log.filled_by)} (${fdt(log.created_at)})</p>`;
     if(log.needs_authorization){
       if(log.authorized_at){
         h += `<p class="small" style="color:var(--green)">✓ Diotorisasi oleh ${uname(log.authorized_by)} (${fdt(log.authorized_at)})</p>`;
-      } else {
+      } else if(!log.rejected_at){
         h += `<p class="small age-amber">⚠ Diisi Staff, menunggu otorisasi SPV/Manager sebelum dianggap resmi.</p>`;
-        if(isMgr() || (me.role==='spv' && me.department===d)){
-          h += `<button class="btn btn-navy btn-sm" style="margin-bottom:8px" onclick="authorizeLog(${log.id})">✓ Otorisasi Log Ini</button>`;
-        }
       }
     }
   }
   if(!canFill){ h += `<p class="muted small">Anda tidak memiliki akses mengisi log departemen ini.</p>`; $('logFormArea').innerHTML=h; return; }
 
-  h += `<label>Checklist Standar</label>`;
+  // Ringkasan isian -- SELALU tampil dulu dalam bentuk teks biasa (bukan
+  // form editable) begitu ada log, supaya siapa pun yang mengotorisasi
+  // (SPV/Manager/Owner) langsung kelihatan jelas apa yang sudah dilaporkan
+  // TANPA harus menerka-nerka dari kotak centang.
+  if(log && items.length){
+    h += `<div class="card" style="background:#F9FAFB;padding:12px;margin:10px 0"><h4 class="small" style="margin-bottom:6px">📋 Ringkasan Isian Terakhir</h4>`;
+    items.forEach(it=>{
+      const chk = log.daily_log_checks.find(c=>c.item_id===it.id)||{};
+      h += `<div class="small" style="padding:4px 0;border-bottom:1px solid var(--line)">
+        ${chk.checked?'✅':'⬜'} ${esc(it.item_text)}${chk.note?` — <i>${esc(chk.note)}</i>`:''}</div>`;
+    });
+    h += `</div>`;
+  }
+  if(log && log.needs_authorization && !log.authorized_at && !log.rejected_at && canAuthorize){
+    h += `<div class="row" style="margin-bottom:10px">
+      <button class="btn btn-navy btn-sm" onclick="authorizeLog(${log.id})">✓ Otorisasi Log Ini</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="rejectLogModal(${log.id})">✕ Tolak</button></div>`;
+  }
+
+  h += `<div class="card" style="margin-top:10px"><label style="margin-top:0">Checklist Harian</label>`;
   if(!items.length) h += `<p class="muted small">Belum ada item checklist. ${isMgr()?'Tambahkan di menu Checklist & Shift.':'Minta Manager menambahkan item.'}</p>`;
   items.forEach(it=>{
     const chk = log ? (log.daily_log_checks.find(c=>c.item_id===it.id)||{}) : {};
@@ -11910,7 +11968,14 @@ async function loadLogForm(){
     h += `<div class="small muted" style="background:#F3F4F6;padding:8px;border-radius:8px;margin-top:6px">
       <b>Catatan lama (arsip sebelum sistem diperbarui, sudah tidak dipakai lagi):</b><br>${esc(log.catatan)}</div>`;
   }
-  h += `<label style="margin-top:12px">📓 Logbook Kejadian</label>
+  h += `<div class="row" style="margin-top:12px">
+    <button class="btn btn-teal" onclick="saveLog(${log?log.id:'null'})">${log?'Simpan Perubahan Checklist':'Simpan Checklist'}</button>
+    <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button>
+    ${canFill?`<button class="btn btn-navy" onclick="handoverModal('${d}','${t}',${shiftId||'null'})">Serah Terima Shift Ini</button>`:''}</div>
+  </div>
+
+  <div class="card" style="margin-top:10px">
+  <label style="margin-top:0">📓 Logbook Kejadian</label>
     <p class="small muted" style="margin-top:-6px">Catat kejadian begitu terjadi.</p>
     <div id="logbookList" style="margin-bottom:8px"><p class="muted small">Memuat...</p></div>
     ${canFill?`<div class="row" style="gap:6px">
@@ -11921,10 +11986,7 @@ async function loadLogForm(){
         <option value="tinggi">Tinggi</option>
       </select>
       <button class="btn btn-teal btn-sm" onclick="addLogbookEntry('${d}','${t}',${shiftId||'null'})">Tambah</button></div>`:''}
-  <div class="row" style="margin-top:12px">
-    <button class="btn btn-teal" onclick="saveLog(${log?log.id:'null'})">${log?'Perbarui Log':'Simpan Log'}</button>
-    <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button>
-    ${canFill?`<button class="btn btn-navy" onclick="handoverModal('${d}','${t}',${shiftId||'null'})">Serah Terima Shift Ini</button>`:''}</div>`;
+  </div>`;
   $('logFormArea').innerHTML = h;
   loadLogbookEntries(d, t);
 }
@@ -11984,7 +12046,8 @@ async function voidLogbookEntry(id, dept, date){
 async function saveLog(existingId){
   const d = $('logDept').value, t = $('logDate').value, shiftId = currentShiftId();
   const isStaffFilling = me.role==='staff';
-  const payload = {log_date:t, department:d, shift_id:shiftId||null, filled_by:me.id};
+  const payload = {log_date:t, department:d, shift_id:shiftId||null, filled_by:me.id,
+    rejected_by:null, rejected_at:null, rejection_note:null}; // resubmit membersihkan status ditolak sebelumnya
   // Kalau yang isi Staff, log ini perlu diotorisasi SPV/Manager dulu sebelum
   // dianggap resmi. Kalau existingId dan yang isi sebelumnya sudah pernah
   // diotorisasi, jangan reset otorisasinya hanya karena ada penyuntingan kecil
@@ -12000,11 +12063,23 @@ async function saveLog(existingId){
     note: document.querySelector(`[data-note="${cb.dataset.item}"]`).value.trim() || null }));
   if(checks.length) await q(db.from('daily_log_checks').insert(checks).select());
   toast(isStaffFilling && !existingId ? 'Log tersimpan, menunggu otorisasi SPV/Manager' : 'Log harian tersimpan');
-  loadLogForm(); loadLogHist();
+  loadLogForm(); loadLogHist(); if(page==='dashboard') renderDashboard();
 }
 async function authorizeLog(logId){
   await q(db.from('daily_logs').update({authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',logId));
-  toast('Log diotorisasi'); loadLogForm();
+  toast('Log diotorisasi'); loadLogForm(); if(page==='dashboard') renderDashboard();
+}
+function rejectLogModal(logId){
+  openModal(`<div class="mhead"><h3>Tolak Log Ini</h3><button onclick="closeModal()">✕</button></div>
+    <label>Alasan Penolakan (wajib)</label><textarea id="rjReason" rows="3" placeholder="apa yang perlu diperbaiki..."></textarea>
+    <button class="btn btn-ghost" style="margin-top:14px;width:100%;color:var(--red)" id="btnRejectLog" onclick="rejectLog(${logId})">Tolak Log</button>`);
+}
+async function rejectLog(logId){
+  const reason = $('rjReason').value.trim();
+  if(!reason){ toast('Alasan wajib diisi'); return; }
+  if(!lockBtn($('btnRejectLog'))) return;
+  await q(db.from('daily_logs').update({rejected_by:me.id, rejected_at:new Date().toISOString(), rejection_note:reason}).eq('id',logId));
+  closeModal(); toast('Log ditolak, menunggu diperbaiki'); loadLogForm(); if(page==='dashboard') renderDashboard();
 }
 // ---------- Serah Terima Antar Shift ----------
 async function loadHandoverBanner(dept, logDate, shiftId){
