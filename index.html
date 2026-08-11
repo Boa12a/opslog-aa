@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-08-4';
+const APP_VERSION = '2026-08-08-5';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10578,6 +10578,7 @@ function buildNav(){
   }
   if(isMgr()) grupOperasional.push(['checklist','Checklist & Shift']);
   if(isMgr() || isSpvOps) grupOperasional.push(['rekap','Rekap']);
+  if(isHrdOrMgr()) grupOperasional.push(['rekapind','Rekap Individu']);
 
   const grupPengadaan = [];
   if(isMgr() || isSpvOps || isAccSpv()) grupPengadaan.push(['pengadaan','Pengadaan']);
@@ -10605,7 +10606,7 @@ function buildNav(){
 function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
 function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
-  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz};
+  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,rekapind:renderRekapIndividu,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz};
   if(!routes[p]) p='dashboard'; // jaga-jaga: halaman tersimpan sudah tidak ada/tidak valid lagi
   page=p;
   try{ localStorage.setItem('lastPage', p); }catch(e){} // aman kalau localStorage diblokir browser
@@ -13543,6 +13544,162 @@ async function loadRekap(){
   }
   h += `</div>`;
   $('rkArea').innerHTML = h;
+}
+
+/* ================= REKAP INDIVIDU (KPI per orang, tren beberapa bulan) ================= */
+// Tahap 1: Per Staff. Tahap 2 (Per Departemen, rollup) menyusul.
+// Metrik Maintenance sengaja belum dimasukkan -- belum ada delegasi personal
+// di modul itu, jadi belum ada data "siapa mengerjakan apa" untuk dihitung.
+function monthsBack(n){
+  const arr = []; const now = new Date();
+  for(let i=n-1;i>=0;i--){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    arr.push(d.toISOString().slice(0,7));
+  }
+  return arr;
+}
+function riColor(pct){ return pct==null?'var(--muted)':(pct>=90?'var(--green)':pct>=70?'var(--amber)':'var(--red)'); }
+async function renderRekapIndividu(){
+  const staffList = await q(db.from('profiles').select('*').in('role',['spv','staff']).eq('active',true).order('name'));
+  window._riStaffList = staffList;
+  let h = `<h2>Rekap Individu</h2>
+    <div class="card"><div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div><label style="margin:0">Mode</label><select id="riMode" onchange="renderRekapIndividuControls()">
+        <option value="staff">Per Staff</option>
+        <option value="dept">Per Departemen</option>
+      </select></div>
+      <div id="riTargetWrap"></div>
+      <div><label style="margin:0">Tren</label><select id="riMonths"><option value="3">3 bulan</option><option value="6" selected>6 bulan</option><option value="12">12 bulan</option></select></div>
+      <button class="btn btn-teal btn-sm" onclick="loadRekapIndividu()">Tampilkan</button>
+    </div></div>
+    <div id="riArea"></div>`;
+  $('main').innerHTML = h;
+  renderRekapIndividuControls();
+}
+function renderRekapIndividuControls(){
+  const mode = $('riMode').value;
+  $('riTargetWrap').innerHTML = mode==='staff'
+    ? `<div><label style="margin:0">Karyawan</label><select id="riTarget">${window._riStaffList.map(p=>`<option value="${p.id}">${esc(p.name)}${p.department?' — '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select></div>`
+    : `<div><label style="margin:0">Departemen</label><select id="riTarget">${Object.entries(DIVS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select></div>`;
+}
+// Hitung 1 set metrik untuk 1 staff, 1 bulan.
+async function computeStaffMetricsForMonth(staffId, month){
+  const from = month+'-01';
+  const daysInMonth = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
+  const to = month+'-'+String(daysInMonth).padStart(2,'0');
+  const isCurrentMonth = month===today().slice(0,7);
+  const effDays = isCurrentMonth ? Number(today().slice(8,10)) : daysInMonth;
+
+  const [attLogs, schedEntries, taskItems, lemburReqs, picTickets] = await Promise.all([
+    q(db.from('attendance_logs').select('*').eq('staff_id',staffId).eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to+'T23:59:59')),
+    q(db.from('work_schedule_entries').select('*').eq('staff_id',staffId).gte('work_date',from).lte('work_date',to)),
+    q(db.from('task_items').select('*').eq('staff_id',staffId).gte('task_date',from).lte('task_date',to)),
+    q(db.from('overtime_requests').select('*').eq('staff_id',staffId).eq('status','disetujui').is('voided_at',null).gte('requested_date',from).lte('requested_date',to)),
+    q(db.from('tickets').select('*').eq('pic_user_id',staffId).eq('status','selesai').gte('closed_at',from).lte('closed_at',to+'T23:59:59'))
+  ]);
+
+  // Kehadiran -- pakai jadwal kerja (work_schedule_entries) sebagai penyebut
+  // kalau ada; kalau belum ada jadwal untuk bulan itu, fallback ke jumlah
+  // hari berjalan (kurang presisi, tapi tetap ada angka daripada kosong).
+  const sessions = pairSessions(attLogs, l=>'k');
+  const daysPresent = new Set(sessions.filter(s=>s.start).map(s=>localDateOf(s.start))).size;
+  const halfDays = sessions.filter(s=>s.start && !s.end).length; // sesi tanpa Absen Pulang
+  const scheduledDays = schedEntries.filter(e=>!e.is_off).length;
+  const denomHadir = scheduledDays || effDays;
+  const pctHadir = denomHadir ? Math.round(Math.min(daysPresent,denomHadir)/denomHadir*100) : null;
+
+  // Tugas -- tugas tertaut Kerusakan/Pengadaan dianggap "tepat waktu" kalau
+  // selesai (tidak dinilai keterlambatannya, sama seperti aturan di halaman Tugas).
+  const tugasTotal = taskItems.length;
+  const tugasSelesai = taskItems.filter(t=>t.status==='selesai').length;
+  const tugasTepatWaktu = taskItems.filter(t=>t.status==='selesai' &&
+    (t.ticket_id || t.procurement_request_id || (t.completed_at && localDateOf(t.completed_at)<=t.task_date))).length;
+
+  // Lembur
+  let totalLemburJam = 0;
+  for(const r of lemburReqs){ totalLemburJam += await computeLemburForRequest(r); }
+
+  // Kerusakan sbg PIC
+  const picAvgHari = picTickets.length
+    ? (picTickets.reduce((s,t)=>s+(new Date(t.closed_at)-new Date(t.created_at))/86400000,0)/picTickets.length)
+    : null;
+
+  return {
+    month, pctHadir, daysPresent, denomHadir, halfDays,
+    tugasTotal, tugasSelesai, tugasTepatWaktu,
+    totalLemburJam: Math.round(totalLemburJam*10)/10,
+    picCount: picTickets.length, picAvgHari: picAvgHari!=null?Math.round(picAvgHari*10)/10:null
+  };
+}
+async function loadRekapIndividu(){
+  const mode = $('riMode').value;
+  const targetId = $('riTarget').value;
+  const nMonths = Number($('riMonths').value);
+  const months = monthsBack(nMonths);
+  window._riMonths = months;
+  $('riArea').innerHTML = '<p class="muted">Menghitung...</p>';
+
+  if(mode==='staff'){
+    const metrics = await Promise.all(months.map(m=>computeStaffMetricsForMonth(targetId, m)));
+    renderRekapIndividuTable(metrics, uname(targetId), false);
+    window._riCurrentStaffId = targetId;
+    loadRekapIndividuDetailStaff(targetId, months[months.length-1]);
+  } else {
+    const deptStaff = window._riStaffList.filter(p=>p.department===targetId);
+    if(!deptStaff.length){ $('riArea').innerHTML = '<p class="muted">Tidak ada staff aktif di departemen ini.</p>'; return; }
+    const perStaffMetrics = await Promise.all(deptStaff.map(p=> Promise.all(months.map(mo=>computeStaffMetricsForMonth(p.id, mo)))));
+    const aggregated = months.map((m,idx)=>{
+      const rows = perStaffMetrics.map(pm=>pm[idx]);
+      const validHadir = rows.filter(r=>r.pctHadir!=null);
+      const pctHadir = validHadir.length ? Math.round(validHadir.reduce((s,r)=>s+r.pctHadir,0)/validHadir.length) : null;
+      const halfDays = rows.reduce((s,r)=>s+r.halfDays,0);
+      const tugasTotal = rows.reduce((s,r)=>s+r.tugasTotal,0);
+      const tugasTepatWaktu = rows.reduce((s,r)=>s+r.tugasTepatWaktu,0);
+      const totalLemburJam = Math.round(rows.reduce((s,r)=>s+r.totalLemburJam,0)*10)/10;
+      const picCount = rows.reduce((s,r)=>s+r.picCount,0);
+      const picHariSum = rows.reduce((s,r)=>s+(r.picAvgHari!=null?r.picAvgHari*r.picCount:0),0);
+      const picAvgHari = picCount ? Math.round(picHariSum/picCount*10)/10 : null;
+      return {month:m, pctHadir, halfDays, tugasTotal, tugasTepatWaktu, totalLemburJam, picCount, picAvgHari};
+    });
+    renderRekapIndividuTable(aggregated, (DIVS[targetId]?DIVS[targetId].label:targetId)+` (${deptStaff.length} staff)`, true);
+  }
+}
+function renderRekapIndividuTable(metrics, label, isDept){
+  let h = `<div class="card"><h3>${esc(label)}</h3>
+    <div style="overflow-x:auto"><table class="respTable" style="min-width:600px">
+    <tr><th>Metrik</th>${metrics.map(m=>`<th>${m.month.slice(5,7)}/${m.month.slice(0,4)}</th>`).join('')}</tr>
+    <tr><td data-label="Metrik">% Hari Hadir</td>${metrics.map(m=>`<td data-label="${m.month}" style="font-weight:800;color:${riColor(m.pctHadir)}">${m.pctHadir!=null?m.pctHadir+'%':'-'}</td>`).join('')}</tr>
+    <tr><td data-label="Metrik">Jumlah "1/2 Hari" (lupa Absen Pulang)</td>${metrics.map(m=>`<td data-label="${m.month}">${m.halfDays}</td>`).join('')}</tr>
+    <tr><td data-label="Metrik">Tugas Selesai Tepat Waktu</td>${metrics.map(m=>`<td data-label="${m.month}">${m.tugasTepatWaktu}/${m.tugasTotal}</td>`).join('')}</tr>
+    <tr><td data-label="Metrik">Total Jam Lembur</td>${metrics.map(m=>`<td data-label="${m.month}">${m.totalLemburJam}</td>`).join('')}</tr>
+    <tr><td data-label="Metrik">Kerusakan sbg PIC (rata² hari selesai)</td>${metrics.map(m=>`<td data-label="${m.month}">${m.picAvgHari!=null?m.picAvgHari+' ('+m.picCount+')':'-'}</td>`).join('')}</tr>
+    </table></div></div>`;
+  $('riArea').innerHTML = h + (isDept ? '' : '<div id="riDetailArea"></div>');
+}
+async function loadRekapIndividuDetailStaff(staffId, month){
+  const area = $('riDetailArea');
+  if(!area) return;
+  const months = window._riMonths || [month];
+  area.innerHTML = `<div class="card"><h3>Riwayat Detail</h3>
+    <select id="riDetailMonth" onchange="loadRekapIndividuDetailStaff(window._riCurrentStaffId, this.value)">
+      ${months.map(m=>`<option value="${m}" ${m===month?'selected':''}>${m.slice(5,7)}/${m.slice(0,4)}</option>`).join('')}
+    </select>
+    <div id="riDetailContent" style="margin-top:10px"><p class="muted small">Memuat...</p></div></div>`;
+  const from = month+'-01';
+  const daysInMonth = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
+  const to = month+'-'+String(daysInMonth).padStart(2,'0');
+  const [taskItems, lemburReqs, picTickets] = await Promise.all([
+    q(db.from('task_items').select('*').eq('staff_id',staffId).gte('task_date',from).lte('task_date',to).order('task_date')),
+    q(db.from('overtime_requests').select('*').eq('staff_id',staffId).eq('status','disetujui').is('voided_at',null).gte('requested_date',from).lte('requested_date',to).order('requested_date')),
+    q(db.from('tickets').select('*').eq('pic_user_id',staffId).gte('created_at',from).lte('created_at',to+'T23:59:59').order('created_at'))
+  ]);
+  let dh = `<h4 class="small" style="margin-top:8px">Tugas (${taskItems.length})</h4>`;
+  dh += taskItems.length ? taskItems.map(t=>`<div class="small" style="padding:4px 0;border-bottom:1px solid var(--line)">${fdate(t.task_date)} — ${esc(t.task_text)} <span class="badge" style="background:${t.status==='selesai'?'#DCFCE7':'#FEF3C7'};color:${t.status==='selesai'?'#166534':'#92400E'}">${t.status==='selesai'?'Selesai':'Belum'}</span></div>`).join('') : '<p class="muted small">Tidak ada.</p>';
+  dh += `<h4 class="small" style="margin-top:10px">Lembur (${lemburReqs.length})</h4>`;
+  dh += lemburReqs.length ? lemburReqs.map(r=>`<div class="small" style="padding:4px 0;border-bottom:1px solid var(--line)">${fdate(r.requested_date)} — ${esc(r.reason)}</div>`).join('') : '<p class="muted small">Tidak ada.</p>';
+  dh += `<h4 class="small" style="margin-top:10px">Kerusakan sbg PIC (${picTickets.length})</h4>`;
+  dh += picTickets.length ? picTickets.map(t=>`<div class="small" style="padding:4px 0;border-bottom:1px solid var(--line);cursor:pointer" onclick="openTicket(${t.id})">#${t.id} ${esc(t.title)} — ${TSTAT[t.status]?TSTAT[t.status].l:t.status}</div>`).join('') : '<p class="muted small">Tidak ada.</p>';
+  $('riDetailContent').innerHTML = dh;
 }
 
 /* ================= HALAMAN HRD (Tahap 1: dasar dulu) ================= */
