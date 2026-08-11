@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-11-6';
+const APP_VERSION = '2026-08-11-7';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11540,7 +11540,8 @@ async function renderDashboard(){
   const needApproval = open.filter(x=> hasCost(x) && ['dilaporkan','ditindaklanjuti'].includes(x.status));
   const needBarang = open.filter(x=> x.status==='disetujui');
   const needJadwal = open.filter(x=> x.status==='barang_tersedia');
-  const needVerif = open.filter(x=> ['diperbaiki','menunggu_verifikasi'].includes(x.status));
+  const needVerif = open.filter(x=> x.status==='menunggu_verifikasi');
+  const needSpvCheck = open.filter(x=> x.status==='diperbaiki' && (isMgr() || (me.role==='spv' && me.department===x.department)));
   const myDivPending = me.department ? open.filter(x=> x.handling_division===me.department) : [];
 
   // Ulang Tahun Bulan Ini — tampil untuk SPV ke atas (bukan Staff/Kios)
@@ -11788,6 +11789,10 @@ async function renderDashboard(){
       <div class="small muted">${ageHtml(it.fulfilled_at||it.created_at)}</div></div>`);
     h += `</div>`;
   }
+  if(needSpvCheck.length){
+    h += `<div class="card" style="border-left:4px solid var(--navy)"><h3>Perlu Dicek &amp; Diotorisasi</h3>`;
+    needSpvCheck.forEach(x=> h += ticketRow(x)); h += `</div>`;
+  }
   if(isMgr()){
     if(needVerif.length){
       h += `<div class="card" style="border-left:4px solid var(--purple)"><h3>Perlu Verifikasi Selesai</h3>`;
@@ -11827,8 +11832,9 @@ function lastDayOfMonth(m){ const days = new Date(Number(m.slice(0,4)), Number(m
 // kosong (tidak ada teks) daripada menampilkan info yang salah.
 function ticketBallHolder(t){
   if(t.status==='selesai') return null;
-  if(t.pic_user_id) return 'Menunggu '+uname(t.pic_user_id);
-  if(t.status==='diperbaiki' || t.status==='menunggu_verifikasi') return 'Menunggu SPV '+(DIVS[t.department]?.label||t.department)+' menutup tiket';
+  if(t.status==='diperbaiki') return 'Menunggu SPV '+(DIVS[t.department]?.label||t.department)+' cek & otorisasi';
+  if(t.status==='menunggu_verifikasi') return 'Menunggu Manager/Owner menutup tiket';
+  if((t.status==='dijadwalkan' || t.status==='barang_tersedia') && t.pic_user_id) return 'Menunggu '+uname(t.pic_user_id);
   if(t.status==='menunggu_keputusan') return 'Menunggu Manager/Owner';
   if(t.status==='usulan' || t.status==='dilaporkan') return 'Menunggu SPV '+(DIVS[t.department]?.label||t.department);
   return null;
@@ -12327,18 +12333,23 @@ async function routeTicket(id, route){
   toast('Jalur ditentukan: '+routeLabel); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 async function decideRouteC(id){
-  const div = $('tcDiv').value, picUser = $('tcPicUser').value, pic = $('tcPic').value.trim(), plan = $('tcPlan').value.trim(), target = $('tcTarget').value;
+  const picUser = $('tcPicUser').value, pic = $('tcPic').value.trim(), plan = $('tcPlan').value.trim(), target = $('tcTarget').value;
   if(!picUser && !pic){ toast('Isi salah satu: PIC Internal atau PIC Eksternal'); return; }
   if(!target){ toast('Target Tanggal wajib diisi'); return; }
   const picLabel = picUser ? uname(picUser) : pic;
+  // Divisi yang menangani otomatis ikut departemen PIC internal (bukan
+  // dipilih manual lagi) -- kalau PIC eksternal (vendor), tetap di departemen pelapor.
+  const [tk] = await q(db.from('tickets').select('department').eq('id',id));
+  const picProfile = picUser ? profilesCache.find(p=>p.id===picUser) : null;
+  const div = picProfile?.department || tk.department;
   await q(db.from('tickets').update({
     target_division: div, pic_followup: picUser?null:pic, pic_user_id: picUser||null, repair_plan: plan||null, target_date: target,
     handling_division: div, handling_division_since: new Date().toISOString(), status:'dijadwalkan'
   }).eq('id', id));
-  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Manager putuskan: divisi '+(DIVS[div]?.label||div)+', PIC '+picLabel+(plan?' — '+plan:''), created_by:me.id}).select());
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Manager putuskan: PIC '+picLabel+(plan?' — '+plan:''), created_by:me.id}).select());
   if(picUser) await assignPicTask(id, picUser, target);
   await createPengadaanFromTicket(id); // otomatis lewati kalau tidak ada rincian biaya
-  toast('Keputusan tersimpan, divisi pelaksana & Accounting (kalau ada biaya) langsung dapat notifikasi');
+  toast('Keputusan tersimpan, PIC & Accounting (kalau ada biaya) langsung dapat notifikasi');
   openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 // Bikin/perbarui 1 task_item yang tertaut ke tiket ini untuk PIC internal --
@@ -12380,13 +12391,6 @@ async function openTicket(id){
   }
   if(t.status==='ditunda') h += `<p class="small age-amber">Ditunda: ${esc(t.hold_reason||'')}</p>`;
   if(t.status==='ditolak') h += `<p class="small" style="color:var(--red)">Ditolak: ${esc(t.hold_reason||'')}</p>`;
-
-  // Pemindahan divisi penanganan (khusus Manager/Owner)
-  if(isMgr() && t.status!=='selesai'){
-    h += `<div style="margin-top:10px"><label>Divisi yang Menangani</label>
-      <div class="row"><select id="thDiv" style="flex:1">${divOptions(t.handling_division)}</select>
-      <button class="btn btn-ghost btn-sm" onclick="changeHandlingDivision(${t.id})">Pindahkan</button></div></div>`;
-  }
 
   // Alur tahapan (indikator visual, hanya untuk tiket berbiaya)
   if(hasCost){
@@ -12464,8 +12468,7 @@ async function openTicket(id){
     }
   } else if(t.status==='menunggu_keputusan'){
     if(isMgr()){
-      h += `<label>Divisi Pelaksana</label><select id="tcDiv">${divOptions(t.department)}</select>
-      <label>PIC Internal (karyawan, otomatis jadi Tugas di Dashboard-nya)</label>
+      h += `<label>PIC Internal (karyawan, otomatis jadi Tugas di Dashboard-nya)</label>
       <select id="tcPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active).map(p=>`<option value="${p.id}">${esc(p.name)}${p.department?' — '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
       <label>Atau PIC Eksternal (vendor/teknisi luar, teks bebas)</label>
       <input id="tcPic" placeholder="nama teknisi / vendor luar">
@@ -12501,27 +12504,35 @@ async function openTicket(id){
       h += `<p class="small muted">Posisi tiket ada di Accounting untuk proses pengadaan. Accounting akan menandai jika barang sudah tersedia.</p>`;
     }
   } else if(t.status==='barang_tersedia'){
-    // Jalur B: barang kembali ke departemen pelapor sendiri, SPV pelapor
-    // yang lanjutkan (bukan Manager) — PIC/rencana sudah bisa diisi sendiri
-    // di bagian atas (karena route!=='c').
-    const canMarkDone = isMgr() || (me.role==='spv' && me.department===t.department);
+    // PIC yang ditugaskan (kalau ada) yang menandai selesai dari sisi
+    // eksekusi -- kalau tidak ada PIC (dikerjakan sendiri oleh SPV), SPV
+    // pelapor yang menandai langsung.
+    const canMarkDone = t.pic_user_id ? t.pic_user_id===me.id : (isMgr() || (me.role==='spv' && me.department===t.department));
     if(canMarkDone){
-      h += setS('diperbaiki','✓ Tandai Sudah Diperbaiki','btn-teal');
+      h += setS('diperbaiki','✓ Sudah Diperbaiki','btn-teal');
     } else {
-      h += `<p class="small muted">Barang sudah tersedia. Menunggu SPV departemen pelapor menyelesaikan perbaikan.</p>`;
+      h += `<p class="small muted">Barang sudah tersedia. Menunggu ${t.pic_user_id?uname(t.pic_user_id):'SPV departemen pelapor'} menyelesaikan perbaikan.</p>`;
     }
   } else if(t.status==='dijadwalkan'){
-    // Berlaku untuk Jalur C (setelah Manager putuskan) — yang menandai
-    // selesai TETAP SPV departemen PELAPOR, bukan divisi pelaksana.
-    const canMarkDone = isMgr() || (me.role==='spv' && me.department===t.department);
+    // Sama seperti di atas -- PIC yang menandai selesai dari sisi eksekusi.
+    const canMarkDone = t.pic_user_id ? t.pic_user_id===me.id : (isMgr() || (me.role==='spv' && me.department===t.department));
     if(canMarkDone){
-      h += setS('diperbaiki','✓ Tandai Sudah Diperbaiki','btn-teal');
+      h += setS('diperbaiki','✓ Sudah Diperbaiki','btn-teal');
     } else {
-      h += `<p class="small muted">Menunggu SPV departemen pelapor menandai perbaikan selesai.</p>`;
+      h += `<p class="small muted">Menunggu ${t.pic_user_id?uname(t.pic_user_id):'SPV departemen pelapor'} menandai perbaikan selesai.</p>`;
     }
-  } else if(['diperbaiki','menunggu_verifikasi'].includes(t.status)){
+  } else if(t.status==='diperbaiki'){
+    // PIC sudah selesai dari sisi eksekusi -- SEKARANG giliran SPV departemen
+    // PELAPOR mengecek & mengotorisasi, baru masuk antrian Manager.
+    const canVerifySpv = isMgr() || (me.role==='spv' && me.department===t.department);
+    if(canVerifySpv){
+      h += `<button class="btn btn-navy btn-sm" onclick="spvVerifyRepair(${t.id})">✓ Cek &amp; Otorisasi</button>`;
+    } else {
+      h += `<p class="small muted">Perbaikan ditandai selesai oleh ${t.pic_user_id?uname(t.pic_user_id):'-'}. Menunggu SPV departemen pelapor mengecek &amp; mengotorisasi.</p>`;
+    }
+  } else if(t.status==='menunggu_verifikasi'){
     if(isMgr()) h += setS('selesai','✓ Verifikasi &amp; Selesaikan','btn-teal');
-    else h += `<p class="small muted">Menunggu verifikasi Manager/Owner.</p>`;
+    else h += `<p class="small muted">Sudah dicek &amp; diotorisasi SPV. Menunggu penutupan oleh Manager/Owner.</p>`;
   } else if(['butuh_biaya','dibiayai'].includes(t.status) && isMgr()){
     // Kompatibilitas data lama sebelum alur baru
     h += `<button class="btn btn-ghost btn-sm" onclick="setStatus(${t.id}, '${t.status==='butuh_biaya'?'disetujui':'barang_tersedia'}')">Pindahkan ke Alur Baru</button>`;
@@ -12561,7 +12572,8 @@ async function createPengadaanFromTicket(ticketId){
   if(!t.ticket_items.length) return; // tidak ada rincian biaya, tidak perlu pengadaan
   const r = await q(db.from('procurement_requests').insert({
     department: t.department, requested_by: t.reported_by,
-    notes: 'Otomatis dari Tiket Kerusakan #'+t.id+': '+t.title, ticket_id: t.id
+    notes: 'Otomatis dari Tiket Kerusakan #'+t.id+': '+t.title, ticket_id: t.id,
+    pickup_assigned_to: t.pic_user_id || null // PIC tiket otomatis jadi penerima barang
   }).select());
   const reqId = r[0].id;
   const items = t.ticket_items.map(it=>({
@@ -12609,10 +12621,18 @@ async function deleteTicket(id){
 async function saveTicketPlan(id){
   const picUser = $('tPicUser').value;
   const pic = $('tPic').value.trim();
-  await q(db.from('tickets').update({
+  const upd = {
     pic_followup: picUser?null:pic, pic_user_id: picUser||null,
     repair_plan:$('tPlan').value.trim(), target_date:$('tTarget').value||null
-  }).eq('id',id));
+  };
+  // Divisi yang menangani otomatis ikut departemen PIC internal -- supaya
+  // PIC benar-benar bisa lihat & tulis riwayat tiketnya sendiri (RLS baca
+  // tiket dicek dari handling_division, bukan pic_user_id).
+  if(picUser){
+    const picProfile = profilesCache.find(p=>p.id===picUser);
+    if(picProfile?.department){ upd.handling_division = picProfile.department; upd.handling_division_since = new Date().toISOString(); }
+  }
+  await q(db.from('tickets').update(upd).eq('id',id));
   if(picUser) await assignPicTask(id, picUser, $('tTarget').value||null);
   toast('Rencana tersimpan'); openTicket(id);
 }
@@ -12625,6 +12645,11 @@ async function delItem(itemId,tid){ await q(db.from('ticket_items').delete().eq(
 async function setActual(itemId,val,tid){
   await q(db.from('ticket_items').update({actual_price:val===''?null:Number(val)}).eq('id',itemId));
   toast('Realisasi tersimpan');
+}
+async function spvVerifyRepair(id){
+  await q(db.from('tickets').update({status:'menunggu_verifikasi', spv_verified_by:me.id, spv_verified_at:new Date().toISOString()}).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id, note:'Dicek & diotorisasi SPV, diteruskan ke Manager untuk penutupan', created_by:me.id}).select());
+  toast('Diotorisasi, diteruskan ke Manager'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
 async function setStatus(id,s){
   const upd = {status:s};
