@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-08-8';
+const APP_VERSION = '2026-08-11-1';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11676,9 +11676,9 @@ async function renderDashboard(){
   // Antrian sesuai role
   if(pendingLogs.length){
     h += `<div class="card" style="border-left:4px solid var(--gold)"><h3>Log Harian Menunggu Otorisasi Anda</h3>`;
-    pendingLogs.forEach(l=> h += `<div class="item" style="cursor:pointer" onclick="go('log')">
+    pendingLogs.forEach(l=> h += `<div class="item" style="cursor:pointer" onclick="openSpecificLog('${l.department}','${l.log_date}',${l.shift_id||'null'})">
       ${deptTag(l.department)} <b>${uname(l.filled_by)}</b>
-      <div class="small muted">${fdt(l.created_at)} · ${ageHtml(l.created_at)}</div></div>`);
+      <div class="small muted">${fdate(l.log_date)} · ${fdt(l.created_at)} · ${ageHtml(l.created_at)}</div></div>`);
     h += `</div>`;
   }
   if(needUsulan.length){
@@ -11784,6 +11784,10 @@ function ticketRow(x){
 }
 
 /* ================= LOG HARIAN ================= */
+function openSpecificLog(dept, date, shiftId){
+  window._pendingLogTarget = {dept, date, shiftId};
+  go('log');
+}
 async function renderLog(){
   let h = `<h2>Log Harian</h2>
   <div class="card"><div class="row">
@@ -11803,6 +11807,14 @@ async function renderLog(){
       <button class="btn btn-teal btn-sm" onclick="exportLogbookExcel()">⬇ Export</button>
     </div></div>`:''}`;
   $('main').innerHTML = h;
+  // Kalau datang dari notifikasi "Log Harian Menunggu Otorisasi" di Dashboard,
+  // langsung arahkan ke log spesifik itu (dept+tanggal), bukan default hari
+  // ini -- sebelumnya SPV klik notifikasi tapi mendarat di halaman kosong
+  // (tanggal/shift default beda dari log yang sebenarnya perlu diotorisasi).
+  if(window._pendingLogTarget){
+    $('logDept').value = window._pendingLogTarget.dept;
+    $('logDate').value = window._pendingLogTarget.date;
+  }
   loadLogShifts();
   loadLogHist();
 }
@@ -11815,9 +11827,13 @@ async function loadLogShifts(){
   if(shifts.length){
     $('logShiftArea').innerHTML = `<label>Shift</label><select id="logShift" onchange="loadLogForm()">
       ${shifts.map(s=>`<option value="${s.id}">${esc(s.shift_name)}${s.start_time?` (${s.start_time.slice(0,5)}-${s.end_time?s.end_time.slice(0,5):'?'})`:''}</option>`).join('')}</select>`;
+    if(window._pendingLogTarget && window._pendingLogTarget.shiftId){
+      const sel = $('logShift'); if(sel) sel.value = window._pendingLogTarget.shiftId;
+    }
   } else {
     $('logShiftArea').innerHTML = '';
   }
+  window._pendingLogTarget = null; // sekali pakai, jangan ikut ke navigasi berikutnya
   loadLogForm();
 }
 function currentShiftId(){
