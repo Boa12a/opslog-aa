@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-11-1';
+const APP_VERSION = '2026-08-11-2';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11486,7 +11486,7 @@ async function renderDashboard(){
   const [logs, tickets, dueMtc, pendDisp,
          pqAuth, pqAcct, pqPickupAll,
          allBirths, allAnnouncements, activeQuizzes, quizWinners,
-         myLembur, pendingLembur] = await Promise.all([
+         myLembur, pendingLembur, urgentLogbook, pendingLogbookAll] = await Promise.all([
     q(db.from('daily_logs').select('*').eq('log_date',t)),
     q(db.from('tickets').select('*, ticket_items(count)').neq('status','selesai').order('created_at')),
     q(db.from('maintenance_schedules').select('*').eq('active',true).lte('next_due', addDays(t,7))),
@@ -11499,7 +11499,9 @@ async function renderDashboard(){
     q(db.from('quizzes').select('*').eq('published',true).order('created_at',{ascending:false})),
     q(db.from('quiz_winners').select('*')),
     q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').is('voided_at',null).gte('requested_date', t).order('requested_date')),
-    isMgr() ? q(db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date')) : Promise.resolve([])
+    isMgr() ? q(db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date')) : Promise.resolve([]),
+    isMgr() ? q(db.from('logbook_entries').select('*').eq('urgency','tinggi').is('voided_at',null).gte('entry_date',addDays(t,-14)).order('created_at',{ascending:false})) : Promise.resolve([]),
+    (me.role==='spv' && me.department) ? q(db.from('logbook_entries').select('*').eq('department',me.department).neq('urgency','tinggi').is('voided_at',null).is('authorized_at',null).order('created_at',{ascending:false})) : Promise.resolve([])
   ]);
   const pqPickup = pqPickupAll.filter(it=> isMgr() || it.procurement_requests.pickup_assigned_to===me.id || (me.role==='spv' && me.department===it.procurement_requests.department));
   const pendingLogs = (me.role==='spv' && me.department) ? logs.filter(l=> l.department===me.department && l.needs_authorization && !l.authorized_at) : [];
@@ -11558,6 +11560,32 @@ async function renderDashboard(){
     myAnnouncements.forEach(a=>{
       h += `<div style="padding:6px 0"><b>📢 ${esc(a.message)}</b>
         <div class="small muted">${esc(assignerLabel(a.created_by)||uname(a.created_by))} · ${fdt(a.created_at)}</div></div>`;
+    });
+    h += `</div>`;
+  }
+
+  // Logbook Urgensi Tinggi -- langsung terbaca Manager/Owner, tidak perlu
+  // menunggu otorisasi SPV (beda dari Rendah/Sedang di bawah).
+  if(urgentLogbook.length){
+    h += `<div class="card" style="border-left:4px solid var(--red)"><h3>🔴 Logbook Urgensi Tinggi</h3>`;
+    urgentLogbook.forEach(e=>{
+      h += `<div class="item" style="cursor:pointer" onclick="openSpecificLog('${e.department}','${e.entry_date}',${e.shift_id||'null'})">
+        ${deptTag(e.department)} <b>${esc(uname(e.created_by))}</b>
+        <div class="small">${esc(e.message)}</div>
+        <div class="small muted">${fdate(e.entry_date)} · ${fdt(e.created_at)}</div></div>`;
+    });
+    h += `</div>`;
+  }
+  // Logbook Menunggu Otorisasi -- khusus SPV, urgensi Rendah/Sedang di
+  // departemennya yang belum diotorisasi.
+  if(pendingLogbookAll.length){
+    h += `<div class="card" style="border-left:4px solid var(--amber)"><h3>Logbook Menunggu Otorisasi Anda</h3>`;
+    pendingLogbookAll.forEach(e=>{
+      const urg = LB_URG[e.urgency]||LB_URG.rendah;
+      h += `<div class="item" style="cursor:pointer" onclick="openSpecificLog('${e.department}','${e.entry_date}',${e.shift_id||'null'})">
+        <span class="badge" style="background:${urg.c};color:${urg.t}">${urg.l}</span> <b>${esc(uname(e.created_by))}</b>
+        <div class="small">${esc(e.message)}</div>
+        <div class="small muted">${fdate(e.entry_date)} · ${ageHtml(e.created_at)}</div></div>`;
     });
     h += `</div>`;
   }
@@ -11661,7 +11689,7 @@ async function renderDashboard(){
     const pending = l && l.needs_authorization && !l.authorized_at;
     h += `<div class="deptTile" style="background:${DEPTS[d].color};opacity:${l?(pending?.7:1):.45}" onclick="go('log')">
       <div class="d">${DEPTS[d].label}</div>
-      <div class="s">${l ? (pending?'⏳ Menunggu Otorisasi':KONDISI[l.kondisi]+' · '+uname(l.filled_by)) : 'Belum diisi'}</div>
+      <div class="s">${l ? (pending?'⏳ Menunggu Otorisasi':'✓ '+uname(l.filled_by)) : 'Belum diisi'}</div>
       <div class="mark">${l?(pending?'⏳':'✓'):'—'}</div></div>`;
   }
   h += `</div></div>`;
@@ -11878,8 +11906,6 @@ async function loadLogForm(){
       <div style="flex:1">${esc(it.item_text)}
         <input type="text" placeholder="catatan (opsional)" data-note="${it.id}" value="${esc(chk.note||'')}" style="margin-top:3px;padding:5px 8px;font-size:12px"></div></div>`;
   });
-  h += `<label>Kondisi Umum</label><select id="logKondisi">
-    ${Object.entries(KONDISI).map(([k,v])=>`<option value="${k}" ${log&&log.kondisi===k?'selected':''}>${v}</option>`).join('')}</select>`;
   if(log && log.catatan){
     h += `<div class="small muted" style="background:#F3F4F6;padding:8px;border-radius:8px;margin-top:6px">
       <b>Catatan lama (arsip sebelum sistem diperbarui, sudah tidak dipakai lagi):</b><br>${esc(log.catatan)}</div>`;
@@ -11887,8 +11913,14 @@ async function loadLogForm(){
   h += `<label style="margin-top:12px">📓 Logbook Kejadian</label>
     <p class="small muted" style="margin-top:-6px">Catat kejadian apa pun begitu terjadi. Tidak bisa diedit/dihapus setelah dikirim -- kalau salah catat, tambahkan entri baru sebagai koreksi.</p>
     <div id="logbookList" style="margin-bottom:8px"><p class="muted small">Memuat...</p></div>
-    ${canFill?`<div class="row"><input id="lbMsg" placeholder="tulis kejadian..." style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addLogbookEntry('${d}','${t}',${shiftId||'null'});}">
-    <button class="btn btn-teal btn-sm" onclick="addLogbookEntry('${d}','${t}',${shiftId||'null'})">Tambah</button></div>`:''}
+    ${canFill?`<div class="row" style="gap:6px">
+      <input id="lbMsg" placeholder="tulis kejadian..." style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addLogbookEntry('${d}','${t}',${shiftId||'null'});}">
+      <select id="lbUrg" style="width:120px">
+        <option value="rendah">Rendah</option>
+        <option value="sedang">Sedang</option>
+        <option value="tinggi">Tinggi</option>
+      </select>
+      <button class="btn btn-teal btn-sm" onclick="addLogbookEntry('${d}','${t}',${shiftId||'null'})">Tambah</button></div>`:''}
   <div class="row" style="margin-top:12px">
     <button class="btn btn-teal" onclick="saveLog(${log?log.id:'null'})">${log?'Perbarui Log':'Simpan Log'}</button>
     <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button>
@@ -11896,21 +11928,46 @@ async function loadLogForm(){
   $('logFormArea').innerHTML = h;
   loadLogbookEntries(d, t);
 }
+const LB_URG = {rendah:{l:'Rendah',c:'#E5E7EB',t:'#374151'}, sedang:{l:'Sedang',c:'#FEF3C7',t:'#92400E'}, tinggi:{l:'🔴 Tinggi',c:'#FEE2E2',t:'#B91C1C'}};
 async function loadLogbookEntries(dept, date){
   const list = await q(db.from('logbook_entries').select('*').eq('department',dept).eq('entry_date',date).order('created_at',{ascending:true}));
   const el = $('logbookList'); if(!el) return;
-  el.innerHTML = list.length ? list.map(e=>`
-    <div class="small" style="padding:6px 0;border-bottom:1px solid var(--line)${e.voided_at?';opacity:.5' : ''}">
-      <b>${fdt(e.created_at)}</b> — ${esc(uname(e.created_by))}<br>${e.voided_at?'<s>'+esc(e.message)+'</s>':esc(e.message)}
+  const canReview = isMgr() || (me.role==='spv' && me.department===dept);
+  el.innerHTML = list.length ? list.map(e=>{
+    const urg = LB_URG[e.urgency]||LB_URG.rendah;
+    const needsAuth = e.urgency!=='tinggi' && !e.authorized_at;
+    return `<div class="small" style="padding:6px 0;border-bottom:1px solid var(--line)${e.voided_at?';opacity:.5':''}">
+      <div class="row" style="justify-content:space-between">
+        <span><b>${fdt(e.created_at)}</b> — ${esc(uname(e.created_by))}</span>
+        <span class="badge" style="background:${urg.c};color:${urg.t}">${urg.l}</span></div>
+      ${e.voided_at?'<s>'+esc(e.message)+'</s>':esc(e.message)}
       ${e.voided_at?`<br><span style="color:var(--red)">Dibatalkan oleh ${esc(uname(e.voided_by))}: ${esc(e.void_reason)}</span>`:''}
-      ${(!e.voided_at && me.role==='owner')?`<br><button class="btn-sm btn-ghost" style="margin-top:2px" onclick="voidLogbookEntry(${e.id},'${dept}','${date}')">Void</button>`:''}
-    </div>`).join('') : '<p class="muted small">Belum ada kejadian tercatat.</p>';
+      ${(!e.voided_at && needsAuth)?'<br><span style="color:#92400E">⏳ Menunggu otorisasi SPV/Manager</span>':''}
+      ${(!e.voided_at && e.authorized_at)?`<br><span style="color:var(--green)">✓ Diotorisasi ${esc(uname(e.authorized_by))}</span>`:''}
+      ${(!e.voided_at && canReview)?`<div class="row" style="margin-top:4px;gap:6px">
+        ${needsAuth?`<button class="btn-sm btn-teal" onclick="authorizeLogbookEntry(${e.id},'${dept}','${date}')">✓ Otorisasi</button>`:''}
+        <select style="padding:4px 6px;font-size:12px" onchange="changeLogbookUrgency(${e.id},this.value,'${dept}','${date}')">
+          ${Object.entries(LB_URG).map(([k,v])=>`<option value="${k}" ${e.urgency===k?'selected':''}>Ubah ke: ${v.l}</option>`).join('')}
+        </select>
+        ${me.role==='owner'?`<button class="btn-sm btn-ghost" onclick="voidLogbookEntry(${e.id},'${dept}','${date}')">Void</button>`:''}</div>`:''}
+    </div>`;
+  }).join('') : '<p class="muted small">Belum ada kejadian tercatat.</p>';
 }
 async function addLogbookEntry(dept, date, shiftId){
   const el = $('lbMsg'); const msg = el.value.trim();
   if(!msg){ toast('Isi kejadian dulu'); return; }
-  await q(db.from('logbook_entries').insert({department:dept, shift_id:shiftId, entry_date:date, message:msg, created_by:me.id}).select());
+  const urgency = $('lbUrg').value;
+  await q(db.from('logbook_entries').insert({department:dept, shift_id:shiftId, entry_date:date, message:msg, urgency, created_by:me.id}).select());
   el.value=''; loadLogbookEntries(dept, date);
+  if(page==='dashboard') renderDashboard();
+}
+async function authorizeLogbookEntry(id, dept, date){
+  await q(db.from('logbook_entries').update({authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',id));
+  toast('Diotorisasi'); loadLogbookEntries(dept, date);
+}
+async function changeLogbookUrgency(id, urgency, dept, date){
+  await q(db.from('logbook_entries').update({urgency}).eq('id',id));
+  toast('Urgensi diubah'); loadLogbookEntries(dept, date); if(page==='dashboard') renderDashboard();
 }
 async function voidLogbookEntry(id, dept, date){
   const reason = prompt('Alasan pembatalan (WAJIB diisi):');
@@ -11921,7 +11978,7 @@ async function voidLogbookEntry(id, dept, date){
 async function saveLog(existingId){
   const d = $('logDept').value, t = $('logDate').value, shiftId = currentShiftId();
   const isStaffFilling = me.role==='staff';
-  const payload = {log_date:t, department:d, shift_id:shiftId||null, kondisi:$('logKondisi').value, filled_by:me.id};
+  const payload = {log_date:t, department:d, shift_id:shiftId||null, filled_by:me.id};
   // Kalau yang isi Staff, log ini perlu diotorisasi SPV/Manager dulu sebelum
   // dianggap resmi. Kalau existingId dan yang isi sebelumnya sudah pernah
   // diotorisasi, jangan reset otorisasinya hanya karena ada penyuntingan kecil
@@ -11983,7 +12040,7 @@ async function loadLogHist(){
   let h = '<table class="respTable"><tr><th>Tanggal</th><th>Dept</th><th>Shift</th><th>Kondisi</th><th>Pengisi</th></tr>';
   mine.forEach(l=> h += `<tr><td data-label="Tanggal">${fdate(l.log_date)}</td><td data-label="Dept">${deptTag(l.department)}</td>
     <td data-label="Shift">${l.shift_id?(window._logShifts?.find(s=>s.id===l.shift_id)?.shift_name||'#'+l.shift_id):'-'}</td>
-    <td data-label="Kondisi">${KONDISI[l.kondisi]}</td><td data-label="Pengisi">${uname(l.filled_by)}</td></tr>`);
+    <td data-label="Kondisi">${l.kondisi?KONDISI[l.kondisi]:'-'}</td><td data-label="Pengisi">${uname(l.filled_by)}</td></tr>`);
   $('logHist').innerHTML = h + '</table>' + (mine.length?'':'<p class="muted small">Belum ada log.</p>');
 }
 /* ================= EXPORT EXCEL (Manager/Owner) ================= */
@@ -12047,7 +12104,7 @@ async function exportLogsExcel(){
   const list = await q(db.from('daily_logs').select('*').order('log_date'));
   const rows = list.map(l=>({
     Tanggal:l.log_date, Departemen: DEPTS[l.department]?DEPTS[l.department].label:l.department,
-    Kondisi: KONDISI[l.kondisi], Catatan:l.catatan||'', Pengisi: uname(l.filled_by)
+    Kondisi: l.kondisi?KONDISI[l.kondisi]:'-', Catatan:l.catatan||'', Pengisi: uname(l.filled_by)
   }));
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
@@ -12163,6 +12220,9 @@ async function createTicket(){
     ? 'Usulan dibuat oleh staff, menunggu otorisasi SPV'
     : 'Tiket dibuat, ditujukan ke divisi '+DIVS[$('ntHandle').value].label;
   await q(db.from('ticket_updates').insert({ticket_id:r[0].id, note, created_by:me.id}).select());
+  // Otomatis tercatat di Logbook departemen pelapor -- tidak perlu diketik manual.
+  await q(db.from('logbook_entries').insert({department:$('ntDept').value, entry_date:today(),
+    message:'Kerusakan dilaporkan: '+title, urgency:$('ntUrg').value, created_by:me.id}).select());
   closeModal(); toast(me.role==='staff' ? 'Usulan terkirim, menunggu otorisasi SPV' : 'Laporan kerusakan tersimpan');
   if(page==='tiket') loadTickets(); else go('tiket');
 }
@@ -12486,6 +12546,11 @@ async function setStatus(id,s){
   // PIC internal tiket ini ikut ditutup -- tidak perlu tutup manual 2 tempat.
   if(s==='diperbaiki' || s==='selesai'){
     await q(db.from('task_items').update({status:'selesai', completed_at:new Date().toISOString()}).eq('ticket_id',id).eq('status','belum'));
+  }
+  if(s==='selesai'){
+    const [t] = await q(db.from('tickets').select('title,department,urgency').eq('id',id));
+    await q(db.from('logbook_entries').insert({department:t.department, entry_date:today(),
+      message:'Kerusakan selesai: '+t.title, urgency:t.urgency, created_by:me.id}).select());
   }
   toast('Status diperbarui'); openTicket(id);
   if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
