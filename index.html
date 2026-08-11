@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-08-6';
+const APP_VERSION = '2026-08-08-8';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11795,7 +11795,13 @@ async function renderLog(){
   <div id="logFormArea" style="margin-top:8px"></div></div>
   <div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat 14 Hari Terakhir</h3>
     ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="exportLogsExcel()">⬇ Excel (semua riwayat)</button>`:''}</div>
-    <div id="logHist"></div></div>`;
+    <div id="logHist"></div></div>
+  ${isMgr()?`<div class="card"><h3>Export Logbook Kejadian</h3>
+    <div class="row" style="flex-wrap:wrap;gap:8px">
+      <select id="lbExDept">${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+      <input type="date" id="lbExFrom"><input type="date" id="lbExTo" value="${today()}">
+      <button class="btn btn-teal btn-sm" onclick="exportLogbookExcel()">⬇ Export</button>
+    </div></div>`:''}`;
   $('main').innerHTML = h;
   loadLogShifts();
   loadLogHist();
@@ -11857,18 +11863,49 @@ async function loadLogForm(){
         <input type="text" placeholder="catatan (opsional)" data-note="${it.id}" value="${esc(chk.note||'')}" style="margin-top:3px;padding:5px 8px;font-size:12px"></div></div>`;
   });
   h += `<label>Kondisi Umum</label><select id="logKondisi">
-    ${Object.entries(KONDISI).map(([k,v])=>`<option value="${k}" ${log&&log.kondisi===k?'selected':''}>${v}</option>`).join('')}</select>
-  <label>Catatan Kejadian</label><textarea id="logCatatan" rows="3" placeholder="Kejadian penting hari ini...">${esc(log?log.catatan:'')}</textarea>
+    ${Object.entries(KONDISI).map(([k,v])=>`<option value="${k}" ${log&&log.kondisi===k?'selected':''}>${v}</option>`).join('')}</select>`;
+  if(log && log.catatan){
+    h += `<div class="small muted" style="background:#F3F4F6;padding:8px;border-radius:8px;margin-top:6px">
+      <b>Catatan lama (arsip sebelum sistem diperbarui, sudah tidak dipakai lagi):</b><br>${esc(log.catatan)}</div>`;
+  }
+  h += `<label style="margin-top:12px">📓 Logbook Kejadian</label>
+    <p class="small muted" style="margin-top:-6px">Catat kejadian apa pun begitu terjadi. Tidak bisa diedit/dihapus setelah dikirim -- kalau salah catat, tambahkan entri baru sebagai koreksi.</p>
+    <div id="logbookList" style="margin-bottom:8px"><p class="muted small">Memuat...</p></div>
+    ${canFill?`<div class="row"><input id="lbMsg" placeholder="tulis kejadian..." style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addLogbookEntry('${d}','${t}',${shiftId||'null'});}">
+    <button class="btn btn-teal btn-sm" onclick="addLogbookEntry('${d}','${t}',${shiftId||'null'})">Tambah</button></div>`:''}
   <div class="row" style="margin-top:12px">
     <button class="btn btn-teal" onclick="saveLog(${log?log.id:'null'})">${log?'Perbarui Log':'Simpan Log'}</button>
     <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button>
     ${canFill?`<button class="btn btn-navy" onclick="handoverModal('${d}','${t}',${shiftId||'null'})">Serah Terima Shift Ini</button>`:''}</div>`;
   $('logFormArea').innerHTML = h;
+  loadLogbookEntries(d, t);
+}
+async function loadLogbookEntries(dept, date){
+  const list = await q(db.from('logbook_entries').select('*').eq('department',dept).eq('entry_date',date).order('created_at',{ascending:true}));
+  const el = $('logbookList'); if(!el) return;
+  el.innerHTML = list.length ? list.map(e=>`
+    <div class="small" style="padding:6px 0;border-bottom:1px solid var(--line)${e.voided_at?';opacity:.5' : ''}">
+      <b>${fdt(e.created_at)}</b> — ${esc(uname(e.created_by))}<br>${e.voided_at?'<s>'+esc(e.message)+'</s>':esc(e.message)}
+      ${e.voided_at?`<br><span style="color:var(--red)">Dibatalkan oleh ${esc(uname(e.voided_by))}: ${esc(e.void_reason)}</span>`:''}
+      ${(!e.voided_at && me.role==='owner')?`<br><button class="btn-sm btn-ghost" style="margin-top:2px" onclick="voidLogbookEntry(${e.id},'${dept}','${date}')">Void</button>`:''}
+    </div>`).join('') : '<p class="muted small">Belum ada kejadian tercatat.</p>';
+}
+async function addLogbookEntry(dept, date, shiftId){
+  const el = $('lbMsg'); const msg = el.value.trim();
+  if(!msg){ toast('Isi kejadian dulu'); return; }
+  await q(db.from('logbook_entries').insert({department:dept, shift_id:shiftId, entry_date:date, message:msg, created_by:me.id}).select());
+  el.value=''; loadLogbookEntries(dept, date);
+}
+async function voidLogbookEntry(id, dept, date){
+  const reason = prompt('Alasan pembatalan (WAJIB diisi):');
+  if(!reason || !reason.trim()){ toast('Void dibatalkan — alasan wajib diisi'); return; }
+  await q(db.from('logbook_entries').update({voided_by:me.id, voided_at:new Date().toISOString(), void_reason:reason.trim()}).eq('id',id));
+  toast('Entri dibatalkan'); loadLogbookEntries(dept, date);
 }
 async function saveLog(existingId){
   const d = $('logDept').value, t = $('logDate').value, shiftId = currentShiftId();
   const isStaffFilling = me.role==='staff';
-  const payload = {log_date:t, department:d, shift_id:shiftId||null, kondisi:$('logKondisi').value, catatan:$('logCatatan').value.trim(), filled_by:me.id};
+  const payload = {log_date:t, department:d, shift_id:shiftId||null, kondisi:$('logKondisi').value, filled_by:me.id};
   // Kalau yang isi Staff, log ini perlu diotorisasi SPV/Manager dulu sebelum
   // dianggap resmi. Kalau existingId dan yang isi sebelumnya sudah pernah
   // diotorisasi, jangan reset otorisasinya hanya karena ada penyuntingan kecil
@@ -12000,6 +12037,22 @@ async function exportLogsExcel(){
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Log Harian');
   XLSX.writeFile(wb, `Riwayat_Log_Harian_${today()}.xlsx`);
+}
+async function exportLogbookExcel(){
+  const dept = $('lbExDept').value, from = $('lbExFrom').value, to = $('lbExTo').value;
+  let query = db.from('logbook_entries').select('*').eq('department',dept).order('created_at');
+  if(from) query = query.gte('entry_date', from);
+  if(to) query = query.lte('entry_date', to);
+  const list = await q(query);
+  const rows = list.map(e=>({
+    Tanggal: e.entry_date, Jam: fdt(e.created_at), Dicatat_Oleh: uname(e.created_by), Kejadian: e.message,
+    Status: e.voided_at ? 'Dibatalkan' : 'Aktif',
+    Dibatalkan_Oleh: e.voided_by?uname(e.voided_by):'', Alasan_Batal: e.void_reason||''
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Logbook');
+  XLSX.writeFile(wb, `Logbook_${DEPTS[dept]?DEPTS[dept].label:dept}_${from||'awal'}_${to||today()}.xlsx`);
 }
 async function exportLemburExcel(){
   const list = await q(db.from('overtime_requests').select('*').order('requested_date'));
@@ -12892,6 +12945,11 @@ async function assignMtcModal(id, dept){
 async function assignMtc(id){
   const staffId = $('amStaff').value;
   const [sched] = await q(db.from('maintenance_schedules').select('task_name,department').eq('id',id));
+  // Tutup dulu Tugas lama yang masih menggantung (kalau ini penugasan ULANG
+  // ke orang lain) -- supaya tidak nyangkut "Belum" selamanya di Dashboard
+  // orang yang lama.
+  await q(db.from('task_items').update({status:'selesai', completion_note:'(Ditutup otomatis — penugasan Maintenance dialihkan ke orang lain)', completed_at:new Date().toISOString()})
+    .eq('maintenance_schedule_id',id).eq('status','belum'));
   await q(db.from('maintenance_schedules').update({assigned_to:staffId, assigned_by:me.id, assigned_at:new Date().toISOString(),
     pending_completion_by:null, pending_completion_at:null, pending_report:null}).eq('id',id));
   await q(db.from('task_items').insert({staff_id:staffId, department:sched.department, task_text:'Maintenance: '+sched.task_name,
@@ -12934,6 +12992,11 @@ async function doneMtcDirect(id, interval){
   const rating = Math.min(5, Math.max(1, Number(ratingStr)||3));
   const note = prompt('Catatan pengerjaan (opsional):') || null;
   await q(db.from('maintenance_logs').insert({schedule_id:id, done_date:today(), done_by:me.id, note, rating, authorized_by:me.id}).select());
+  // Kalau tadinya ada staff yang ditugaskan tapi SPV memutuskan ambil alih
+  // sendiri sebelum staff sempat lapor -- tutup Tugas lama itu juga, supaya
+  // tidak nyangkut "Belum" selamanya.
+  await q(db.from('task_items').update({status:'selesai', completion_note:'(Ditutup otomatis — diselesaikan langsung oleh SPV/Manager)', completed_at:new Date().toISOString()})
+    .eq('maintenance_schedule_id',id).eq('status','belum'));
   await q(db.from('maintenance_schedules').update({next_due:addDays(today(),interval),
     assigned_to:null, assigned_by:null, assigned_at:null, pending_completion_by:null, pending_completion_at:null, pending_report:null}).eq('id',id));
   toast('Maintenance dicatat, jadwal berikutnya dibuat'); loadMtc();
@@ -12964,6 +13027,10 @@ async function createMtc(){
 async function delMtc(id){
   if(!confirm('Nonaktifkan jadwal ini?'))return;
   await q(db.from('maintenance_schedules').update({active:false}).eq('id',id));
+  // Tutup juga Tugas yang masih menggantung terkait jadwal ini, supaya tidak
+  // nyangkut "Belum" selamanya di Dashboard staff walau jadwalnya sudah mati.
+  await q(db.from('task_items').update({status:'selesai', completion_note:'(Ditutup otomatis — jadwal Maintenance dinonaktifkan)', completed_at:new Date().toISOString()})
+    .eq('maintenance_schedule_id',id).eq('status','belum'));
   loadMtc();
 }
 
