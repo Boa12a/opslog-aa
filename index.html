@@ -10365,7 +10365,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-11-7';
+const APP_VERSION = '2026-08-12-1';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11867,15 +11867,14 @@ async function renderLog(){
   <div id="logShiftArea" style="margin-top:8px"></div>
   <div id="handoverBanner"></div>
   <div id="logFormArea" style="margin-top:8px"></div></div>
-  <div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat 14 Hari Terakhir</h3>
+  <div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat Checklist 14 Hari Terakhir</h3>
     ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="exportLogsExcel()">⬇ Excel (semua riwayat)</button>`:''}</div>
     <div id="logHist"></div></div>
-  ${isMgr()?`<div class="card"><h3>Export Logbook Kejadian</h3>
-    <div class="row" style="flex-wrap:wrap;gap:8px">
-      <select id="lbExDept">${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
-      <input type="date" id="lbExFrom"><input type="date" id="lbExTo" value="${today()}">
-      <button class="btn btn-teal btn-sm" onclick="exportLogbookExcel()">⬇ Export</button>
-    </div></div>`:''}`;
+  <div class="card"><div class="row" style="justify-content:space-between"><h3>📓 Riwayat Logbook 14 Hari Terakhir</h3>
+    ${isMgr()?`<button class="btn btn-ghost btn-sm" onclick="exportLogbookExcelModal()">⬇ Excel</button>`:''}</div>
+    <div id="logbookHist" style="max-height:400px;overflow-y:auto"></div></div>
+  <div class="card"><h3>🔄 Riwayat Serah Terima 14 Hari Terakhir</h3>
+    <div id="handoverHist" style="max-height:400px;overflow-y:auto"></div></div>`;
   $('main').innerHTML = h;
   // Kalau datang dari notifikasi "Log Harian Menunggu Otorisasi" di Dashboard,
   // langsung arahkan ke log spesifik itu (dept+tanggal), bukan default hari
@@ -11887,6 +11886,8 @@ async function renderLog(){
   }
   loadLogShifts();
   loadLogHist();
+  loadLogbookHist();
+  loadHandoverHist();
 }
 // Muat daftar shift departemen terpilih; kalau departemen tidak pakai shift,
 // langsung lanjut ke form log seperti biasa (1 log per hari).
@@ -11965,7 +11966,9 @@ async function loadLogForm(){
   }
 
   h += `<div class="card" style="margin-top:10px"><label style="margin-top:0">Checklist Harian</label>`;
-  if(!items.length) h += `<p class="muted small">Belum ada item checklist. ${isMgr()?'Tambahkan di menu Checklist & Shift.':'Minta Manager menambahkan item.'}</p>`;
+  if(!items.length){
+    h += `<p class="muted small">Belum ada item checklist. ${isMgr()?'Tambahkan di menu Checklist & Shift.':'Minta Manager menambahkan item.'}</p></div>`;
+  } else {
   items.forEach(it=>{
     const chk = log ? (log.daily_log_checks.find(c=>c.item_id===it.id)||{}) : {};
     h += `<div class="row" style="margin-bottom:6px;align-items:flex-start">
@@ -11979,6 +11982,10 @@ async function loadLogForm(){
   }
   h += `<div class="row" style="margin-top:12px">
     <button class="btn btn-teal" onclick="saveLog(${log?log.id:'null'})">${log?'Simpan Perubahan Checklist':'Simpan Checklist'}</button>
+  </div>
+  </div>`;
+  }
+  h += `<div class="card" style="margin-top:10px"><div class="row">
     <button class="btn btn-gold" onclick="newTicketModal('${d}')">+ Lapor Kerusakan</button>
     ${canFill?`<button class="btn btn-navy" onclick="handoverModal('${d}','${t}',${shiftId||'null'})">Serah Terima Shift Ini</button>`:''}</div>
   </div>
@@ -12139,6 +12146,30 @@ async function loadLogHist(){
     <td data-label="Kondisi">${l.kondisi?KONDISI[l.kondisi]:'-'}</td><td data-label="Pengisi">${uname(l.filled_by)}</td></tr>`);
   $('logHist').innerHTML = h + '</table>' + (mine.length?'':'<p class="muted small">Belum ada log.</p>');
 }
+async function loadLogbookHist(){
+  const from = addDays(today(),-14);
+  const list = await q(db.from('logbook_entries').select('*').gte('entry_date',from).order('created_at',{ascending:false}));
+  const el = $('logbookHist'); if(!el) return;
+  el.innerHTML = list.length ? list.map(e=>{
+    const urg = LB_URG[e.urgency]||LB_URG.rendah;
+    return `<div class="small" style="padding:6px 0;border-bottom:1px solid var(--line)${e.voided_at?';opacity:.5':''}">
+      <div class="row" style="justify-content:space-between">
+        <span>${deptTag(e.department)} <b>${fdate(e.entry_date)}</b> ${fdt(e.created_at)} — ${esc(uname(e.created_by))}</span>
+        <span class="badge" style="background:${urg.c};color:${urg.t}">${urg.l}</span></div>
+      ${e.voided_at?'<s>'+esc(e.message)+'</s>':esc(e.message)}</div>`;
+  }).join('') : '<p class="muted small">Belum ada kejadian tercatat.</p>';
+}
+async function loadHandoverHist(){
+  const from = addDays(today(),-14);
+  const list = await q(db.from('shift_handovers').select('*').gte('log_date',from).order('created_at',{ascending:false}));
+  const el = $('handoverHist'); if(!el) return;
+  el.innerHTML = list.length ? list.map(ho=>`<div class="small" style="padding:6px 0;border-bottom:1px solid var(--line)">
+    ${deptTag(ho.department)} <b>${fdate(ho.log_date)}</b> — oleh ${uname(ho.outgoing_by)}
+    ${ho.acknowledged_by?' · dikonfirmasi '+uname(ho.acknowledged_by):' · <span class="age-amber">belum dikonfirmasi shift berikutnya</span>'}
+    ${ho.outgoing_notes?`<div class="muted">Kondisi: ${esc(ho.outgoing_notes)}</div>`:''}
+    ${ho.pending_items?`<div class="muted">Menggantung: ${esc(ho.pending_items)}</div>`:''}</div>`).join('')
+    : '<p class="muted small">Belum ada serah terima tercatat.</p>';
+}
 /* ================= EXPORT EXCEL (Manager/Owner) ================= */
 function exportTicketsModal(){
   openModal(`<div class="mhead"><h3>Export Laporan Kerusakan</h3><button onclick="closeModal()">✕</button></div>
@@ -12207,6 +12238,13 @@ async function exportLogsExcel(){
   XLSX.utils.book_append_sheet(wb, ws, 'Log Harian');
   XLSX.writeFile(wb, `Riwayat_Log_Harian_${today()}.xlsx`);
 }
+function exportLogbookExcelModal(){
+  openModal(`<div class="mhead"><h3>Export Logbook Kejadian</h3><button onclick="closeModal()">✕</button></div>
+    <label>Departemen</label><select id="lbExDept">${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
+    <label>Dari Tanggal</label><input type="date" id="lbExFrom">
+    <label>Sampai Tanggal</label><input type="date" id="lbExTo" value="${today()}">
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="exportLogbookExcel()">⬇ Export Excel</button>`);
+}
 async function exportLogbookExcel(){
   const dept = $('lbExDept').value, from = $('lbExFrom').value, to = $('lbExTo').value;
   let query = db.from('logbook_entries').select('*').eq('department',dept).order('created_at');
@@ -12222,6 +12260,7 @@ async function exportLogbookExcel(){
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Logbook');
   XLSX.writeFile(wb, `Logbook_${DEPTS[dept]?DEPTS[dept].label:dept}_${from||'awal'}_${to||today()}.xlsx`);
+  closeModal();
 }
 async function exportLemburExcel(){
   const list = await q(db.from('overtime_requests').select('*').order('requested_date'));
