@@ -10380,7 +10380,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-6';
+const APP_VERSION = '2026-08-19-7';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -13812,11 +13812,14 @@ async function renderDW(){
   loadDwRequests();
 }
 async function loadDwRequests(){
-  let query = db.from('dw_requests').select('*').order('created_at',{ascending:false});
-  if(!isMgr()) query = query.eq('department', me.department);
-  const list = await q(query);
+  let reqQuery = db.from('dw_requests').select('*').order('created_at',{ascending:false});
+  if(!isMgr()) reqQuery = reqQuery.eq('department', me.department);
+  let workerQuery = db.from('dw_workers').select('*').eq('active',true);
+  if(!isMgr()) workerQuery = workerQuery.eq('department', me.department);
+  const [list, workers] = await Promise.all([q(reqQuery), q(workerQuery)]);
   $('dwList').innerHTML = list.length ? list.map(r=>{
     const st = DW_STATUS[r.status];
+    const myWorkers = workers.filter(w=>w.dw_request_id===r.id);
     return `<div class="item">
       <div class="row" style="justify-content:space-between">
         <b>${deptTag(r.department)} ${r.jumlah_dw} orang</b>
@@ -13828,8 +13831,75 @@ async function loadDwRequests(){
       ${(isMgr() && r.status==='menunggu') ? `<div class="row" style="gap:8px;margin-top:8px">
         <button class="btn-sm btn-teal" onclick="decideDwRequest(${r.id},true)">✓ Setujui</button>
         <button class="btn-sm btn-ghost" style="color:var(--red)" onclick="decideDwRequest(${r.id},false)">Tolak</button></div>` : ''}
+      ${r.status==='disetujui' ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #E5E7EB">
+          <div class="row" style="justify-content:space-between">
+            <b class="small">DW Bertugas (${myWorkers.length})</b>
+            <button class="btn-sm btn-ghost" onclick="newDwWorkerModal(${r.id})">+ Tambah DW</button>
+          </div>
+          ${myWorkers.length ? myWorkers.map(w=>`<div class="item" style="margin-top:6px">
+            <div class="row" style="justify-content:space-between">
+              <span>${esc(w.name)}${w.phone?' · <span class="muted small">'+esc(w.phone)+'</span>':''}</span>
+              <button class="btn-sm btn-ghost" onclick="newDwDailyLogModal(${w.id},'${esc(w.name).replace(/'/g,"\\'")}')">+ Laporan Hari Ini</button>
+            </div>
+          </div>`).join('') : '<p class="small muted" style="margin-top:6px">Belum ada DW ditambahkan.</p>'}
+        </div>` : ''}
+      ${me.role==='owner' ? `<button class="btn-sm btn-ghost" style="margin-top:8px;color:var(--red)" onclick="deleteDwRequest(${r.id})">🗑 Hapus Pengajuan Ini</button>` : ''}
     </div>`;
   }).join('') : '<p class="muted">Belum ada pengajuan DW.</p>';
+}
+// Dipanggil hanya untuk pengajuan yang sudah 'disetujui' -- dw_request_id
+// WAJIB ada, tidak boleh tambah DW tanpa pengajuan yang disetujui dulu.
+function newDwWorkerModal(requestId){
+  openModal(`<div class="mhead"><h3>Tambah DW</h3><button onclick="closeModal()">✕</button></div>
+    <label>Nama</label><input id="dwwName" placeholder="nama DW">
+    <label>No. HP (opsional, untuk dipanggil ulang kalau bagus)</label><input id="dwwPhone" placeholder="08xx...">
+    <button class="btn btn-teal" id="btnSubmitDwWorker" style="margin-top:14px;width:100%" onclick="submitDwWorker(${requestId})">Simpan</button>`);
+}
+async function submitDwWorker(requestId){
+  const name = $('dwwName').value.trim();
+  if(!name){ toast('Nama wajib diisi'); return; }
+  if(!lockBtn($('btnSubmitDwWorker'))) return;
+  const [req] = await q(db.from('dw_requests').select('department').eq('id',requestId));
+  await q(db.from('dw_workers').insert({dw_request_id:requestId, name, phone:$('dwwPhone').value.trim()||null, department:req.department, added_by:me.id}).select());
+  closeModal(); toast('DW ditambahkan'); loadDwRequests();
+}
+function newDwDailyLogModal(workerId, workerName){
+  openModal(`<div class="mhead"><h3>Laporan Harian — ${esc(workerName)}</h3><button onclick="closeModal()">✕</button></div>
+    <label>Tanggal Kerja</label><input type="date" id="dwlDate" value="${today()}">
+    <label>Jam Mulai</label><input type="time" id="dwlMulai">
+    <label>Jam Selesai</label><input type="time" id="dwlSelesai">
+    <label>Tugas yang Dikerjakan</label><textarea id="dwlTugas" rows="2" placeholder="ringkasan tugas hari ini"></textarea>
+    <label>Penilaian Kerja</label><select id="dwlRating">
+      <option value="5">Sangat Baik</option><option value="4">Baik</option>
+      <option value="3" selected>Cukup</option><option value="2">Kurang</option><option value="1">Sangat Kurang</option>
+    </select>
+    <label>Catatan (opsional)</label><textarea id="dwlCatatan" rows="2" placeholder="mis. cekatan, komunikatif, atau perlu diarahkan terus"></textarea>
+    <label class="checkline"><input type="checkbox" id="dwlRekomen" checked> Direkomendasikan dipanggil lagi</label>
+    <button class="btn btn-teal" id="btnSubmitDwLog" style="margin-top:14px;width:100%" onclick="submitDwDailyLog(${workerId})">Simpan Laporan</button>`);
+}
+async function submitDwDailyLog(workerId){
+  const work_date = $('dwlDate').value;
+  const tugas_dikerjakan = $('dwlTugas').value.trim();
+  if(!work_date){ toast('Tanggal wajib diisi'); return; }
+  if(!tugas_dikerjakan){ toast('Tugas yang dikerjakan wajib diisi'); return; }
+  if(!lockBtn($('btnSubmitDwLog'))) return;
+  await q(db.from('dw_daily_logs').insert({
+    dw_worker_id: workerId, work_date,
+    jam_mulai: $('dwlMulai').value||null, jam_selesai: $('dwlSelesai').value||null,
+    tugas_dikerjakan, rating: Number($('dwlRating').value),
+    catatan_kualitatif: $('dwlCatatan').value.trim()||null,
+    direkomendasikan_lagi: $('dwlRekomen').checked,
+    input_by: me.id
+  }).select());
+  closeModal(); toast('Laporan harian tersimpan'); loadDwRequests();
+}
+// Hapus pengajuan -- SENGAJA dibatasi Owner saja (bukan Manager biasa),
+// karena ini hapus permanen, ikut menghapus DW & laporan terkait (cascade).
+async function deleteDwRequest(id){
+  if(!confirm('Hapus pengajuan DW ini? DW dan laporan harian yang sudah terkait ikut terhapus permanen. Tindakan ini TIDAK BISA dibatalkan.')) return;
+  await q(db.from('dw_requests').delete().eq('id',id));
+  toast('Pengajuan DW dihapus'); loadDwRequests();
 }
 function newDwRequestModal(){
   openModal(`<div class="mhead"><h3>Ajukan Kebutuhan DW</h3><button onclick="closeModal()">✕</button></div>
