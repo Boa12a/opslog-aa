@@ -10380,7 +10380,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-3';
+const APP_VERSION = '2026-08-19-5';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10607,6 +10607,7 @@ function buildNav(){
   if(isMgr() || isFieldWorker()) grupSdm.push(['lembur','Lembur']);
   if(isMgr() || inOpsDept || isHrSpv()) grupSdm.push(['cuti','Cuti & Sakit']);
   if(isMgr()) grupSdm.push(['quiz','Kuis']);
+  grupSdm.push(['kuishist','Riwayat Kuis']); // terbuka untuk semua role -- dulu staff sama sekali tidak punya akses menu kuis
   if(isHrdOrMgr()) grupSdm.push(['pengumuman','Pengumuman'],['hrd','HRD'],['users','Pengguna']);
 
   window._navGroups = {Operasional:grupOperasional, Pengadaan:grupPengadaan, SDM:grupSdm};
@@ -10624,7 +10625,7 @@ function buildNav(){
 function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
 function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
-  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,rekapind:renderRekapIndividu,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz};
+  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,rekapind:renderRekapIndividu,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz,kuishist:renderKuisHistori};
   if(!routes[p]) p='dashboard'; // jaga-jaga: halaman tersimpan sudah tidak ada/tidak valid lagi
   page=p;
   try{ localStorage.setItem('lastPage', p); }catch(e){} // aman kalau localStorage diblokir browser
@@ -11655,6 +11656,13 @@ async function renderDashboard(){
         ${qz.prize?`<p class="small muted"><b>Hadiah:</b> ${esc(qz.prize)}</p>`:''}`;
       if(win){
         h += `<p class="small" style="color:var(--teal-d);font-weight:700">🏆 Pemenang: ${esc(uname(win.staff_id))}</p>`;
+        // Foto cuma tampil 3 hari sejak DIUPLOAD (bukan sejak menang) --
+        // Manager kadang baru sempat upload beberapa hari setelah pemenang
+        // ditetapkan. Riwayat permanennya tetap ada di menu Riwayat Kuis.
+        const photoFresh = win.photo_url && win.photo_uploaded_at && (Date.now() - new Date(win.photo_uploaded_at).getTime()) < 3*86400000;
+        if(photoFresh){
+          h += `<img src="${esc(win.photo_url)}" style="max-width:220px;border-radius:8px;margin-top:8px;display:block">`;
+        }
       } else {
         h += `<div class="row"><input id="qzAnswerInput_${qz.id}" placeholder="jawaban kamu..." style="flex:1">
           <button class="btn btn-teal btn-sm" onclick="submitQuizAnswerFromDashboard(${qz.id})">Kirim</button></div>`;
@@ -13851,6 +13859,10 @@ async function openQuizAdmin(id){
     <button class="btn ${qz.published?'btn-ghost':'btn-teal'} btn-sm" onclick="toggleQuizPublish(${qz.id},${!qz.published})">${qz.published?'Batal Terbitkan (Draft)':'Terbitkan Sekarang'}</button>`;
   if(win){
     h += `<p class="small" style="color:var(--teal-d);margin-top:10px">🏆 <b>Pemenang: ${esc(uname(win.staff_id))}</b> · ${fdt(win.won_at)}</p>`;
+    if(win.photo_url){
+      h += `<img src="${esc(win.photo_url)}" style="max-width:180px;border-radius:8px;margin-top:6px;display:block">`;
+    }
+    h += `<button class="btn-sm btn-ghost" style="margin-top:6px" onclick="uploadWinnerPhoto(${qz.id})">${win.photo_url?'📷 Ganti Foto Pemenang':'📷 Upload Foto Pemenang'}</button>`;
   } else {
     h += `<p class="small muted" style="margin-top:10px">Belum ada yang menjawab benar.</p>`;
   }
@@ -13868,10 +13880,83 @@ async function manualDeclareWinner(quizId, staffId){
   await q(db.from('quiz_winners').upsert({quiz_id:quizId, staff_id:staffId, won_at:new Date().toISOString()}, {onConflict:'quiz_id'}).select());
   toast('Pemenang ditetapkan'); openQuizAdmin(quizId); loadQuizList();
 }
+// Kompres foto di browser dulu (resize lebar maks 480px, JPEG kualitas 0.8)
+// sebelum diupload -- foto langsung dari kamera HP biasanya 2-5MB, kalau
+// diupload mentah akan bikin app lemot lagi seperti masalah xlsx sebelumnya.
+function compressImageFile(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Gagal membaca file'));
+    reader.onload = e => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('File bukan gambar yang valid'));
+      img.onload = () => {
+        const maxW = 480;
+        const scale = Math.min(1, maxW / img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Gagal kompres gambar')), 'image/jpeg', 0.8);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+// Upload/ganti foto pemenang -- dipanggil dari modal admin Kuis, terpisah
+// dari momen penetapan pemenang (pemenang bisa juga tertentu otomatis lewat
+// submit_quiz_answer, jadi upload foto memang harus jadi aksi sendiri).
+function uploadWinnerPhoto(quizId){
+  const inputEl = document.createElement('input');
+  inputEl.type = 'file'; inputEl.accept = 'image/*';
+  inputEl.onchange = async () => {
+    const file = inputEl.files[0];
+    if(!file) return;
+    toast('Mengunggah foto...');
+    try{
+      const blob = await compressImageFile(file);
+      const path = `quiz_${quizId}_${Date.now()}.jpg`;
+      const {error: upErr} = await db.storage.from('quiz-winner-photos').upload(path, blob, {contentType:'image/jpeg', upsert:true});
+      if(upErr){ toast('Gagal upload: '+upErr.message); return; }
+      const {data: pub} = db.storage.from('quiz-winner-photos').getPublicUrl(path);
+      await q(db.from('quiz_winners').update({photo_url: pub.publicUrl, photo_uploaded_at: new Date().toISOString()}).eq('quiz_id', quizId));
+      toast('Foto pemenang tersimpan'); openQuizAdmin(quizId);
+    }catch(e){ toast('Gagal memproses foto: '+e.message); }
+  };
+  inputEl.click();
+}
 async function toggleQuizPublish(id, publish){
   await q(db.from('quizzes').update({published:publish}).eq('id',id));
   toast(publish?'Kuis diterbitkan, tampil di Dashboard karyawan':'Kuis kembali jadi draft');
   openQuizAdmin(id); loadQuizList();
+}
+/* ================= RIWAYAT KUIS (semua karyawan, permanen) ================= */
+// Beda dari renderQuiz() di atas (khusus Manager, buat/kelola kuis) -- ini
+// cuma daftar baca-saja, terbuka untuk semua role, isinya kuis yang SUDAH
+// ada pemenangnya. Foto di sini TIDAK kena batas 3 hari seperti di Dashboard.
+async function renderKuisHistori(){
+  let h = `<h2>Riwayat Kuis</h2><div id="kuisHistList"></div>`;
+  $('main').innerHTML = h;
+  loadKuisHistori();
+}
+async function loadKuisHistori(){
+  const [quizzes, winners] = await Promise.all([
+    q(db.from('quizzes').select('*').eq('published',true).order('created_at',{ascending:false})),
+    q(db.from('quiz_winners').select('*'))
+  ]);
+  const won = quizzes.filter(qz=>winners.find(w=>w.quiz_id===qz.id));
+  $('kuisHistList').innerHTML = won.length ? won.map(qz=>{
+    const win = winners.find(w=>w.quiz_id===qz.id);
+    return `<div class="card">
+      <b>${esc(qz.title)}</b>
+      <div class="small muted">${fdt(qz.created_at)}</div>
+      <p class="small" style="margin-top:6px">${esc(qz.question)}</p>
+      ${qz.prize?`<p class="small muted"><b>Hadiah:</b> ${esc(qz.prize)}</p>`:''}
+      <div class="small" style="color:var(--teal-d);font-weight:700;margin-top:6px">🏆 Pemenang: ${esc(uname(win.staff_id))} · ${fdt(win.won_at)}</div>
+      ${win.photo_url?`<img src="${esc(win.photo_url)}" style="max-width:220px;border-radius:8px;margin-top:8px;display:block">`:''}
+    </div>`;
+  }).join('') : '<p class="muted">Belum ada riwayat pemenang kuis.</p>';
 }
 async function deleteQuiz(id){
   if(!confirm('Hapus kuis ini beserta seluruh jawaban & datanya? Tidak bisa dibatalkan.')) return;
