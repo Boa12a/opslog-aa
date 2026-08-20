@@ -10380,7 +10380,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-2';
+const APP_VERSION = '2026-08-19-3';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11532,7 +11532,8 @@ async function renderDashboard(){
   const [logs, tickets, dueMtc, pendDisp,
          pqAuth, pqAcct, pqPickupAll,
          allBirths, allAnnouncements, activeQuizzes, quizWinners,
-         myLembur, pendingLembur, urgentLogbook, pendingLogbookAll] = await Promise.all([
+         myLembur, pendingLembur, urgentLogbook, pendingLogbookAll,
+         myTaskTemplates, myExistingTaskItems] = await Promise.all([
     q(db.from('daily_logs').select('*').eq('log_date',t)),
     q(db.from('tickets').select('*, ticket_items(count)').neq('status','selesai').order('created_at')),
     q(db.from('maintenance_schedules').select('*').eq('active',true).lte('next_due', addDays(t,7))),
@@ -11547,7 +11548,9 @@ async function renderDashboard(){
     q(db.from('overtime_requests').select('*').eq('staff_id',me.id).eq('status','disetujui').is('voided_at',null).gte('requested_date', t).order('requested_date')),
     isMgr() ? q(db.from('overtime_requests').select('*').eq('status','diajukan').order('requested_date')) : Promise.resolve([]),
     isMgr() ? q(db.from('logbook_entries').select('*').eq('urgency','tinggi').is('voided_at',null).gte('entry_date',addDays(t,-14)).order('created_at',{ascending:false})) : Promise.resolve([]),
-    (me.role==='spv' && me.department) ? q(db.from('logbook_entries').select('*').eq('department',me.department).neq('urgency','tinggi').is('voided_at',null).is('authorized_at',null).order('created_at',{ascending:false})) : Promise.resolve([])
+    (me.role==='spv' && me.department) ? q(db.from('logbook_entries').select('*').eq('department',me.department).neq('urgency','tinggi').is('voided_at',null).is('authorized_at',null).order('created_at',{ascending:false})) : Promise.resolve([]),
+    q(db.from('task_templates').select('*').eq('staff_id',me.id).eq('active',true)),
+    q(db.from('task_items').select('template_id').eq('staff_id',me.id).eq('task_date',t))
   ]);
   const pqPickup = pqPickupAll.filter(it=> isMgr() || it.procurement_requests.pickup_assigned_to===me.id || (me.role==='spv' && me.department===it.procurement_requests.department));
   const pendingLogs = (me.role==='spv' && me.department) ? logs.filter(l=> l.department===me.department && l.needs_authorization && !l.authorized_at && !l.rejected_at) : [];
@@ -11571,10 +11574,13 @@ async function renderDashboard(){
       .sort((a,b)=>a._day-b._day);
   }
 
-  // Tugas Hari Ini — generate dulu instance dari template berulang yang jatuh
-  // hari ini (ini SATU-SATUNYA yang tetap harus menunggu duluan, sebelum
-  // task_items dibaca -- baris berikutnya butuh instance yang baru dibuat).
-  await ensureTodayTasksFor(me.id);
+  // Tugas Hari Ini — dulu titik ini menunggu 1 gelombang round-trip terpisah
+  // (ensureTodayTasksFor menarik templates+existing sendiri). Sekarang kedua
+  // data itu sudah ikut ditarik di Promise.all utama di atas (myTaskTemplates,
+  // myExistingTaskItems) -- di sini cuma tinggal HITUNG & INSERT kalau perlu,
+  // baru baca ulang task_items (baris Promise.all di bawah, tetap harus
+  // menunggu insert ini selesai dulu supaya tugas baru ikut kebaca).
+  await createDueTaskInstances(me.id, myTaskTemplates, myExistingTaskItems, t);
   const [myTasksToday_raw, lateDeptTasksAll] = await Promise.all([
     q(db.from('task_items').select('*').eq('staff_id',me.id).lte('task_date',t).eq('status','belum').order('task_date')),
     (me.role==='spv' && me.department) ? q(db.from('task_items').select('*').eq('department',me.department).eq('status','belum').lt('task_date',t).order('task_date')) : Promise.resolve([])
@@ -13537,19 +13543,30 @@ const DOW_LABEL = ['Minggu','Senin','Selasa','Rabu','Kamis',"Jum'at",'Sabtu'];
 // Pastikan instance tugas HARI INI sudah dibuat dari template berulang yang
 // aktif untuk 1 staff (dipanggil lazim saat Dashboard/Tugas dibuka -- tidak
 // ada cron job di arsitektur ini, jadi generate on-demand saat diperlukan).
-async function ensureTodayTasksFor(staffId){
-  const t0 = today();
-  const dow = new Date(t0+'T00:00:00').getDay();
-  const templates = await q(db.from('task_templates').select('*').eq('staff_id',staffId).eq('active',true));
+// Dipisah dari ensureTodayTasksFor() supaya logikanya SATU SUMBER dipakai
+// bersama -- baik saat ensureTodayTasksFor() menarik datanya sendiri (dipakai
+// halaman Tugas), maupun saat renderDashboard() sudah menarik templates/
+// existing lewat batch Promise.all besarnya sendiri (tidak perlu tarik ulang).
+async function createDueTaskInstances(staffId, templates, existingItems, dateStr){
+  const dow = new Date(dateStr+'T00:00:00').getDay();
   const due = templates.filter(tpl=>(tpl.days_of_week||[]).includes(dow));
   if(!due.length) return;
-  const existing = await q(db.from('task_items').select('template_id').eq('staff_id',staffId).eq('task_date',t0));
-  const existingTplIds = new Set(existing.map(e=>e.template_id));
+  const existingTplIds = new Set(existingItems.map(e=>e.template_id));
   const toCreate = due.filter(tpl=>!existingTplIds.has(tpl.id)).map(tpl=>({
-    staff_id: staffId, department: tpl.department, task_text: tpl.task_text, task_date: t0,
+    staff_id: staffId, department: tpl.department, task_text: tpl.task_text, task_date: dateStr,
     template_id: tpl.id, urgent: tpl.urgent, created_by: tpl.created_by
   }));
   if(toCreate.length) await q(db.from('task_items').insert(toCreate).select());
+}
+async function ensureTodayTasksFor(staffId){
+  const t0 = today();
+  // 2 query ini sama sekali tidak saling butuh hasil satu sama lain -- dulu
+  // ditulis berurutan (2 round-trip), sekarang paralel (1 round-trip).
+  const [templates, existing] = await Promise.all([
+    q(db.from('task_templates').select('*').eq('staff_id',staffId).eq('active',true)),
+    q(db.from('task_items').select('template_id').eq('staff_id',staffId).eq('task_date',t0))
+  ]);
+  await createDueTaskInstances(staffId, templates, existing, t0);
 }
 async function renderTugas(){
   const canManage = isMgr() || me.role==='spv';
