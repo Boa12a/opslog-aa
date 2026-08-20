@@ -10380,7 +10380,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-7';
+const APP_VERSION = '2026-08-19-8';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -13898,7 +13898,8 @@ async function submitDwDailyLog(workerId){
 // karena ini hapus permanen, ikut menghapus DW & laporan terkait (cascade).
 async function deleteDwRequest(id){
   if(!confirm('Hapus pengajuan DW ini? DW dan laporan harian yang sudah terkait ikut terhapus permanen. Tindakan ini TIDAK BISA dibatalkan.')) return;
-  await q(db.from('dw_requests').delete().eq('id',id));
+  const deleted = await q(db.from('dw_requests').delete().eq('id',id).select());
+  if(!deleted.length){ toast('Gagal menghapus — kemungkinan tidak punya izin (cek RLS) atau data sudah tidak ada'); return; }
   toast('Pengajuan DW dihapus'); loadDwRequests();
 }
 function newDwRequestModal(){
