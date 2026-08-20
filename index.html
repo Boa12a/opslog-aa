@@ -10380,7 +10380,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-5';
+const APP_VERSION = '2026-08-19-6';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10587,7 +10587,7 @@ function buildNav(){
   const grupOperasional = [];
   if(isMgr() || isSpvOps){
     // SPV (dan Manager/Owner): akses penuh modul operasional.
-    grupOperasional.push(['log','Log Harian'],['tiket','Kerusakan'],['aset','Aset'],['mtc','Maintenance'],['jadwal','Jadwal Kerja']);
+    grupOperasional.push(['log','Log Harian'],['tiket','Kerusakan'],['aset','Aset'],['mtc','Maintenance'],['jadwal','Jadwal Kerja'],['dw','Tenaga Harian (DW)']);
   } else if(isStaffOps){
     // Staff: cuma yang benar-benar dibutuhkan sehari-hari — tanpa Aset/Maintenance.
     grupOperasional.push(['log','Log Harian'],['tiket','Kerusakan'],['jadwal','Jadwal Kerja']);
@@ -10625,7 +10625,7 @@ function buildNav(){
 function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
 function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
-  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,rekapind:renderRekapIndividu,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz,kuishist:renderKuisHistori};
+  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,rekapind:renderRekapIndividu,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz,kuishist:renderKuisHistori,dw:renderDW};
   if(!routes[p]) p='dashboard'; // jaga-jaga: halaman tersimpan sudah tidak ada/tidak valid lagi
   page=p;
   try{ localStorage.setItem('lastPage', p); }catch(e){} // aman kalau localStorage diblokir browser
@@ -13792,6 +13792,73 @@ function newPengumumanModal(){
     <button class="btn btn-teal" id="btnSubmitAnn" style="margin-top:14px;width:100%" onclick="submitPengumuman()">Terbitkan</button>`);
 }
 function toggleAnnDeptWrap(){ $('anDeptWrap').classList.toggle('hidden', $('anTarget').value!=='department'); }
+/* ================= DW - TENAGA HARIAN LEPAS ================= */
+// DW = tenaga kerja yang dipekerjakan sewaktu-waktu saat dibutuhkan (bukan
+// staff tetap, identitas bisa berubah-ubah). SPV mengajukan kebutuhan,
+// Manager/Owner WAJIB menyetujui dulu sebelum DW dianggap resmi bekerja --
+// tidak boleh dadakan tanpa otorisasi (sesuai keputusan bisnisnya).
+const DW_STATUS = {
+  menunggu:{l:'Menunggu Otorisasi', c:'#FEF3C7', t:'#92400E'},
+  disetujui:{l:'Disetujui', c:'#DCFCE7', t:'#166534'},
+  ditolak:{l:'Ditolak', c:'#FEE2E2', t:'#B91C1C'}
+};
+async function renderDW(){
+  const isSpvOps = me.role==='spv' && me.department && DEPTS[me.department];
+  let h = `<h2>Tenaga Harian (DW)</h2>
+    <p class="small muted" style="margin-bottom:10px">Untuk tenaga kerja yang dipekerjakan sewaktu-waktu saat dibutuhkan (bukan staff tetap). Setiap kebutuhan wajib diajukan dan disetujui Manager/Owner dulu -- tidak boleh dadakan tanpa otorisasi.</p>
+    ${(isMgr()||isSpvOps) ? `<div class="row" style="justify-content:flex-end;margin-bottom:12px"><button class="btn btn-teal btn-sm" onclick="newDwRequestModal()">+ Ajukan Kebutuhan DW</button></div>` : ''}
+    <div id="dwList"></div>`;
+  $('main').innerHTML = h;
+  loadDwRequests();
+}
+async function loadDwRequests(){
+  let query = db.from('dw_requests').select('*').order('created_at',{ascending:false});
+  if(!isMgr()) query = query.eq('department', me.department);
+  const list = await q(query);
+  $('dwList').innerHTML = list.length ? list.map(r=>{
+    const st = DW_STATUS[r.status];
+    return `<div class="item">
+      <div class="row" style="justify-content:space-between">
+        <b>${deptTag(r.department)} ${r.jumlah_dw} orang</b>
+        <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
+      <div class="small" style="margin-top:4px">Dibutuhkan: ${fdate(r.tanggal_dibutuhkan)}</div>
+      <div class="small">Alasan: ${esc(r.alasan)}</div>
+      <div class="small muted">Diajukan oleh ${esc(uname(r.requested_by))} · ${fdt(r.created_at)}</div>
+      ${r.status!=='menunggu' ? `<div class="small muted">Diputuskan oleh ${esc(uname(r.decided_by))} · ${fdt(r.decided_at)}${r.decision_note?' — '+esc(r.decision_note):''}</div>` : ''}
+      ${(isMgr() && r.status==='menunggu') ? `<div class="row" style="gap:8px;margin-top:8px">
+        <button class="btn-sm btn-teal" onclick="decideDwRequest(${r.id},true)">✓ Setujui</button>
+        <button class="btn-sm btn-ghost" style="color:var(--red)" onclick="decideDwRequest(${r.id},false)">Tolak</button></div>` : ''}
+    </div>`;
+  }).join('') : '<p class="muted">Belum ada pengajuan DW.</p>';
+}
+function newDwRequestModal(){
+  openModal(`<div class="mhead"><h3>Ajukan Kebutuhan DW</h3><button onclick="closeModal()">✕</button></div>
+    <label>Departemen</label><select id="dwDept">${deptOptions()}</select>
+    <label>Tanggal Dibutuhkan</label><input type="date" id="dwDate" value="${today()}">
+    <label>Jumlah DW</label><input type="number" id="dwJumlah" min="1" value="1">
+    <label>Alasan (wajib)</label><textarea id="dwAlasan" rows="2" placeholder="mis. event Sabtu, staff cuti mendadak, dll"></textarea>
+    <button class="btn btn-teal" id="btnSubmitDw" style="margin-top:14px;width:100%" onclick="submitDwRequest()">Ajukan</button>`);
+}
+async function submitDwRequest(){
+  const department = $('dwDept').value;
+  const tanggal_dibutuhkan = $('dwDate').value;
+  const jumlah_dw = Number($('dwJumlah').value);
+  const alasan = $('dwAlasan').value.trim();
+  if(!department || !tanggal_dibutuhkan || !jumlah_dw || jumlah_dw<1){ toast('Lengkapi semua field'); return; }
+  if(!alasan){ toast('Alasan wajib diisi'); return; }
+  if(!lockBtn($('btnSubmitDw'))) return;
+  await q(db.from('dw_requests').insert({department, tanggal_dibutuhkan, jumlah_dw, alasan, requested_by:me.id, status:'menunggu'}).select());
+  closeModal(); toast('Pengajuan DW terkirim, menunggu otorisasi Manager'); loadDwRequests();
+}
+async function decideDwRequest(id, approve){
+  const note = approve ? null : prompt('Alasan penolakan (wajib diisi):');
+  if(!approve && !note){ toast('Alasan penolakan wajib diisi'); return; }
+  await q(db.from('dw_requests').update({
+    status: approve?'disetujui':'ditolak', decided_by: me.id, decided_at: new Date().toISOString(), decision_note: note||null
+  }).eq('id', id));
+  toast(approve?'Pengajuan disetujui':'Pengajuan ditolak'); loadDwRequests();
+}
+
 async function submitPengumuman(){
   const message = $('anMsg').value.trim();
   if(!message){ toast('Pesan wajib diisi'); return; }
