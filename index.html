@@ -10380,7 +10380,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-12';
+const APP_VERSION = '2026-08-19-13';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10993,8 +10993,16 @@ async function submitAttendance(tokenId){
     logQuery = shiftId ? logQuery.eq('shift_id',shiftId) : logQuery.is('shift_id',null);
     const logs = await q(logQuery);
     const log = logs[0];
-    const items = await q(db.from('checklist_items').select('id').eq('department',me.department).eq('active',true));
-    const allChecked = log && items.every(it => log.daily_log_checks.find(c=>c.item_id===it.id && c.checked));
+    // BUG LAMA yang diperbaiki: dulu menarik SEMUA item checklist departemen
+    // tanpa peduli shift_id-nya, jadi kalau departemen itu punya item khusus
+    // per shift (mis. Security: Shift 1/2/3 beda item), pulang dari satu
+    // shift selalu dianggap "tidak lengkap" karena item shift LAIN ikut
+    // dituntut harus tercentang juga. Sekarang difilter dulu -- item yang
+    // relevan cuma yang shift_id-nya null (berlaku semua shift) atau sama
+    // dengan shift_id saat ini. Konsisten dengan logika di loadWaChecklistFlags().
+    const items = await q(db.from('checklist_items').select('id,shift_id').eq('department',me.department).eq('active',true));
+    const relevantItems = items.filter(it=>!it.shift_id || it.shift_id===shiftId);
+    const allChecked = log && relevantItems.every(it => log.daily_log_checks.find(c=>c.item_id===it.id && c.checked));
     payload.checklist_complete_snapshot = !!allChecked;
     if(!allChecked && !confirm('Checklist harian belum lengkap. Tetap lanjut Absen Pulang? (akan ditandai untuk ditinjau)')){
       closeModal(); return;
