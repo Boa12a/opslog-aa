@@ -10380,7 +10380,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-13';
+const APP_VERSION = '2026-08-19-14';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -14723,10 +14723,36 @@ async function loadShiftMgmt(){
   $('shiftList').innerHTML = shifts.length ? shifts.map(s=>
     `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
       <span>${esc(s.shift_name)} ${s.start_time?`<span class="small muted">(${s.start_time.slice(0,5)}-${s.end_time?s.end_time.slice(0,5):'?'})</span>`:''}</span>
-      <button class="btn-sm btn-ghost" onclick="delShift(${s.id})">Hapus</button></div>`).join('')
+      <span class="row" style="gap:6px">
+        <button class="btn-sm btn-ghost" onclick="editShiftModal(${s.id},'${esc(s.shift_name).replace(/'/g,"\\'")}','${s.start_time||''}','${s.end_time||''}')">Ubah Jam</button>
+        <button class="btn-sm btn-ghost" style="color:var(--red)" onclick="delShift(${s.id})">Hapus</button>
+      </span></div>`).join('')
     : '<p class="muted small">Departemen ini belum pakai sistem shift (1 log per hari).</p>';
   $('ckShift').innerHTML = '<option value="">Semua shift / umum</option>' +
     shifts.map(s=>`<option value="${s.id}">${esc(s.shift_name)}</option>`).join('');
+}
+// PENTING: kalau mau ganti jam shift, JANGAN hapus shift lama lalu buat
+// baru -- checklist_items terhubung ke shift lewat shift_id (angka ID
+// internal), BUKAN lewat nama. Shift baru dapat ID baru, jadi semua
+// checklist yang terikat ke shift lama akan jadi yatim/tidak terpakai lagi,
+// harus dibuat ulang manual satu-satu (persis seperti kejadian Accounting
+// sebelumnya). Fungsi ini UPDATE baris shift yang SAMA (id tidak berubah),
+// jadi seluruh checklist yang sudah ada otomatis tetap nyambung.
+function editShiftModal(id, name, start, end){
+  openModal(`<div class="mhead"><h3>Ubah Jam Shift</h3><button onclick="closeModal()">✕</button></div>
+    <label>Nama Shift</label><input id="shEditName" value="${esc(name)}">
+    <label>Jam Mulai</label><input type="time" id="shEditStart" value="${start.slice(0,5)}">
+    <label>Jam Selesai</label><input type="time" id="shEditEnd" value="${end.slice(0,5)}">
+    <button class="btn btn-teal" id="btnSubmitShEdit" style="margin-top:14px;width:100%" onclick="submitEditShift(${id})">Simpan</button>`);
+}
+async function submitEditShift(id){
+  const shift_name = $('shEditName').value.trim();
+  if(!shift_name){ toast('Nama shift wajib diisi'); return; }
+  if(!lockBtn($('btnSubmitShEdit'))) return;
+  await q(db.from('shifts').update({
+    shift_name, start_time: $('shEditStart').value||null, end_time: $('shEditEnd').value||null
+  }).eq('id',id));
+  closeModal(); toast('Jam shift diperbarui — checklist yang sudah ada tetap terhubung seperti biasa'); loadShiftMgmt();
 }
 async function addShift(){
   const t=$('shNew').value.trim(); if(!t){toast('Nama shift wajib');return;}
@@ -14894,6 +14920,16 @@ async function submitChangePassword(){
 
 /* Enter untuk login */
 document.addEventListener('keydown',e=>{ if(e.key==='Enter' && !$('loginView').classList.contains('hidden')) doLogin(); });
+// Keyboard HP menutupi kolom yang sedang diisi -- browser mobile tidak
+// otomatis menggeser layar supaya kolom aktif tetap terlihat di atas
+// keyboard virtual (khususnya untuk modal bottom-sheet yang nempel di
+// bawah layar). Perbaikan: begitu kolom fokus, scroll paksa ke tengah
+// layar, dikasih jeda dikit supaya keyboard-nya selesai animasi muncul dulu.
+document.addEventListener('focusin', e=>{
+  if(e.target.matches('input,textarea,select')){
+    setTimeout(()=>{ e.target.scrollIntoView({block:'center', behavior:'smooth'}); }, 300);
+  }
+});
 init();
 </script>
 </body>
