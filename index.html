@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-16';
+const APP_VERSION = '2026-08-19-17';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -12064,14 +12064,15 @@ async function loadLogForm(){
   <label style="margin-top:0">📓 Logbook Kejadian</label>
     <p class="small muted" style="margin-top:-6px">Catat kejadian begitu terjadi.</p>
     <div id="logbookList" style="margin-bottom:8px"><p class="muted small">Memuat...</p></div>
-    ${canFill?`<div class="row" style="gap:6px">
-      <input id="lbMsg" placeholder="tulis kejadian..." style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addLogbookEntry('${d}','${t}',${shiftId||'null'});}">
-      <select id="lbUrg" style="width:120px">
+    ${canFill?`
+      <textarea id="lbMsg" rows="3" placeholder="tulis kejadian..." style="width:100%;resize:vertical" onkeydown="if(event.key==='Enter' && event.ctrlKey){event.preventDefault();addLogbookEntry('${d}','${t}',${shiftId||'null'});}"></textarea>
+      <label style="margin-top:8px">Urgensi</label>
+      <select id="lbUrg" style="width:100%">
         <option value="rendah">Rendah</option>
         <option value="sedang">Sedang</option>
-        <option value="tinggi">Tinggi</option>
+        <option value="tinggi">🔴 Tinggi</option>
       </select>
-      <button class="btn btn-teal btn-sm" onclick="addLogbookEntry('${d}','${t}',${shiftId||'null'})">Tambah</button></div>`:''}
+      <button class="btn btn-teal" style="width:100%;margin-top:10px" onclick="addLogbookEntry('${d}','${t}',${shiftId||'null'})">+ Tambah Kejadian</button>`:''}
   </div>`;
   $('logFormArea').innerHTML = h;
   loadLogbookEntries(d, t);
@@ -12666,8 +12667,8 @@ async function openTicket(id){
   t.ticket_updates.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(u=>{
     h += `<div class="tl"><span class="small muted">${fdt(u.created_at)} · ${uname(u.created_by)}</span><br>${esc(u.note)}</div>`;
   });
-  h += `</div><div class="row"><input id="tNote" placeholder="tulis update progres..." style="flex:1">
-    <button class="btn btn-ghost btn-sm" onclick="addUpdate(${t.id})">Kirim</button></div>`;
+  h += `</div><textarea id="tNote" rows="3" placeholder="tulis update progres..." style="width:100%;resize:vertical"></textarea>
+    <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="addUpdate(${t.id})">Kirim</button>`;
   openModal(h);
 }
 async function approveTicket(id){
@@ -13017,8 +13018,8 @@ async function openPengadaan(id){
   r.procurement_updates.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(u=>{
     h += `<div class="tl"><span class="small muted">${fdt(u.created_at)} · ${uname(u.created_by)}</span><br>${esc(u.note)}</div>`;
   });
-  h += `</div><div class="row"><input id="pqNote" placeholder="tulis catatan..." style="flex:1">
-    <button class="btn btn-ghost btn-sm" onclick="addPengadaanUpdate(${r.id})">Kirim</button></div>`;
+  h += `</div><textarea id="pqNote" rows="3" placeholder="tulis catatan..." style="width:100%;resize:vertical"></textarea>
+    <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="addPengadaanUpdate(${r.id})">Kirim</button>`;
   openModal(h);
 }
 function assignPickupModal(requestId, dept){
