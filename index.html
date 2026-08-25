@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-15';
+const APP_VERSION = '2026-08-19-16';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10402,13 +10402,22 @@ function showForceReloadBanner(){
   const el = document.createElement('div');
   el.id = 'versionBanner';
   el.innerHTML = `<span>🔄 Ada pembaruan aplikasi — dimuat ulang otomatis dalam <b id="vbCount">${seconds}</b> detik...</span>
-    <button onclick="location.reload()">Muat Ulang Sekarang</button>`;
+    <button onclick="forceReloadFresh()">Muat Ulang Sekarang</button>`;
   document.body.appendChild(el);
   const timer = setInterval(()=>{
     seconds--;
     const c = document.getElementById('vbCount'); if(c) c.textContent = seconds;
-    if(seconds<=0){ clearInterval(timer); location.reload(); }
+    if(seconds<=0){ clearInterval(timer); forceReloadFresh(); }
   }, 1000);
+}
+// location.reload() biasa kadang masih ambil index.html dari CACHE browser,
+// bukan versi baru yang sungguhan ada di server -- kalau itu terjadi,
+// banner update akan muncul terus-menerus tanpa henti (APP_VERSION lama
+// tetap ke-load lagi setelah "reload"). Tambah query string unik (?v=waktu)
+// memaksa browser menganggap ini URL baru, jadi wajib ambil ulang dari
+// server, bukan dari cache.
+function forceReloadFresh(){
+  location.href = location.pathname + '?v=' + Date.now();
 }
 let me = null;          // profil user login
 let profilesCache = []; // semua profil (untuk nama)
