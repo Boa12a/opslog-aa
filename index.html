@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, interactive-widget=resizes-content">
 <link rel="manifest" href="./manifest.json">
 <link rel="icon" type="image/png" sizes="64x64" href="./favicon-64.png">
 <link rel="icon" href="./favicon.ico">
@@ -10144,7 +10144,8 @@ label{display:block;font-size:12px;font-weight:700;color:var(--muted);margin:10p
 /* Label checkbox biasa (bukan field-label seperti "Nama"/"Tanggal") --
    reset total dari gaya label global (kapital/kecil/abu-abu) supaya
    teksnya kebaca normal. */
-.checkline{display:flex;align-items:center;gap:7px;text-transform:none;font-size:14px;font-weight:600;color:var(--ink);margin:10px 0;letter-spacing:normal}
+.checkline{display:flex;align-items:center;gap:7px;text-transform:none;font-size:14px;font-weight:600;color:var(--ink);margin:10px 0;letter-spacing:normal;cursor:pointer}
+.checkline input[type="checkbox"]{width:22px;height:22px;flex-shrink:0}
 .checkline input[type="checkbox"]{width:18px;height:18px;flex-shrink:0}
 h2{font-size:18px;font-weight:800;margin-bottom:10px}
 h3{font-size:15px;font-weight:700;margin-bottom:8px}
@@ -10216,7 +10217,7 @@ main{max-width:960px;margin:0 auto;padding:16px 14px 80px}
 /* Modal */
 #modalWrap{position:fixed;inset:0;background:rgba(18,40,63,.55);z-index:50;display:flex;align-items:flex-end;justify-content:center}
 @media(min-width:641px){#modalWrap{align-items:center}}
-#modalBox{background:#fff;border-radius:18px 18px 0 0;width:100%;max-width:600px;max-height:92vh;overflow-y:auto;padding:20px}
+#modalBox{background:#fff;border-radius:18px 18px 0 0;width:100%;max-width:600px;max-height:min(92vh, calc(var(--vvh, 100vh) - 16px));overflow-y:auto;padding:20px}
 @media(min-width:641px){#modalBox{border-radius:18px}}
 .mhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .mhead button{background:#EDF2F1;width:32px;height:32px;border-radius:50%;font-size:16px}
@@ -10380,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-14';
+const APP_VERSION = '2026-08-19-15';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -12026,10 +12027,15 @@ async function loadLogForm(){
   } else {
   items.forEach(it=>{
     const chk = log ? (log.daily_log_checks.find(c=>c.item_id===it.id)||{}) : {};
-    h += `<div class="row" style="margin-bottom:6px;align-items:flex-start">
-      <input type="checkbox" style="width:20px;height:20px;margin-top:2px" data-item="${it.id}" ${chk.checked?'checked':''}>
-      <div style="flex:1">${esc(it.item_text)}
-        <input type="text" placeholder="catatan (opsional)" data-note="${it.id}" value="${esc(chk.note||'')}" style="margin-top:3px;padding:5px 8px;font-size:12px"></div></div>`;
+    // Dibungkus <label> supaya seluruh baris (bukan cuma kotak kecil 20px)
+    // bisa ditap untuk centang -- jauh lebih mudah dipakai jempol di HP.
+    // Checkbox diperbesar ke 24px, jarak antar baris ditambah.
+    h += `<div style="margin-bottom:14px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+        <input type="checkbox" style="width:24px;height:24px;flex-shrink:0;margin-top:1px" data-item="${it.id}" ${chk.checked?'checked':''}>
+        <span style="flex:1;padding-top:1px">${esc(it.item_text)}</span>
+      </label>
+      <input type="text" placeholder="catatan (opsional)" data-note="${it.id}" value="${esc(chk.note||'')}" style="margin-top:6px;margin-left:34px;width:calc(100% - 34px);padding:8px 10px;font-size:14px;border-radius:6px"></div>`;
   });
   if(log && log.catatan){
     h += `<div class="small muted" style="background:#F3F4F6;padding:8px;border-radius:8px;margin-top:6px">
@@ -14925,6 +14931,27 @@ document.addEventListener('keydown',e=>{ if(e.key==='Enter' && !$('loginView').c
 // keyboard virtual (khususnya untuk modal bottom-sheet yang nempel di
 // bawah layar). Perbaikan: begitu kolom fokus, scroll paksa ke tengah
 // layar, dikasih jeda dikit supaya keyboard-nya selesai animasi muncul dulu.
+// Keyboard HP membuat 'vh' CSS jadi tidak akurat -- browser (terutama iOS
+// Safari) tetap menghitung vh berdasar tinggi layar PENUH, seolah keyboard
+// tidak ada, padahal area yang benar2 kelihatan jauh lebih pendek. Modal
+// bottom-sheet (#modalWrap/#modalBox) jadi salah ukur dan terkesan
+// "tertutup" begitu keyboard muncul. Perbaikan: pakai visualViewport (area
+// yang BENAR2 kelihatan) untuk hitung tinggi sungguhan, taruh di CSS
+// variable --vvh, dan geser #modalWrap supaya selalu pas di atas keyboard.
+if(window.visualViewport){
+  const syncViewportHeight = () => {
+    const vv = window.visualViewport;
+    document.documentElement.style.setProperty('--vvh', vv.height+'px');
+    const modalWrap = document.getElementById('modalWrap');
+    if(modalWrap && !modalWrap.classList.contains('hidden')){
+      modalWrap.style.height = vv.height+'px';
+      modalWrap.style.top = vv.offsetTop+'px';
+    }
+  };
+  window.visualViewport.addEventListener('resize', syncViewportHeight);
+  window.visualViewport.addEventListener('scroll', syncViewportHeight);
+  syncViewportHeight();
+}
 document.addEventListener('focusin', e=>{
   if(e.target.matches('input,textarea,select')){
     setTimeout(()=>{ e.target.scrollIntoView({block:'center', behavior:'smooth'}); }, 300);
