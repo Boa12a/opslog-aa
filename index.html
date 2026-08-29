@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-18';
+const APP_VERSION = '2026-08-19-19';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -14231,22 +14231,31 @@ async function loadRekap(){
   const isCurrent = m === today().slice(0,7);
   const effDays = isCurrent ? Number(today().slice(8,10)) : daysInMonth;
 
-  const [logs, tickets, items, assetsIn, dispOut] = await Promise.all([
+  const [logs, tickets, items, assetsIn, dispOut, allShifts] = await Promise.all([
     q(db.from('daily_logs').select('id,log_date,department').gte('log_date',from).lte('log_date',lastDay)),
     q(db.from('tickets').select('*').gte('created_at',from).lte('created_at',lastDay+'T23:59:59')),
     q(db.from('ticket_items').select('*, tickets!inner(department,created_at)').gte('tickets.created_at',from).lte('tickets.created_at',lastDay+'T23:59:59')),
     q(db.from('assets').select('id,department,created_at').gte('created_at',from).lte('created_at',lastDay+'T23:59:59')),
-    q(db.from('asset_disposals').select('*, assets(department,name)').eq('status','disetujui').gte('decided_at',from).lte('decided_at',lastDay+'T23:59:59'))
+    q(db.from('asset_disposals').select('*, assets(department,name)').eq('status','disetujui').gte('decided_at',from).lte('decided_at',lastDay+'T23:59:59')),
+    q(db.from('shifts').select('department').eq('active',true))
   ]);
   const closedThisMonth = await q(db.from('tickets').select('*').eq('status','selesai').gte('closed_at',from).lte('closed_at',lastDay+'T23:59:59'));
+  // Departemen yang pakai sistem shift (Security, Accounting) bisa punya
+  // LEBIH dari 1 baris daily_logs per hari (1 per shift) -- jadi penyebutnya
+  // harus dikali jumlah shift aktif, bukan disamakan dengan departemen biasa
+  // yang cuma 1 log/hari. BUG LAMA: tanpa ini, departemen shift yang rajin
+  // isi semua shift-nya malah kelihatan >100% (mustahil, tanda ada yang salah).
+  const shiftCountByDept = {};
+  allShifts.forEach(s=>{ shiftCountByDept[s.department] = (shiftCountByDept[s.department]||0) + 1; });
 
   let h = '';
   // Kepatuhan log
   h += `<div class="card"><h3>Kepatuhan Pengisian Log (${effDays} hari)</h3><table class="respTable"><tr><th>Dept</th><th>Terisi</th><th>%</th></tr>`;
   for(const d in DEPTS){
     const n = logs.filter(l=>l.department===d).length;
-    const pct = effDays? Math.round(n/effDays*100):0;
-    h += `<tr><td data-label="Dept">${deptTag(d)}</td><td data-label="Terisi">${n}/${effDays}</td>
+    const denom = effDays * (shiftCountByDept[d] || 1);
+    const pct = denom? Math.round(n/denom*100):0;
+    h += `<tr><td data-label="Dept">${deptTag(d)}</td><td data-label="Terisi">${n}/${denom}</td>
       <td data-label="%" style="font-weight:800;color:${pct>=90?'var(--green)':pct>=60?'var(--amber)':'var(--red)'}">${pct}%</td></tr>`;
   }
   h += `</table></div>`;
