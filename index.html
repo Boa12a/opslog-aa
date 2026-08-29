@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-17';
+const APP_VERSION = '2026-08-19-18';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -11093,11 +11093,18 @@ async function renderJadwalBulanan(){
 async function loadJadwalGrid(){
   const dept = $('jwDept').value, month = $('jwMonth').value;
   const canEdit = isMgr() || (me.role==='spv' && me.department===dept);
+  // Hari terakhir bulan ini -- dihitung DULU sebelum query, supaya rentang
+  // tanggal untuk public_holidays selalu tanggal yang valid secara kalender.
+  // BUG LAMA yang diperbaiki: pakai '-31' hardcode, Postgres ERROR untuk
+  // bulan yang harinya <31 (April, Juni, September, November, Februari)
+  // karena mis. '2026-09-31' bukan tanggal yang ada -- itu penyebab
+  // "Jadwal September" (dan bulan2 lain berhari <31) gagal dibuka total.
+  const lastDay = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
   const [sched, shifts, staffList, holidays, offRules] = await Promise.all([
     q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('department',dept).eq('period_month',month)),
     q(db.from('shifts').select('*').eq('department',dept).eq('active',true).order('sort_order')),
     q(db.from('profiles').select('*').eq('department',dept).in('role',['spv','staff']).eq('active',true)),
-    q(db.from('public_holidays').select('*').gte('holiday_date', month+'-01').lte('holiday_date', month+'-31')),
+    q(db.from('public_holidays').select('*').gte('holiday_date', month+'-01').lte('holiday_date', `${month}-${String(lastDay).padStart(2,'0')}`)),
     q(db.from('department_off_rules').select('*').eq('department',dept))
   ]);
   // Default 'manager_override' kalau departemen belum ada baris di tabel (aman, sama seperti perilaku lama).
@@ -11114,9 +11121,8 @@ async function loadJadwalGrid(){
   // -- supaya jadwal yang sudah diajukan/disetujui TIDAK ikut berubah sendiri.
   let missingCount = 0;
   {
-    const daysInMonthCheck = new Date(Number(month.slice(0,4)), Number(month.slice(5,7)), 0).getDate();
     staffList.forEach(p=>{
-      for(let d=1; d<=daysInMonthCheck; d++){
+      for(let d=1; d<=lastDay; d++){
         const dateStr = `${month}-${String(d).padStart(2,'0')}`;
         if(!s.work_schedule_entries.some(e=>e.staff_id===p.id && e.work_date===dateStr)) missingCount++;
       }
