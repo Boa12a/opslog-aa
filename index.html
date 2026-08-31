@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-19';
+const APP_VERSION = '2026-08-19-20';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -14155,7 +14155,13 @@ function uploadWinnerPhoto(quizId, staffId, multiWinner){
       const blob = await compressImageFile(file);
       const path = `quiz_${quizId}_${staffId}_${Date.now()}.jpg`;
       const {error: upErr} = await db.storage.from('quiz-winner-photos').upload(path, blob, {contentType:'image/jpeg', upsert:true});
-      if(upErr){ toast('Gagal upload: '+upErr.message); return; }
+      if(upErr){
+        // Info diagnostik sementara ditempel ke pesan error -- supaya kelihatan
+        // langsung di layar HP tanpa perlu buka Console (susah diakses di iPhone).
+        // Pakai alert() (bukan toast) supaya tidak hilang otomatis sebelum sempat dibaca/screenshot.
+        alert('Gagal upload: '+upErr.message+'\n\nSesi terdeteksi: '+(me?me.name+' / role: '+me.role:'TIDAK ADA sesi (me kosong)'));
+        return;
+      }
       const {data: pub} = db.storage.from('quiz-winner-photos').getPublicUrl(path);
       const winTable = multiWinner ? 'quiz_multi_winners' : 'quiz_winners';
       await q(db.from(winTable).update({photo_url: pub.publicUrl, photo_uploaded_at: new Date().toISOString()}).eq('quiz_id', quizId).eq('staff_id', staffId));
