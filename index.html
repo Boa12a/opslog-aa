@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-22';
+const APP_VERSION = '2026-08-19-24';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -10666,15 +10666,31 @@ function randomToken(){
   return Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 let _birthdayTimer = null;
+let _kioskQuizTimer = null;
 async function renderKioskScreen(isEmergency){
   const wa = await q(db.from('app_settings').select('*').eq('key','wa_hrd_darurat'));
   const waNum = wa[0]?.value || '';
   const t = today();
   const allBirths = await q(db.from('profiles').select('*').eq('active',true).not('birth_date','is',null));
   const todayBirthdays = allBirths.filter(p=> p.birth_date.slice(5,10)===t.slice(5,10));
+  // Pemenang kuis yang fotonya diupload dalam 3 hari terakhir -- ditampilkan
+  // bergantian di layar kios, supaya semua karyawan yang lewat buat absen
+  // ikut lihat pengumumannya (bukan cuma yang buka Dashboard di HP masing2).
+  const threeDaysAgo = new Date(Date.now() - 3*86400000).toISOString();
+  const [freshWin, freshMultiWin] = await Promise.all([
+    q(db.from('quiz_winners').select('*').not('photo_url','is',null).gte('photo_uploaded_at', threeDaysAgo)),
+    q(db.from('quiz_multi_winners').select('*').not('photo_url','is',null).gte('photo_uploaded_at', threeDaysAgo))
+  ]);
+  const freshWinners = [...freshWin, ...freshMultiWin];
+  let winnerQuizzes = [];
+  if(freshWinners.length){
+    const quizIds = [...new Set(freshWinners.map(w=>w.quiz_id))];
+    winnerQuizzes = await q(db.from('quizzes').select('id,title,prize').in('id',quizIds));
+  }
   $('main').innerHTML = `
     <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--navy);color:#fff;text-align:center;padding:20px">
       <div id="kioskBirthdayBox"></div>
+      <div id="kioskQuizBox"></div>
       <div style="font-size:20px;font-weight:800;margin-bottom:4px">Absensi ${me.department?(ALL_STAFF_DEPTS[me.department]?.label||me.department):''}</div>
       <div class="small" style="opacity:.75;margin-bottom:18px">Buka menu <b>Absen</b> di aplikasi masing-masing, lalu pindai QR ini</div>
       <div id="kioskQrBox" style="background:#fff;padding:18px;border-radius:16px"><p style="color:#333">Memuat QR...</p></div>
@@ -10696,6 +10712,23 @@ async function renderKioskScreen(isEmergency){
     };
     showBirthday();
     if(todayBirthdays.length>1) _birthdayTimer = setInterval(showBirthday, 4000);
+  }
+  clearInterval(_kioskQuizTimer);
+  if(freshWinners.length){
+    let qIdx = 0;
+    const showQuizWinner = ()=>{
+      const w = freshWinners[qIdx % freshWinners.length];
+      const qz = winnerQuizzes.find(x=>x.id===w.quiz_id);
+      $('kioskQuizBox').innerHTML = `<div style="margin-bottom:18px">
+        <div style="font-size:15px;opacity:.85">🏆 Selamat kepada</div>
+        <div style="font-size:22px;font-weight:800;color:var(--gold)">${esc(uname(w.staff_id))}!</div>
+        <div class="small" style="opacity:.8;margin-top:2px">${qz?esc(qz.title):'Pemenang Kuis'}${qz&&qz.prize?' · Hadiah '+esc(qz.prize):''}</div>
+        <img src="${esc(w.photo_url)}" style="max-width:200px;border-radius:12px;margin-top:10px;display:block;margin-left:auto;margin-right:auto">
+      </div>`;
+      qIdx++;
+    };
+    showQuizWinner();
+    if(freshWinners.length>1) _kioskQuizTimer = setInterval(showQuizWinner, 5000);
   }
   await kioskNewToken();
   clearInterval(_kioskTimer);
@@ -14546,7 +14579,12 @@ function pairSessions(logs, matchKey){
 async function loadHrdAttendance(){
   const m = $('hrMonth').value;
   const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
-  const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
+  // PENTING: tanpa .order()+.limit() eksplisit, Supabase otomatis memotong
+  // hasil di 1000 baris (batas bawaan), dan urutan default-nya dari tanggal
+  // AWAL bulan -- jadi kalau 1 bulan datanya >1000 baris, tanggal2 terakhir
+  // bulan itu (termasuk hari ini) malah tidak pernah ketarik sama sekali.
+  // Diurutkan terbaru dulu + limit dinaikkan supaya 1 bulan penuh aman tertarik.
+  const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to).order('scanned_at',{ascending:false}).limit(5000));
   const sessions = pairSessions(logs, l=>'k'); // kunci 'k' aman sekarang -- pairSessions tidak lagi menimpa sesi lama, jadi 1 hari BISA lebih dari 1 sesi (mis. balik lagi untuk lembur)
   let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat Kehadiran</h3>
     <button class="btn btn-ghost btn-sm" onclick="exportKehadiranExcel()">⬇ Excel</button></div>`;
@@ -14568,7 +14606,7 @@ async function loadHrdTreatment(){
   const m = $('hrMonth').value;
   const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
   const [logs, pools] = await Promise.all([
-    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to)),
+    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to).order('scanned_at',{ascending:false}).limit(5000)),
     q(db.from('pool_types').select('*'))
   ]);
   const sessions = pairSessions(logs, l=>'p'+l.pool_type_id);
@@ -14593,7 +14631,7 @@ async function exportKehadiranExcel(){
   await ensureXlsx();
   const m = $('hrMonth').value;
   const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
-  const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
+  const logs = await q(db.from('attendance_logs').select('*').eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to).order('scanned_at',{ascending:false}).limit(5000));
   const sessions = pairSessions(logs, l=>'k');
   const rows = sessions.map(s=>({
     Tanggal: localDateOf(s.start||s.end), Nama: uname(s.staff_id),
@@ -14611,7 +14649,7 @@ async function exportTreatmentExcel(){
   const m = $('hrMonth').value;
   const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
   const [logs, pools] = await Promise.all([
-    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to)),
+    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to).order('scanned_at',{ascending:false}).limit(5000)),
     q(db.from('pool_types').select('*'))
   ]);
   const sessions = pairSessions(logs, l=>'p'+l.pool_type_id);
