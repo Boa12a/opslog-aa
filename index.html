@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-21';
+const APP_VERSION = '2026-08-19-22';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -14154,23 +14154,14 @@ function uploadWinnerPhoto(quizId, staffId, multiWinner){
     try{
       const blob = await compressImageFile(file);
       const path = `quiz_${quizId}_${staffId}_${Date.now()}.jpg`;
-      const {error: upErr} = await db.storage.from('quiz-winner-photos').upload(path, blob, {contentType:'image/jpeg', upsert:true});
-      if(upErr){
-        // Diagnostik lapis kedua -- 'me' cuma data di memori HP, belum tentu
-        // sama dengan sesi yang BENAR2 dikirim ke server saat itu. Cek
-        // langsung: (1) apakah token sesi auth masih ada, (2) apa kata
-        // server sendiri lewat my_role() -- ini sumber kebenaran yang
-        // dipakai RLS, bukan variabel 'me' di klien.
-        let diag = 'Gagal upload: '+upErr.message+'\n\nSesi (klien/me): '+(me?me.name+' / role: '+me.role:'kosong');
-        try{
-          const {data:{session}} = await db.auth.getSession();
-          diag += '\nSesi auth: '+(session ? ('user_id='+session.user.id+' | token ada: '+(!!session.access_token)+' | expired_at: '+session.expires_at) : 'TIDAK ADA SESI SAMA SEKALI');
-          const roleCheck = await db.rpc('my_role');
-          diag += '\nmy_role() dari server: '+JSON.stringify(roleCheck.data)+' (error: '+(roleCheck.error?roleCheck.error.message:'tidak ada')+')';
-        }catch(diagErr){ diag += '\n(gagal ambil diagnostik tambahan: '+diagErr.message+')'; }
-        alert(diag);
-        return;
-      }
+      // upsert TIDAK dipakai -- path sudah unik (ada Date.now() di dalamnya),
+      // jadi tidak pernah ada file lama yang perlu ditimpa. upsert:true dulu
+      // memicu Supabase mengecek dulu apakah file itu sudah ada (butuh izin
+      // SELECT ke storage.objects yang tidak pernah dibuatkan kebijakannya),
+      // itu penyebab "new row violates row-level security policy" meski role
+      // sudah owner dan sesi valid.
+      const {error: upErr} = await db.storage.from('quiz-winner-photos').upload(path, blob, {contentType:'image/jpeg'});
+      if(upErr){ toast('Gagal upload: '+upErr.message); return; }
       const {data: pub} = db.storage.from('quiz-winner-photos').getPublicUrl(path);
       const winTable = multiWinner ? 'quiz_multi_winners' : 'quiz_winners';
       await q(db.from(winTable).update({photo_url: pub.publicUrl, photo_uploaded_at: new Date().toISOString()}).eq('quiz_id', quizId).eq('staff_id', staffId));
