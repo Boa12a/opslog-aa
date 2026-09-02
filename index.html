@@ -10381,7 +10381,7 @@ const KONDISI = {normal:'Normal',perlu_perhatian:'Perlu Perhatian',bermasalah:'B
 // update app_settings set value='...' where key='app_version';
 // (nilainya harus SAMA PERSIS dengan yang di database supaya tidak
 // dianggap versi baru terus-menerus)
-const APP_VERSION = '2026-08-19-24';
+const APP_VERSION = '2026-08-19-25';
 // Cek apakah ada versi index.html baru yang sudah di-upload (dibandingkan
 // lewat app_settings.app_version). Kalau beda, tampilkan banner + reload
 // otomatis dalam 15 detik -- supaya semua device yang sedang membuka
@@ -14270,15 +14270,18 @@ async function loadRekap(){
   const isCurrent = m === today().slice(0,7);
   const effDays = isCurrent ? Number(today().slice(8,10)) : daysInMonth;
 
+  // Sama seperti perbaikan Riwayat Kehadiran sebelumnya -- tambah limit
+  // eksplisit supaya tidak diam2 kepotong batas 1000 baris bawaan Supabase
+  // kalau volume tiket/log/aset di 1 bulan itu ternyata besar.
   const [logs, tickets, items, assetsIn, dispOut, allShifts] = await Promise.all([
-    q(db.from('daily_logs').select('id,log_date,department').gte('log_date',from).lte('log_date',lastDay)),
-    q(db.from('tickets').select('*').gte('created_at',from).lte('created_at',lastDay+'T23:59:59')),
-    q(db.from('ticket_items').select('*, tickets!inner(department,created_at)').gte('tickets.created_at',from).lte('tickets.created_at',lastDay+'T23:59:59')),
-    q(db.from('assets').select('id,department,created_at').gte('created_at',from).lte('created_at',lastDay+'T23:59:59')),
-    q(db.from('asset_disposals').select('*, assets(department,name)').eq('status','disetujui').gte('decided_at',from).lte('decided_at',lastDay+'T23:59:59')),
+    q(db.from('daily_logs').select('id,log_date,department').gte('log_date',from).lte('log_date',lastDay).order('log_date',{ascending:false}).limit(5000)),
+    q(db.from('tickets').select('*').gte('created_at',from).lte('created_at',lastDay+'T23:59:59').order('created_at',{ascending:false}).limit(5000)),
+    q(db.from('ticket_items').select('*, tickets!inner(department,created_at)').gte('tickets.created_at',from).lte('tickets.created_at',lastDay+'T23:59:59').limit(5000)),
+    q(db.from('assets').select('id,department,created_at').gte('created_at',from).lte('created_at',lastDay+'T23:59:59').order('created_at',{ascending:false}).limit(5000)),
+    q(db.from('asset_disposals').select('*, assets(department,name)').eq('status','disetujui').gte('decided_at',from).lte('decided_at',lastDay+'T23:59:59').order('decided_at',{ascending:false}).limit(5000)),
     q(db.from('shifts').select('department').eq('active',true))
   ]);
-  const closedThisMonth = await q(db.from('tickets').select('*').eq('status','selesai').gte('closed_at',from).lte('closed_at',lastDay+'T23:59:59'));
+  const closedThisMonth = await q(db.from('tickets').select('*').eq('status','selesai').gte('closed_at',from).lte('closed_at',lastDay+'T23:59:59').order('closed_at',{ascending:false}).limit(5000));
   // Departemen yang pakai sistem shift (Security, Accounting) bisa punya
   // LEBIH dari 1 baris daily_logs per hari (1 per shift) -- jadi penyebutnya
   // harus dikali jumlah shift aktif, bukan disamakan dengan departemen biasa
@@ -14672,20 +14675,25 @@ async function saveWaNumber(){
 async function loadWaChecklistFlags(){
   const list = await q(db.from('attendance_logs').select('*').eq('checklist_complete_snapshot',false).is('reviewed_at',null).order('scanned_at',{ascending:false}));
   if(!list.length){ $('checklistFlagArea').innerHTML=''; return; }
-  // Untuk tiap flag, cari item checklist mana spesifiknya yang belum
-  // dicentang (paralel, bukan satu-satu) -- sebelumnya cuma nampilin nama
-  // orang & jam, tanpa detail apa yang kurang.
-  const details = await Promise.all(list.map(async a=>{
+  // Batch-fetch SEKALI untuk semua baris yang di-flag -- dulu tiap baris
+  // nembak 2 query sendiri (N flag = 1+2N query total, bisa lambat kalau
+  // flag-nya banyak). Sekarang selalu cuma 3 query total, berapa pun
+  // banyaknya flag, lalu dicocokkan di sisi client.
+  const depts = [...new Set(list.map(a=>a.department).filter(Boolean))];
+  const dates = list.map(a=>localDateOf(a.scanned_at));
+  const minDate = dates.reduce((x,y)=>x<y?x:y);
+  const maxDate = dates.reduce((x,y)=>x>y?x:y);
+  const [allItems, allLogs] = depts.length ? await Promise.all([
+    q(db.from('checklist_items').select('*').in('department',depts).eq('active',true).order('sort_order')),
+    q(db.from('daily_logs').select('*, daily_log_checks(*)').in('department',depts).gte('log_date',minDate).lte('log_date',maxDate))
+  ]) : [[],[]];
+  const details = list.map(a=>{
     const logDate = localDateOf(a.scanned_at);
-    const itemsQ = db.from('checklist_items').select('*').eq('department',a.department).eq('active',true).order('sort_order');
-    let logQ = db.from('daily_logs').select('*, daily_log_checks(*)').eq('department',a.department).eq('log_date',logDate);
-    logQ = a.shift_id ? logQ.eq('shift_id',a.shift_id) : logQ.is('shift_id',null);
-    const [items, logs] = await Promise.all([q(itemsQ), q(logQ)]);
-    const relevant = items.filter(it=>!it.shift_id || it.shift_id===a.shift_id);
-    const log = logs[0];
+    const relevant = allItems.filter(it=>it.department===a.department && (!it.shift_id || it.shift_id===a.shift_id));
+    const log = allLogs.find(l=>l.department===a.department && l.log_date===logDate && (a.shift_id ? l.shift_id===a.shift_id : l.shift_id==null));
     const missing = relevant.filter(it=>!(log && log.daily_log_checks.find(c=>c.item_id===it.id && c.checked)));
     return {a, missing, hasLog: !!log};
-  }));
+  });
   let h = `<div class="card" style="border-left:4px solid var(--gold)"><h3>⚠ Checklist Belum Lengkap Saat Pulang (${list.length})</h3>
     <p class="small muted">"Tandai Sudah Ditinjau" cuma menandai Manager/Owner SUDAH LIHAT peringatan ini (untuk arsip/histori) — TIDAK melengkapi checklist-nya. Kalau perlu ditindaklanjuti, hubungi orangnya/SPV-nya langsung.</p>`;
   details.forEach(({a, missing, hasLog})=>{
