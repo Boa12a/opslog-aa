@@ -13174,9 +13174,16 @@ async function openPengadaan(id){
         }
       }
       if(isAccSpv() || isMgr() || it.prepared_by===me.id){
-        h += `<div class="row" style="margin-top:6px">
-          <button class="btn btn-teal btn-sm" onclick="fulfillItem(${it.id},'gudang')">Ambil dari Gudang</button>
-          <button class="btn btn-navy btn-sm" onclick="fulfillItem(${it.id},'beli')">Sudah Dibeli</button></div>`;
+        const st = it.aa_sync_status||'belum';
+        if(st==='menunggu_pembelian'){
+          h += `<div class="small" style="margin-top:6px;color:#1E40AF">Menunggu pembelian & input nota di AA Soft. Setelah nota diinput, otomatis jadi "siap diambil".</div>`;
+        } else {
+          const live = it.aa_item_id && _catAAcache ? _catAAcache.find(k=>k.aa_item_id===it.aa_item_id) : null;
+          const cukup = !it.aa_item_id ? false : (live ? live.current_stock >= Number(it.qty) : true);
+          h += `<div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px">
+            ${it.aa_item_id && cukup ? `<button class="btn btn-teal btn-sm" onclick="fulfillItem(${it.id},'gudang')">Ambil dari Gudang</button>` : ''}
+            <button class="btn btn-navy btn-sm" onclick="fulfillItem(${it.id},'beli')">${it.aa_item_id && !cukup ? '⚠ Stok kurang — ' : ''}Ajukan Pembelian ke AA Soft</button></div>`;
+        }
       }
     }
     if(it.status==='siap_diambil'){
@@ -13221,8 +13228,8 @@ async function ambilTugasSaya(itemId, requestId){
   await q(db.from('procurement_items').update({prepared_by:me.id, prepared_at:new Date().toISOString()}).eq('id',itemId).is('prepared_by',null));
   const [it] = await q(db.from('procurement_items').select('item_name,prepared_by').eq('id',itemId));
   if(it.prepared_by!==me.id){ toast('Sudah diambil orang lain'); openPengadaan(requestId); return; }
-  await q(db.from('task_items').insert({staff_id:me.id, department:'ACC',
-    task_text:'Siapkan barang: '+(it.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select());
+  try{ await db.from('task_items').insert({staff_id:me.id, department:'ACC',
+    task_text:'Siapkan barang: '+(it.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select(); }catch(e){ console.warn('task_items:', e); }
   await q(db.from('procurement_updates').insert({request_id:requestId, note:'Diambil sebagai tugas oleh '+me.name+': '+it.item_name, created_by:me.id}).select());
   toast('Tugas diambil'); openPengadaan(requestId); if(page==='pengadaan') loadPengadaan();
 }
@@ -13239,8 +13246,8 @@ async function authorizeAndAssign(itemId, requestId){
   closeModal();
   await q(db.from('procurement_items').update({prepared_by:staffId, prepared_at:new Date().toISOString()}).eq('id',itemId));
   const [it] = await q(db.from('procurement_items').select('item_name').eq('id',itemId));
-  await q(db.from('task_items').insert({staff_id:staffId, department:'ACC',
-    task_text:'Beli barang: '+(it?.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select());
+  try{ await db.from('task_items').insert({staff_id:staffId, department:'ACC',
+    task_text:'Beli barang: '+(it?.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select(); }catch(e){ console.warn('task_items:', e); }
   await authorizeItem(itemId, true);   // ini yang mengirim ke daftar pembelian AA Soft
 }
 async function assignPrepare(itemId, requestId){
@@ -13358,7 +13365,8 @@ async function ajukanPembelianAA(it){
     const {data, error} = await aa.rpc('ajukan_pembelian_opslog', {p_secret:_aaSecret, p:{
       opslog_item_id:it.id, opslog_request_id:it.request_id, item_name:it.item_name, qty:it.qty,
       department:req.department, budget_position_id:req.aa_budget_position_id, budget_position_name:req.aa_budget_position_name,
-      keterangan:it.keterangan, est_price:it.est_price, requested_by_name:uname(req.requested_by) }});
+      keterangan:it.keterangan, est_price:it.est_price, requested_by_name:uname(req.requested_by),
+      aa_item_id:it.aa_item_id||null }});
     const r = Array.isArray(data)?data[0]:data;
     if(error) throw new Error(error.message);
     if(!r?.ok) throw new Error(r?.pesan||'ditolak');
@@ -13370,11 +13378,35 @@ async function ajukanPembelianAA(it){
   }
 }
 async function fulfillItem(itemId, method){
-  let actual = null;
+  const [it0] = await q(db.from('procurement_items')
+    .select('id,request_id,item_name,qty,aa_item_id,category,keterangan,est_price,procurement_requests(department,aa_budget_position_id,aa_budget_position_name,requested_by)')
+    .eq('id',itemId));
+
+  // ── JALUR BELI: pembelian HANYA dicatat di AA Soft. Di sini cuma mengajukan. ──
   if(method==='beli'){
-    const val = prompt('Harga realisasi pembelian (Rp):'); if(val===null) return;
-    actual = Number(val)||0;
+    await ajukanPembelianAA(it0);
+    openPengadaan(it0.request_id); if(page==='pengadaan') loadPengadaan();
+    return;
   }
+
+  // ── JALUR GUDANG: cek stok TERKINI di AA Soft dulu ──
+  if(it0.aa_item_id){
+    try{
+      const kat = await loadKatalogAA();
+      const k = kat.find(x=>x.aa_item_id===it0.aa_item_id);
+      const stok = k ? k.current_stock : 0;
+      if(stok < Number(it0.qty)){
+        // Stok tidak cukup → otomatis jadi tugas pembelian (masuk daftar beli AA Soft),
+        // barang dibeli & dimasukkan gudang dulu, baru bisa diambil.
+        toast(`Stok "${it0.item_name}" di gudang ${stok}, diminta ${it0.qty} — diajukan ke pembelian AA Soft`);
+        await ajukanPembelianAA(it0);
+        openPengadaan(it0.request_id); if(page==='pengadaan') loadPengadaan();
+        return;
+      }
+    }catch(e){ toast('Tidak bisa memeriksa stok AA Soft: '+e.message); return; }
+  }
+
+  const actual = null;
   await q(db.from('procurement_items').update({status:'siap_diambil', fulfillment_method:method, actual_price:actual,
     fulfilled_by:me.id, fulfilled_at:new Date().toISOString()}).eq('id',itemId));
   const [it] = await q(db.from('procurement_items').select('request_id,item_name,ticket_item_id').eq('id',itemId));
