@@ -12729,10 +12729,19 @@ async function createPengadaanFromTicket(ticketId){
   if(existing.length) return; // sudah pernah dibuat, jangan duplikat
   const [t] = await q(db.from('tickets').select('*, ticket_items(*)').eq('id',ticketId));
   if(!t.ticket_items.length) return; // tidak ada rincian biaya, tidak perlu pengadaan
+  // Pos budget AA Soft untuk kebutuhan perbaikan: "Peralatan dan Perlengkapan"
+  // (bisa diubah Manager/Accounting di detail permintaan bila tidak sesuai)
+  let posId=null, posName=null;
+  try{
+    const pos = await loadPosBudgetAA(t.department);
+    const p = pos.find(x=>/peralatan/i.test(x.name)) || pos[0];
+    if(p){ posId=p.id; posName=p.name; }
+  }catch(e){}
   const r = await q(db.from('procurement_requests').insert({
     department: t.department, requested_by: t.reported_by,
     notes: 'Otomatis dari Tiket Kerusakan #'+t.id+': '+t.title, ticket_id: t.id,
-    pickup_assigned_to: t.pic_user_id || null // PIC tiket otomatis jadi penerima barang
+    pickup_assigned_to: t.pic_user_id || null, // PIC tiket otomatis jadi penerima barang
+    aa_budget_position_id: posId, aa_budget_position_name: posName
   }).select());
   const reqId = r[0].id;
   const items = t.ticket_items.map(it=>({
@@ -13114,6 +13123,19 @@ async function submitPengadaan(){
   closeModal(); toast('Permintaan pengadaan tersimpan');
   if(page==='pengadaan') loadPengadaan(); else go('pengadaan');
 }
+async function ubahPosBudget(reqId){
+  const [r] = await q(db.from('procurement_requests').select('department,aa_budget_position_id').eq('id',reqId));
+  let pos=[]; try{ pos = await loadPosBudgetAA(r.department); }catch(e){ toast(e.message); return; }
+  openModal(`<div class="mhead"><h3>Ubah Pos Budget</h3><button onclick="closeModal()">✕</button></div>
+    <label>Pos Budget (AA Soft)</label>
+    <select id="ubPos">${pos.map(p=>`<option value="${p.id}" data-name="${esc(p.name)}" ${p.id===r.aa_budget_position_id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="simpanPosBudget(${reqId})">Simpan</button>`);
+}
+async function simpanPosBudget(reqId){
+  const sel=$('ubPos'); const id=sel.value, name=sel.selectedOptions[0]?.dataset.name;
+  await q(db.from('procurement_requests').update({aa_budget_position_id:id, aa_budget_position_name:name}).eq('id',reqId));
+  closeModal(); toast('Pos budget diperbarui'); openPengadaan(reqId);
+}
 async function openPengadaan(id){
   let [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
   // Stok terkini dari AA Soft untuk item gudang yang belum selesai (supaya departemen tahu
@@ -13132,6 +13154,9 @@ async function openPengadaan(id){
       ${r.ticket_id?`<button class="btn btn-ghost btn-sm" onclick="closeModal();openTicket(${r.ticket_id})">Lihat Tiket Kerusakan #${r.ticket_id}</button>`:''}</div>
     <p class="small muted">Diajukan oleh ${uname(r.requested_by)} · ${fdt(r.created_at)}</p>`;
   if(r.notes) h += `<p class="small">${esc(r.notes)}</p>`;
+  const adaTerbuka = (r.procurement_items||[]).some(i=>!['selesai','ditolak'].includes(i.status));
+  h += `<div class="small" style="margin-top:6px">💰 Pos budget AA Soft: <b>${r.aa_budget_position_name?esc(r.aa_budget_position_name):'<span style="color:#B91C1C">- belum dipilih -</span>'}</b>
+    ${(isMgr()||isAcc()) && adaTerbuka ? `<button class="btn-sm btn-ghost" onclick="ubahPosBudget(${r.id})" style="margin-left:6px">${r.aa_budget_position_name?'Ubah':'Pilih'}</button>`:''}</div>`;
   h += `<div class="small" style="margin-top:8px">👤 Penanggung jawab ambil barang: <b>${r.pickup_assigned_to?esc(uname(r.pickup_assigned_to)):'- belum ditugaskan -'}</b>
     ${canAssignPickup?`<button class="btn-sm btn-ghost" onclick="assignPickupModal(${r.id},'${r.department}')" style="margin-left:6px">${r.pickup_assigned_to?'Ganti':'Tugaskan'}</button>`:''}</div>`;
   h += `<h3 style="margin-top:14px">Item</h3>`;
@@ -13476,7 +13501,10 @@ async function renderAset(){
         ${Object.entries(DEPTS).map(([k,v])=>`<option value="${k}" ${me.department===k?'selected':''}>${v.label}</option>`).join('')}</select>
       <select id="aStat" onchange="loadAssets()"><option value="aktif">Aktif</option><option value="diajukan_keluar">Diajukan Keluar</option><option value="keluar">Sudah Keluar</option><option value="">Semua</option></select>
     </div>
-    ${!isAccSpv()?`<button class="btn btn-teal" onclick="newAssetModal()">+ Input Aset</button>`:''}
+    <div class="row" style="gap:8px">
+      ${isMgr()?`<button class="btn btn-ghost" id="btnOtorMassal" onclick="otorisasiAsetMassal()">✓ Setujui semua yang menunggu</button>`:''}
+      ${!isAccSpv()?`<button class="btn btn-teal" onclick="newAssetModal()">+ Input Aset</button>`:''}
+    </div>
   </div>
   <div id="dispPending"></div><div id="assetList"></div>`;
   $('main').innerHTML = h;
@@ -13488,13 +13516,22 @@ async function loadAssets(){
   if($('aStat').value) query = query.eq('status',$('aStat').value);
   const list = await q(query);
   const KOND = {baik:['Baik','var(--green)'],perlu_perbaikan:['Perlu Perbaikan','var(--amber)'],rusak:['Rusak','var(--red)']};
-  let h = list.length ? `<table class="respTable"><tr><th>Kode</th><th>Nama</th><th>Dept</th><th>Kondisi</th><th></th></tr>` : '<p class="muted">Tidak ada aset.</p>';
+  const SYNC = { menunggu_otorisasi:['Menunggu otorisasi','#FEF3C7','#92400E'], terkirim:['✓ AA Soft','#DCFCE7','#166534'],
+                 gagal:['✕ Gagal kirim','#FEE2E2','#B91C1C'], ditolak:['Ditolak','#F3F4F6','#6B7280'],
+                 inventaris:['Inventaris saja','#E5E7EB','#374151'] };
+  const nTunggu = list.filter(a=>a.aa_sync_status==='menunggu_otorisasi' && a.status==='aktif').length;
+  let h = (isMgr() && nTunggu) ? `<p class="small" style="padding:8px 10px;background:#FEF3C7;color:#92400E;border-radius:6px;margin-bottom:8px">${nTunggu} aset menunggu otorisasi Anda untuk masuk AA Soft.</p>` : '';
+  h += list.length ? `<table class="respTable"><tr><th>Kode</th><th>Nama</th><th>Dept</th><th>Kondisi</th><th>AA Soft</th><th></th></tr>` : '<p class="muted">Tidak ada aset.</p>';
   list.forEach(a=>{
     const canAct = (isMgr() || (isFieldWorker()&&me.department===a.department)) && a.status==='aktif';
-    h += `<tr><td data-label="Kode" class="small muted">${esc(a.code||'-')}</td><td data-label="Nama"><b>${esc(a.name)}</b></td>
+    const s = SYNC[a.aa_sync_status||'menunggu_otorisasi'] || SYNC.menunggu_otorisasi;
+    h += `<tr><td data-label="Kode" class="small muted">${esc(a.code||'-')}</td><td data-label="Nama"><b>${esc(a.name)}</b><div class="small muted">${KAT_ASET[a.category_aa]||'-'}${a.location?' · '+esc(a.location):''}</div></td>
       <td data-label="Dept">${deptTag(a.department)}</td>
       <td data-label="Kondisi"><span class="small" style="color:${KOND[a.condition][1]};font-weight:700">${KOND[a.condition][0]}</span>
         ${a.status!=='aktif'?`<br><span class="badge" style="background:#F3F4F6;color:#6B7280">${a.status==='keluar'?'Keluar '+(a.disposed_at?fdt(a.disposed_at):''):'Diajukan keluar'}</span>`:''}</td>
+      <td data-label="AA Soft"><span class="badge" style="background:${s[1]};color:${s[2]}" title="${esc(a.aa_sync_error||'')}">${s[0]}</span>
+        ${isMgr() && a.aa_sync_status==='menunggu_otorisasi' && a.status==='aktif' ? `<br><button class="btn-sm btn-teal" style="margin-top:4px" onclick="otorisasiAset(${a.id})">✓ Setujui</button> <button class="btn-sm btn-ghost" onclick="tolakAset(${a.id})">Tolak</button>` : ''}
+        ${isMgr() && (a.aa_sync_status==='gagal'||a.aa_sync_status==='inventaris') ? `<br><button class="btn-sm btn-ghost" style="margin-top:4px" onclick="otorisasiAset(${a.id})">${a.aa_sync_status==='gagal'?'Kirim ulang':'Jadikan aset tetap'}</button>` : ''}</td>
       <td>${canAct?`<button class="btn-sm btn-ghost" onclick="assetActions(${a.id},'${esc(a.name)}','${a.condition}')">⋯ Aksi</button>`:''}</td></tr>`;
   });
   if(list.length) h += '</table>';
@@ -13505,13 +13542,100 @@ async function newAssetModal(){
     <label>Departemen</label><select id="naDept">${deptOptions(me.department)}</select>
     <label>Kode Aset (opsional)</label><input id="naCode" placeholder="mis. POOL-001">
     <label>Nama Aset</label><input id="naName" placeholder="mis. Pompa Filter 2HP">
+    <label>Kategori (untuk pencatatan AA Soft)</label>
+    <select id="naCat">${Object.entries(KAT_ASET).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select>
+    <label>Lokasi (opsional)</label><input id="naLoc" placeholder="mis. Ruang Pompa, Gudang Belakang">
     <label>Kondisi Awal</label><select id="naCond"><option value="baik">Baik</option><option value="perlu_perbaikan">Perlu Perbaikan</option><option value="rusak">Rusak</option></select>
+    <p class="small muted" style="margin-top:8px">Setelah disimpan, aset menunggu otorisasi Manager, lalu masuk ke AA Soft. Nilai & penyusutan diisi Accounting di AA Soft.</p>
     <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="createAsset()">Simpan Aset</button>`);
 }
+const KAT_ASET = {peralatan:'Peralatan',elektronik:'Elektronik',kendaraan:'Kendaraan',bangunan:'Bangunan',perlengkapan:'Perlengkapan',lainnya:'Lainnya'};
 async function createAsset(){
   const n=$('naName').value.trim(); if(!n){toast('Nama aset wajib');return;}
-  await q(db.from('assets').insert({department:$('naDept').value,code:$('naCode').value.trim()||null,name:n,condition:$('naCond').value,input_by:me.id}).select());
-  closeModal(); toast('Aset tersimpan'); loadAssets();
+  await q(db.from('assets').insert({department:$('naDept').value,code:$('naCode').value.trim()||null,name:n,condition:$('naCond').value,
+    category_aa:$('naCat').value, location:$('naLoc').value.trim()||null, aa_sync_status:'menunggu_otorisasi', input_by:me.id}).select());
+  closeModal(); toast('Aset tersimpan — menunggu otorisasi Manager'); loadAssets();
+}
+
+/* ── Integrasi aset → AA Soft ── */
+async function kirimAsetAA(a){
+  try{
+    const aa = await aaClient();
+    const {data, error} = await aa.rpc('daftarkan_aset_opslog', {p_secret:_aaSecret, p:{
+      opslog_asset_id:a.id, code:a.code, name:a.name, department:a.department,
+      category:a.category_aa||'peralatan', location:a.location, condition:a.condition,
+      authorized_by_name:me.name }});
+    const r = Array.isArray(data)?data[0]:data;
+    if(error) throw new Error(error.message);
+    if(!r?.ok) throw new Error(r?.pesan||'ditolak');
+    await q(db.from('assets').update({aa_sync_status:'terkirim', aa_asset_id:r.aa_asset_id, aa_sync_error:null}).eq('id',a.id));
+    return true;
+  }catch(err){
+    await q(db.from('assets').update({aa_sync_status:'gagal', aa_sync_error:err.message}).eq('id',a.id));
+    return false;
+  }
+}
+async function otorisasiAset(id){
+  const [a] = await q(db.from('assets').select('*').eq('id',id));
+  await q(db.from('assets').update({authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',id));
+  const ok = await kirimAsetAA({...a, authorized_by:me.id});
+  toast(ok ? 'Aset diotorisasi & masuk AA Soft' : 'Diotorisasi, tapi gagal kirim ke AA Soft — coba "Kirim ulang"');
+  loadAssets();
+}
+// Otorisasi massal: Manager memilih KATEGORI mana yang layak jadi aset tetap di AA Soft.
+// Perlengkapan kecil (baskom, botol, sendok, dll) sebaiknya TIDAK dikirim —
+// tetap tercatat di Opslog sebagai inventaris departemen, tapi tidak disusutkan.
+async function otorisasiAsetMassal(){
+  const dept = $('aDept').value;
+  let qy = db.from('assets').select('*').eq('status','aktif').eq('aa_sync_status','menunggu_otorisasi');
+  if(dept) qy = qy.eq('department', dept);
+  const list = await q(qy);
+  if(!list.length){ toast('Tidak ada aset yang menunggu otorisasi'); return; }
+  const perKat = {}; list.forEach(a=>{ const k=a.category_aa||'peralatan'; perKat[k]=(perKat[k]||0)+1; });
+  openModal(`<div class="mhead"><h3>Setujui Massal → AA Soft</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small muted">${list.length} aset${dept?' departemen '+(DEPTS[dept]?.label||dept):''} menunggu otorisasi. Pilih kategori yang <b>layak jadi aset tetap</b> (disusutkan). Yang tidak dicentang tetap tercatat di Opslog sebagai inventaris, tidak masuk AA Soft.</p>
+    ${Object.entries(KAT_ASET).map(([k,v])=>`<label class="row" style="gap:8px;padding:6px 0;cursor:pointer">
+      <input type="checkbox" class="omKat" value="${k}" ${['elektronik','kendaraan','bangunan','peralatan'].includes(k)?'checked':''} ${perKat[k]?'':'disabled'}>
+      <span>${v} <span class="small muted">(${perKat[k]||0})</span></span></label>`).join('')}
+    <label class="row" style="gap:8px;padding:6px 0;margin-top:6px;cursor:pointer">
+      <input type="checkbox" id="omTandai" checked><span class="small">Tandai yang tidak dipilih sebagai <b>"inventaris saja"</b> supaya tidak muncul lagi di daftar tunggu</span></label>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="jalankanOtorisasiMassal(${JSON.stringify(dept)})">✓ Setujui & Kirim</button>`);
+}
+async function jalankanOtorisasiMassal(dept){
+  const kats = [...document.querySelectorAll('.omKat:checked')].map(e=>e.value);
+  const tandai = $('omTandai').checked;
+  if(!kats.length){ toast('Pilih minimal satu kategori'); return; }
+  closeModal();
+  let qy = db.from('assets').select('*').eq('status','aktif').eq('aa_sync_status','menunggu_otorisasi');
+  if(dept) qy = qy.eq('department', dept);
+  const list = await q(qy);
+  const kirim = list.filter(a=>kats.includes(a.category_aa||'peralatan'));
+  const lewat = list.filter(a=>!kats.includes(a.category_aa||'peralatan'));
+  const b=$('btnOtorMassal'); if(b){ b.disabled=true; b.textContent='Mengirim...'; }
+  let ok=0, gagal=0;
+  for(const a of kirim){
+    await q(db.from('assets').update({authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',a.id));
+    (await kirimAsetAA(a)) ? ok++ : gagal++;
+  }
+  if(tandai && lewat.length){
+    await q(db.from('assets').update({aa_sync_status:'inventaris', aa_sync_error:null, authorized_by:me.id, authorized_at:new Date().toISOString()})
+      .in('id', lewat.map(a=>a.id)));
+  }
+  toast(`Selesai: ${ok} masuk AA Soft${gagal?', '+gagal+' gagal':''}${tandai&&lewat.length?', '+lewat.length+' ditandai inventaris saja':''}`);
+  loadAssets();
+}
+async function tolakAset(id){
+  const alasan = prompt('Alasan penolakan (aset tidak akan masuk AA Soft):'); if(alasan===null) return;
+  await q(db.from('assets').update({aa_sync_status:'ditolak', aa_sync_error:alasan||'Ditolak Manager', authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',id));
+  toast('Aset ditolak'); loadAssets();
+}
+// Kondisi/status berubah setelah masuk AA Soft → beri tahu AA Soft
+async function sinkronAsetAA(id){
+  const [a] = await q(db.from('assets').select('id,condition,status,aa_sync_status').eq('id',id));
+  if(a?.aa_sync_status!=='terkirim') return;
+  try{ const aa = await aaClient();
+    await aa.rpc('sinkron_aset_opslog', {p_secret:_aaSecret, p_oid:a.id, p_condition:a.condition, p_status:a.status});
+  }catch(e){}
 }
 function assetActions(id,name,cond){
   openModal(`<div class="mhead"><h3>${esc(name)}</h3><button onclick="closeModal()">✕</button></div>
@@ -13528,6 +13652,7 @@ function assetActions(id,name,cond){
 async function updateAssetCond(id){
   await q(db.from('assets').update({condition:$('acCond').value}).eq('id',id));
   closeModal(); toast('Kondisi diperbarui'); loadAssets();
+  sinkronAsetAA(id);   // rusak → AA Soft tandai 'damaged', pulih → 'active'
 }
 async function requestDisposal(id){
   const r=$('acReason').value.trim(); if(!r){toast('Alasan wajib diisi');return;}
@@ -13553,6 +13678,7 @@ async function decideDisposal(dispId,assetId,decision){
   await q(db.from('asset_disposals').update({status:decision,decided_by:me.id,decided_at:new Date().toISOString()}).eq('id',dispId));
   await q(db.from('assets').update(decision==='disetujui'
     ? {status:'keluar',disposed_at:new Date().toISOString()} : {status:'aktif'}).eq('id',assetId));
+  sinkronAsetAA(assetId);   // keluar → AA Soft tandai 'inactive'
   toast(decision==='disetujui'?'Aset dikeluarkan dari daftar':'Pengajuan ditolak, aset tetap aktif');
   loadAssets(); loadDispPending();
 }
