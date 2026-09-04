@@ -12881,6 +12881,7 @@ async function renderPengadaan(){
         <option value="selesai">Selesai</option></select>
     </div>
     <div class="row">
+      <button class="btn btn-ghost" id="btnSegarkanPq" onclick="segarkanPengadaan()" title="Ambil ulang status & stok terbaru dari AA Soft">⟳ Segarkan</button>
       ${isMgr()?`<button class="btn btn-ghost" onclick="exportPengadaanExcel()">⬇ Excel</button>`:''}
       ${(isMgr()||(me.role==='spv'&&me.department&&DIVS[me.department]&&me.department!=='ACC'))?`<button class="btn btn-teal" onclick="newPengadaanModal()">+ Ajukan Permintaan</button>`:''}
     </div>
@@ -12888,6 +12889,15 @@ async function renderPengadaan(){
   $('main').innerHTML = h;
   loadPengadaan();
 }
+// Dipakai semua departemen (yang tidak punya akses Katalog Barang) untuk
+// menarik status & stok terbaru dari AA Soft tanpa perlu pindah halaman.
+async function segarkanPengadaan(){
+  const b = $('btnSegarkanPq'); if(b){ b.disabled=true; b.textContent='Menyegarkan...'; }
+  try{ _catAAcache = null; await loadPengadaan(); toast('Data pengadaan diperbarui dari AA Soft'); }
+  catch(e){ toast('Gagal menyegarkan: '+e.message); }
+  finally{ if(b){ b.disabled=false; b.textContent='⟳ Segarkan'; } }
+}
+let _catAAcache = null;
 async function loadPengadaan(){
   let query = db.from('procurement_requests').select('*, procurement_items(*)').order('created_at',{ascending:false}).limit(200);
   const fd = $('pqfDept').value;
@@ -13096,6 +13106,11 @@ async function submitPengadaan(){
 }
 async function openPengadaan(id){
   let [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
+  // Stok terkini dari AA Soft untuk item gudang yang belum selesai (supaya departemen tahu
+  // barangnya masih ada atau tidak sebelum diambil)
+  if(!_catAAcache && (r.procurement_items||[]).some(it=>it.aa_item_id && it.status!=='selesai')){
+    try{ _catAAcache = await loadKatalogAA(); }catch(e){}
+  }
   // Segarkan status jalur beli dari AA Soft (nota sudah diinput Admin?)
   if(await segarkanStatusAA(r.procurement_items)){
     [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
@@ -13130,7 +13145,8 @@ async function openPengadaan(id){
       </div>`;
     }
     if(it.category==='umum'){
-      h += `<div class="small muted">Stok saat diminta: ${it.stok_ada??'-'}</div>`;
+      const live = it.aa_item_id && _catAAcache ? _catAAcache.find(k=>k.aa_item_id===it.aa_item_id) : null;
+      h += `<div class="small muted">Stok saat diminta: ${it.stok_ada??'-'}${live?` · <b style="color:${live.current_stock<Number(it.qty)?'#B91C1C':'#166534'}">stok sekarang: ${live.current_stock.toLocaleString('id-ID')} ${esc(live.unit)}</b>`:''}</div>`;
     } else {
       h += `<div class="small muted">Keterangan: ${esc(it.keterangan||'-')}</div>
         <div class="small muted">Perkiraan harga: ${rp(it.est_price)}</div>`;
