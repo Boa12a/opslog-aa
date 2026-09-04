@@ -12893,6 +12893,8 @@ async function loadPengadaan(){
   const fd = $('pqfDept').value;
   if(fd) query = query.eq('department', fd);
   let list = await q(query);
+  // Segarkan status dari AA Soft untuk item yang menunggu pembelian (nota sudah diinput?)
+  if(await segarkanStatusAA(list.flatMap(r=>r.procurement_items||[]))) list = await q(query);
   const fs = $('pqfStat').value;
   if(fs==='__open') list = list.filter(r=> r.procurement_items.some(i=>!['selesai','ditolak'].includes(i.status)));
   else if(fs) list = list.filter(r=> r.procurement_items.some(i=>i.status===fs));
@@ -13093,7 +13095,11 @@ async function submitPengadaan(){
   if(page==='pengadaan') loadPengadaan(); else go('pengadaan');
 }
 async function openPengadaan(id){
-  const [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
+  let [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
+  // Segarkan status jalur beli dari AA Soft (nota sudah diinput Admin?)
+  if(await segarkanStatusAA(r.procurement_items)){
+    [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
+  }
   const canAssignPickup = isMgr() || (me.role==='spv' && me.department===r.department);
   const canConfirmPickup = isMgr() || (me.role==='spv' && me.department===r.department) || r.pickup_assigned_to===me.id;
   let h = `<div class="mhead"><h3>Permintaan #${r.id}</h3><button onclick="closeModal()">✕</button></div>
@@ -13110,8 +13116,21 @@ async function openPengadaan(id){
         <b>${esc(it.item_name)}</b>
         <span class="badge" style="background:${PSTAT[it.status].c};color:${PSTAT[it.status].t}">${PSTAT[it.status].l}</span></div>
       <div class="small muted">Kategori: ${it.category==='umum'?'Umum':'Baru'} · Qty diminta: ${it.qty}</div>`;
+    // Status pengiriman ke AA Soft (hanya tampil setelah barang diterima)
+    if(['selesai','siap_diambil','diproses'].includes(it.status) && (it.aa_sync_status||'belum')!=='belum'){
+      const st = it.aa_sync_status||'belum';
+      const map = { terkirim:{c:'#DCFCE7',t:'#166534',l:'✓ Tercatat di AA Soft'+(it.aa_trx_code?' · '+it.aa_trx_code:'')},
+                    menunggu_pembelian:{c:'#DBEAFE',t:'#1E40AF',l:'⏳ Menunggu pembelian & input nota di AA Soft'},
+                    nota_diinput:{c:'#DCFCE7',t:'#166534',l:'✓ Nota diinput di AA Soft'+(it.aa_trx_code?' · '+it.aa_trx_code:'')},
+                    gagal:{c:'#FEE2E2',t:'#B91C1C',l:'✕ Gagal kirim ke AA Soft: '+esc(it.aa_sync_error||'')},
+                    belum:{c:'#F3F4F6',t:'#374151',l:'Belum dikirim ke AA Soft'} }[st] || {c:'#F3F4F6',t:'#374151',l:st};
+      h += `<div class="row" style="margin-top:6px;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="badge small" style="background:${map.c};color:${map.t}">${map.l}</span>
+        ${(st==='gagal'||st==='belum') && (isMgr()||isAccSpv()) ? `<button class="btn-sm btn-ghost" onclick="kirimUlangAASoft(${it.id})">Kirim ulang</button>` : ''}
+      </div>`;
+    }
     if(it.category==='umum'){
-      h += `<div class="small muted">Stok saat ini: ${it.stok_ada??'-'}</div>`;
+      h += `<div class="small muted">Stok saat diminta: ${it.stok_ada??'-'}</div>`;
     } else {
       h += `<div class="small muted">Keterangan: ${esc(it.keterangan||'-')}</div>
         <div class="small muted">Perkiraan harga: ${rp(it.est_price)}</div>`;
@@ -13179,19 +13198,122 @@ async function assignPrepare(itemId, requestId){
   toast('Anak buah ditugaskan untuk menyiapkan'); openPengadaan(requestId); if(page==='pengadaan') loadPengadaan();
 }
 async function confirmReceived(itemId){
-  await q(db.from('procurement_items').update({status:'selesai', received_by:me.id, received_at:new Date().toISOString()}).eq('id',itemId));
-  const [it] = await q(db.from('procurement_items').select('request_id,item_name').eq('id',itemId));
+  const now = new Date().toISOString();
+  await q(db.from('procurement_items').update({status:'selesai', received_by:me.id, received_at:now}).eq('id',itemId));
+  const [it] = await q(db.from('procurement_items')
+    .select('id,request_id,item_name,qty,aa_item_id,fulfillment_method,actual_price,category,procurement_requests(department,aa_budget_position_id,aa_budget_position_name)')
+    .eq('id',itemId));
   await q(db.from('procurement_updates').insert({request_id:it.request_id, note:'Dikonfirmasi diterima: '+it.item_name, created_by:me.id}).select());
-  toast('Dikonfirmasi diterima'); openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
+  toast('Dikonfirmasi diterima');
+  // Kirim ke AA Soft (potong stok / daftar tunggu nota). Tidak menghalangi alur Opslog
+  // bila gagal — statusnya tercatat dan bisa dikirim ulang lewat tombol "Kirim ulang".
+  kirimKeAASoft(it).catch(()=>{});
+  openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
+}
+
+/* ── Kirim "barang diterima" ke AA Soft ── */
+async function kirimKeAASoft(it){
+  const req = it.procurement_requests || {};
+  const setStatus = async (st, extra={}) =>
+    q(db.from('procurement_items').update({aa_sync_status:st, aa_sync_at:new Date().toISOString(), ...extra}).eq('id',it.id));
+  try{
+    const aa = await aaClient();
+    const payload = {
+      opslog_item_id: it.id, opslog_request_id: it.request_id,
+      item_name: it.item_name, qty: it.qty, unit: null,
+      department: req.department,
+      budget_position_id: req.aa_budget_position_id, budget_position_name: req.aa_budget_position_name,
+      fulfillment_method: it.fulfillment_method || (it.category==='baru' ? 'beli' : 'gudang'),
+      actual_price: it.actual_price, aa_item_id: it.aa_item_id,
+      received_by_name: me.name, received_at: new Date().toISOString(),
+    };
+    const {data, error} = await aa.rpc('terima_barang_opslog', {p_secret:_aaSecret, p:payload});
+    const r = Array.isArray(data) ? data[0] : data;
+    if(error) throw new Error(error.message);
+    if(!r?.ok){
+      // 'Sudah pernah diproses' = bukan error, cuma pengiriman ulang
+      if((r?.pesan||'').startsWith('Sudah pernah')){ await setStatus(r.status_aa==='menunggu_nota'?'menunggu_nota':'terkirim', {aa_trx_code:r.kode||null, aa_sync_error:null}); return; }
+      await setStatus('gagal', {aa_sync_error:r?.pesan||'ditolak'});
+      toast('AA Soft menolak: '+(r?.pesan||'ditolak'));
+      return;
+    }
+    await setStatus(r.status_aa==='menunggu_nota'?'menunggu_nota':'terkirim', {aa_trx_code:r.kode||null, aa_sync_error:null});
+    toast(r.status_aa==='menunggu_nota' ? 'Tercatat di AA Soft — menunggu Admin input nota' : 'Stok AA Soft terpotong ('+r.kode+')');
+  }catch(err){
+    await setStatus('gagal', {aa_sync_error:err.message});
+    toast('Gagal kirim ke AA Soft: '+err.message);
+  }
+  if(page==='pengadaan') loadPengadaan();
+}
+// Untuk item jalur BELI yang masih 'menunggu_nota': tanya AA Soft apakah notanya sudah diinput
+// Tanya AA Soft: apakah nota pembelian barang Baru sudah diinput?
+// Kalau sudah → item Opslog otomatis jadi "siap diambil", lengkap dengan harga & (bila
+// masuk gudang) ID barangnya, sehingga saat diambil stoknya terpotong lewat jalur gudang.
+async function segarkanStatusAA(items){
+  const tunggu = (items||[]).filter(it=>it.aa_sync_status==='menunggu_pembelian');
+  if(!tunggu.length) return false;
+  try{
+    const aa = await aaClient();
+    const {data} = await aa.rpc('status_opslog', {p_secret:_aaSecret, p_ids:tunggu.map(it=>it.id)});
+    let berubah=false;
+    for(const r of (data||[])){
+      if(r.status==='nota_diinput'){
+        await q(db.from('procurement_items').update({
+          status:'siap_diambil',
+          fulfillment_method: r.alokasi==='gudang' ? 'gudang' : 'beli',
+          actual_price: r.actual_price, aa_item_id: r.aa_item_id||null,
+          aa_sync_status:'nota_diinput', aa_trx_code:r.aa_trx_code, aa_sync_at:new Date().toISOString(),
+        }).eq('id',r.opslog_item_id));
+        const it = tunggu.find(x=>x.id===r.opslog_item_id);
+        if(it) await q(db.from('procurement_updates').insert({request_id:it.request_id,
+          note:'Nota pembelian diinput di AA Soft ('+(r.aa_trx_code||'')+') — siap diambil: '+it.item_name, created_by:me.id}).select());
+        berubah=true;
+      } else if(r.status==='ditolak'){
+        await q(db.from('procurement_items').update({aa_sync_status:'gagal', aa_sync_error:'Ditolak di AA Soft'}).eq('id',r.opslog_item_id));
+        berubah=true;
+      }
+    }
+    return berubah;
+  }catch(e){ return false; }
+}
+async function kirimUlangAASoft(itemId){
+  const [it] = await q(db.from('procurement_items')
+    .select('id,request_id,item_name,qty,aa_item_id,fulfillment_method,actual_price,category,procurement_requests(department,aa_budget_position_id,aa_budget_position_name)')
+    .eq('id',itemId));
+  await kirimKeAASoft(it);
+  openPengadaan(it.request_id);
 }
 async function authorizeItem(itemId, approve){
   const upd = approve
     ? {status:'diproses', authorized_by:me.id, authorized_at:new Date().toISOString()}
     : {status:'ditolak', authorized_by:me.id, authorized_at:new Date().toISOString()};
   await q(db.from('procurement_items').update(upd).eq('id',itemId));
-  const [it] = await q(db.from('procurement_items').select('request_id,item_name').eq('id',itemId));
+  const [it] = await q(db.from('procurement_items')
+    .select('id,request_id,item_name,qty,category,keterangan,est_price,procurement_requests(department,aa_budget_position_id,aa_budget_position_name,requested_by)')
+    .eq('id',itemId));
   await q(db.from('procurement_updates').insert({request_id:it.request_id, note:(approve?'Disetujui: ':'Ditolak: ')+it.item_name, created_by:me.id}).select());
+  // Barang BARU yang disetujui → masuk daftar pembelian di AA Soft
+  if(approve && it.category==='baru') ajukanPembelianAA(it).catch(()=>{});
   toast(approve?'Item disetujui':'Item ditolak'); openPengadaan(it.request_id); if(page==='pengadaan') loadPengadaan(); if(page==='dashboard') renderDashboard();
+}
+async function ajukanPembelianAA(it){
+  const req = it.procurement_requests||{};
+  const setStatus = (st, extra={}) => q(db.from('procurement_items').update({aa_sync_status:st, aa_sync_at:new Date().toISOString(), ...extra}).eq('id',it.id));
+  try{
+    const aa = await aaClient();
+    const {data, error} = await aa.rpc('ajukan_pembelian_opslog', {p_secret:_aaSecret, p:{
+      opslog_item_id:it.id, opslog_request_id:it.request_id, item_name:it.item_name, qty:it.qty,
+      department:req.department, budget_position_id:req.aa_budget_position_id, budget_position_name:req.aa_budget_position_name,
+      keterangan:it.keterangan, est_price:it.est_price, requested_by_name:uname(req.requested_by) }});
+    const r = Array.isArray(data)?data[0]:data;
+    if(error) throw new Error(error.message);
+    if(!r?.ok) throw new Error(r?.pesan||'ditolak');
+    await setStatus('menunggu_pembelian', {aa_sync_error:null});
+    toast('Masuk daftar pembelian AA Soft');
+  }catch(err){
+    await setStatus('gagal', {aa_sync_error:err.message});
+    toast('Gagal mengajukan ke AA Soft: '+err.message);
+  }
 }
 async function fulfillItem(itemId, method){
   let actual = null;
