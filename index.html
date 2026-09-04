@@ -13530,6 +13530,7 @@ async function loadAssets(){
       <td data-label="Kondisi"><span class="small" style="color:${KOND[a.condition][1]};font-weight:700">${KOND[a.condition][0]}</span>
         ${a.status!=='aktif'?`<br><span class="badge" style="background:#F3F4F6;color:#6B7280">${a.status==='keluar'?'Keluar '+(a.disposed_at?fdt(a.disposed_at):''):'Diajukan keluar'}</span>`:''}</td>
       <td data-label="AA Soft"><span class="badge" style="background:${s[1]};color:${s[2]}" title="${esc(a.aa_sync_error||'')}">${s[0]}</span>
+        ${a.aa_sync_status==='gagal' && a.aa_sync_error ? `<div class="small" style="color:#B91C1C;max-width:220px;margin-top:2px">${esc(a.aa_sync_error)}</div>` : ''}
         ${isMgr() && a.aa_sync_status==='menunggu_otorisasi' && a.status==='aktif' ? `<br><button class="btn-sm btn-teal" style="margin-top:4px" onclick="otorisasiAset(${a.id})">✓ Setujui</button> <button class="btn-sm btn-ghost" onclick="tolakAset(${a.id})">Tolak</button>` : ''}
         ${isMgr() && (a.aa_sync_status==='gagal'||a.aa_sync_status==='inventaris') ? `<br><button class="btn-sm btn-ghost" style="margin-top:4px" onclick="otorisasiAset(${a.id})">${a.aa_sync_status==='gagal'?'Kirim ulang':'Jadikan aset tetap'}</button>` : ''}</td>
       <td>${canAct?`<button class="btn-sm btn-ghost" onclick="assetActions(${a.id},'${esc(a.name)}','${a.condition}')">⋯ Aksi</button>`:''}</td></tr>`;
