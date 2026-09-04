@@ -12850,19 +12850,26 @@ function pqDeptOptions(sel){
 }
 function reqStatusInfo(items){
   if(!items.length) return {l:'Kosong',c:'#F3F4F6',t:'#6B7280'};
-  if(items.every(i=>['selesai','ditolak'].includes(i.status))) return {l:'Selesai',c:'#DCFCE7',t:'#166534'};
+  // Semua item ditolak → DITOLAK (merah), bukan "Selesai"
+  if(items.every(i=>i.status==='ditolak')) return {l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'};
+  // Semua sudah berakhir (ada yang selesai, mungkin ada yang ditolak) → Selesai, beri tanda kalau sebagian ditolak
+  if(items.every(i=>['selesai','ditolak'].includes(i.status))){
+    const n = items.filter(i=>i.status==='ditolak').length;
+    return n ? {l:`Selesai (${n} ditolak)`,c:'#DCFCE7',t:'#166534'} : {l:'Selesai',c:'#DCFCE7',t:'#166534'};
+  }
   if(items.some(i=>i.status==='menunggu_otorisasi')) return {l:'Menunggu Otorisasi',c:'#FEF3C7',t:'#92400E'};
   if(items.some(i=>i.status==='siap_diambil')) return {l:'Siap Diambil',c:'#FEF9C3',t:'#854D0E'};
   return {l:'Diproses',c:'#DBEAFE',t:'#1D4ED8'};
 }
 function reqRow(r){
   const st = reqStatusInfo(r.procurement_items);
-  const done = r.procurement_items.filter(i=>['selesai','ditolak'].includes(i.status)).length;
+  const done = r.procurement_items.filter(i=>i.status==='selesai').length;
+  const tolak = r.procurement_items.filter(i=>i.status==='ditolak').length;
   return `<div class="item" style="border-left-color:${DIVS[r.department]?DIVS[r.department].color:'#999'}" onclick="openPengadaan(${r.id})">
     <div class="row" style="justify-content:space-between">
       <div>${divTag(r.department)} <b>Permintaan #${r.id}</b> ${r.ticket_id?`<span class="badge" style="background:#FEE2E2;color:#B91C1C">Dari Tiket #${r.ticket_id}</span>`:''}</div>
       <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span></div>
-    <div class="small muted">${r.procurement_items.length} item (${done} selesai) · oleh ${uname(r.requested_by)} · ${fdt(r.created_at)} · ${ageHtml(r.created_at)}</div></div>`;
+    <div class="small muted">${r.procurement_items.length} item (${done} selesai${tolak?', '+tolak+' ditolak':''}) · oleh ${uname(r.requested_by)} · ${fdt(r.created_at)} · ${ageHtml(r.created_at)}</div></div>`;
 }
 async function myPengadaanDepts(){
   const rows = await q(db.from('procurement_requests').select('department'));
@@ -13140,6 +13147,7 @@ async function openPengadaan(id){
       const map = { terkirim:{c:'#DCFCE7',t:'#166534',l:'✓ Tercatat di AA Soft'+(it.aa_trx_code?' · '+it.aa_trx_code:'')},
                     menunggu_pembelian:{c:'#DBEAFE',t:'#1E40AF',l:'⏳ Menunggu pembelian & input nota di AA Soft'},
                     nota_diinput:{c:'#DCFCE7',t:'#166534',l:'✓ Nota diinput di AA Soft'+(it.aa_trx_code?' · '+it.aa_trx_code:'')},
+                    ditolak_aa:{c:'#FEE2E2',t:'#B91C1C',l:'✕ Pembelian ditolak AA Soft — ambil dari gudang bila stok ada, atau ajukan ulang'},
                     gagal:{c:'#FEE2E2',t:'#B91C1C',l:'✕ Gagal kirim ke AA Soft: '+esc(it.aa_sync_error||'')},
                     belum:{c:'#F3F4F6',t:'#374151',l:'Belum dikirim ke AA Soft'} }[st] || {c:'#F3F4F6',t:'#374151',l:st};
       h += `<div class="row" style="margin-top:6px;gap:8px;align-items:center;flex-wrap:wrap">
@@ -13293,7 +13301,7 @@ async function kirimKeAASoft(it){
     if(error) throw new Error(error.message);
     if(!r?.ok){
       // 'Sudah pernah diproses' = bukan error, cuma pengiriman ulang
-      if((r?.pesan||'').startsWith('Sudah pernah')){ await setStatus(r.status_aa==='menunggu_nota'?'menunggu_nota':'terkirim', {aa_trx_code:r.kode||null, aa_sync_error:null}); return; }
+      if((r?.pesan||'').startsWith('Sudah pernah') && r.status_aa==='selesai'){ await setStatus('terkirim', {aa_trx_code:r.kode||null, aa_sync_error:null}); return; }
       await setStatus('gagal', {aa_sync_error:r?.pesan||'ditolak'});
       toast('AA Soft menolak: '+(r?.pesan||'ditolak'));
       return;
@@ -13330,7 +13338,9 @@ async function segarkanStatusAA(items){
           note:'Nota pembelian diinput di AA Soft ('+(r.aa_trx_code||'')+') — siap diambil: '+it.item_name, created_by:me.id}).select());
         berubah=true;
       } else if(r.status==='ditolak'){
-        await q(db.from('procurement_items').update({aa_sync_status:'gagal', aa_sync_error:'Ditolak di AA Soft'}).eq('id',r.opslog_item_id));
+        await q(db.from('procurement_items').update({aa_sync_status:'ditolak_aa', aa_sync_error:'Pembelian ditolak Admin AA Soft'}).eq('id',r.opslog_item_id));
+        const it = tunggu.find(x=>x.id===r.opslog_item_id);
+        if(it) await q(db.from('procurement_updates').insert({request_id:it.request_id, note:'Pembelian DITOLAK di AA Soft: '+it.item_name+' — bisa ambil dari gudang bila stok ada, atau ajukan ulang', created_by:me.id}).select());
         berubah=true;
       }
     }
