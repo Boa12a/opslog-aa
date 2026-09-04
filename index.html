@@ -10492,6 +10492,8 @@ const isMgr = () => ['manager','owner'].includes(me.role);
 // Staff di HR/Accounting TIDAK dapat akses penuh (cuma hak umum).
 const isHrSpv = () => me.role==='spv' && me.department==='HRD';
 const isAccSpv = () => me.role==='spv' && me.department==='ACC';
+const isAccStaff = () => me.role==='staff' && me.department==='ACC';
+const isAcc = () => isAccSpv() || isAccStaff();   // seluruh tim Accounting
 const isHrdOrMgr = () => isMgr() || isHrSpv();
 // SPV dan Staff punya hak operasional yang sama di departemennya sendiri
 // (staff dibutuhkan mengisi laporan saat SPV tidak di tempat).
@@ -10619,7 +10621,8 @@ function buildNav(){
   if(isHrdOrMgr()) grupOperasional.push(['rekapind','Rekap Individu']);
 
   const grupPengadaan = [];
-  if(isMgr() || isSpvOps || isAccSpv()) grupPengadaan.push(['pengadaan','Pengadaan']);
+  const isAccStaff = me.role==='staff' && me.department==='ACC';
+  if(isMgr() || isSpvOps || isAccSpv() || isAccStaff) grupPengadaan.push(['pengadaan','Pengadaan']);
   if(isMgr() || isAccSpv()) grupPengadaan.push(['katalog','Katalog Barang']);
 
   const grupSdm = [];
@@ -11607,7 +11610,7 @@ async function renderDashboard(){
     q(db.from('maintenance_schedules').select('*').eq('active',true).lte('next_due', addDays(t,7))),
     q(db.from('asset_disposals').select('*, assets(name,department)').eq('status','pending')),
     isMgr() ? q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','menunggu_otorisasi')) : Promise.resolve([]),
-    (isAccSpv() || me.role==='owner') ? q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : Promise.resolve([]),
+    (isAcc() || me.role==='owner') ? q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id)').eq('status','diproses')) : Promise.resolve([]),
     q(db.from('procurement_items').select('*, procurement_requests(department, ticket_id, pickup_assigned_to)').eq('status','siap_diambil')),
     showBirthdays ? q(db.from('profiles').select('*').eq('active',true).not('birth_date','is',null)) : Promise.resolve([]),
     q(db.from('announcements').select('*').eq('active',true).order('created_at',{ascending:false})),
@@ -11880,7 +11883,7 @@ async function renderDashboard(){
       <div class="small muted">Perkiraan: ${rp(it.est_price)} · ${ageHtml(it.created_at)}</div></div>`);
     h += `</div>`;
   }
-  if((isAccSpv() || me.role==='owner') && pqAcct.length){
+  if((isAcc() || me.role==='owner') && pqAcct.length){
     h += `<div class="card" style="border-left:4px solid var(--teal)"><h3>Pengadaan: Perlu Diproses</h3>`;
     pqAcct.forEach(it=> h += `<div class="item" style="cursor:pointer" onclick="go('pengadaan')">
       ${divTag(it.procurement_requests.department)} <b>${esc(it.item_name)}</b> · Qty ${it.qty}
@@ -13154,15 +13157,23 @@ async function openPengadaan(id){
     if(it.actual_price!=null) h += `<div class="small muted">Harga realisasi: ${rp(it.actual_price)} (${it.fulfillment_method==='gudang'?'ambil dari gudang':'dibeli'})</div>`;
     if(it.prepared_by) h += `<div class="small" style="color:#0F766E">🔧 Sedang/sudah disiapkan oleh ${esc(uname(it.prepared_by))}</div>`;
     if(it.status==='menunggu_otorisasi' && isMgr()){
+      // Barang Baru: Manager menyetujui SEKALIGUS menunjuk siapa yang menangani pembeliannya
       h += `<div class="row" style="margin-top:6px">
-        <button class="btn btn-teal btn-sm" onclick="authorizeItem(${it.id},true)">✓ Setujui</button>
+        <button class="btn btn-teal btn-sm" onclick="authorizeAssignModal(${it.id},${r.id})">✓ Setujui & Tugaskan</button>
         <button class="btn btn-ghost btn-sm" onclick="authorizeItem(${it.id},false)">Tolak</button></div>`;
     }
     if(it.status==='diproses'){
-      if(isAccSpv() && !it.prepared_by){
-        h += `<button class="btn-sm btn-ghost" style="margin-top:6px" onclick="assignPrepareModal(${it.id},${r.id})">Tugaskan untuk Menyiapkan</button>`;
+      // Barang GUDANG (umum): tim Accounting bisa langsung mengambilnya sebagai tugas
+      // sendiri tanpa otorisasi. Barang BARU: sudah ditunjuk Manager saat otorisasi.
+      if(!it.prepared_by){
+        if(it.category==='umum' && isAcc()){
+          h += `<button class="btn btn-teal btn-sm" style="margin-top:6px" onclick="ambilTugasSaya(${it.id},${r.id})">🙋 Saya yang siapkan</button>`;
+        }
+        if(isAccSpv()||isMgr()){
+          h += `<button class="btn-sm btn-ghost" style="margin-top:6px" onclick="assignPrepareModal(${it.id},${r.id})">Tugaskan ke orang lain</button>`;
+        }
       }
-      if(isAccSpv() || it.prepared_by===me.id){
+      if(isAccSpv() || isMgr() || it.prepared_by===me.id){
         h += `<div class="row" style="margin-top:6px">
           <button class="btn btn-teal btn-sm" onclick="fulfillItem(${it.id},'gudang')">Ambil dari Gudang</button>
           <button class="btn btn-navy btn-sm" onclick="fulfillItem(${it.id},'beli')">Sudah Dibeli</button></div>`;
@@ -13204,6 +13215,33 @@ function assignPrepareModal(itemId, requestId){
   openModal(`<div class="mhead"><h3>Tugaskan Menyiapkan Barang</h3><button onclick="closeModal()">✕</button></div>
     <label>Anak Buah (Accounting)</label><select id="apwStaff">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
     <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="assignPrepare(${itemId},${requestId})">Tugaskan</button>`);
+}
+// Staff Accounting mengambil sendiri tugas menyiapkan barang gudang (tanpa otorisasi)
+async function ambilTugasSaya(itemId, requestId){
+  await q(db.from('procurement_items').update({prepared_by:me.id, prepared_at:new Date().toISOString()}).eq('id',itemId).is('prepared_by',null));
+  const [it] = await q(db.from('procurement_items').select('item_name,prepared_by').eq('id',itemId));
+  if(it.prepared_by!==me.id){ toast('Sudah diambil orang lain'); openPengadaan(requestId); return; }
+  await q(db.from('task_items').insert({staff_id:me.id, department:'ACC',
+    task_text:'Siapkan barang: '+(it.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select());
+  await q(db.from('procurement_updates').insert({request_id:requestId, note:'Diambil sebagai tugas oleh '+me.name+': '+it.item_name, created_by:me.id}).select());
+  toast('Tugas diambil'); openPengadaan(requestId); if(page==='pengadaan') loadPengadaan();
+}
+// Manager menyetujui barang Baru SEKALIGUS menunjuk penanggung jawab pembeliannya
+function authorizeAssignModal(itemId, requestId){
+  const staffList = profilesCache.filter(p=>p.department==='ACC' && p.active);
+  openModal(`<div class="mhead"><h3>Setujui & Tugaskan</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small muted">Barang baru (belum ada di gudang) akan masuk daftar pembelian di AA Soft. Pilih siapa dari Accounting yang menangani pembeliannya.</p>
+    <label>Penanggung jawab</label><select id="aaStaff">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}${p.role==='spv'?' (SPV)':''}</option>`).join('')}</select>
+    <button class="btn btn-teal" style="margin-top:14px;width:100%" onclick="authorizeAndAssign(${itemId},${requestId})">✓ Setujui & Tugaskan</button>`);
+}
+async function authorizeAndAssign(itemId, requestId){
+  const staffId = $('aaStaff').value; if(!staffId){ toast('Pilih penanggung jawab'); return; }
+  closeModal();
+  await q(db.from('procurement_items').update({prepared_by:staffId, prepared_at:new Date().toISOString()}).eq('id',itemId));
+  const [it] = await q(db.from('procurement_items').select('item_name').eq('id',itemId));
+  await q(db.from('task_items').insert({staff_id:staffId, department:'ACC',
+    task_text:'Beli barang: '+(it?.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select());
+  await authorizeItem(itemId, true);   // ini yang mengirim ke daftar pembelian AA Soft
 }
 async function assignPrepare(itemId, requestId){
   const staffId = $('apwStaff').value;
