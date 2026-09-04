@@ -12913,10 +12913,8 @@ function pqSyncFromDOM(){
     if(!pqDraft[idx]) return;
     const nameEl = row.querySelector('.pq-name');
     pqDraft[idx].item_name = nameEl.value;
-    const opt = nameEl.tagName==='SELECT' ? nameEl.selectedOptions[0] : null;
-    if(opt && opt.dataset.aa){ pqDraft[idx].aa_item_id = opt.dataset.aa; pqDraft[idx].stok_ada = opt.dataset.stok; }
-    else if(nameEl.tagName==='SELECT'){ pqDraft[idx].aa_item_id = null; }
-    const custom = row.querySelector('.pq-name-custom'); if(custom) pqDraft[idx].item_name_custom = custom.value;
+    const aaEl = row.querySelector('.pq-aa'), stkEl = row.querySelector('.pq-stok-h');
+    if(aaEl){ pqDraft[idx].aa_item_id = aaEl.value||null; pqDraft[idx].stok_ada = stkEl?.value||''; }
     pqDraft[idx].category = row.querySelector('.pq-cat').value;
     pqDraft[idx].qty = row.querySelector('.pq-qty').value;
     // stok_ada diisi dari data AA Soft (kolom hanya-baca)
@@ -12927,17 +12925,18 @@ function pqSyncFromDOM(){
 function pqAddRow(){ pqSyncFromDOM(); pqDraft.push(pqBlankItem()); pqRenderItems(); }
 function pqRemoveRow(idx){ pqSyncFromDOM(); pqDraft.splice(idx,1); pqRenderItems(); }
 function pqCatChange(idx){ pqSyncFromDOM(); pqDraft[idx].item_name=''; pqDraft[idx].aa_item_id=null; pqDraft[idx].stok_ada=''; pqRenderItems(); }
-function pqNameChange(){ pqSyncFromDOM(); pqRenderItems(); }
 function pqRenderItems(){
   const catalog = window._catalog || [];
   $('pqItemsBox').innerHTML = pqDraft.length ? pqDraft.map((it,idx)=>`
     <div class="pq-row card" style="padding:10px;margin-bottom:8px">
       ${it.category==='umum'
-        ? `<select class="pq-name" style="width:100%" onchange="pqNameChange()">
-            <option value="">— pilih barang —</option>
-            ${catalog.map(c=>`<option value="${esc(c.item_name)}" data-aa="${c.aa_item_id}" data-stok="${c.current_stock}" ${it.item_name===c.item_name?'selected':''}>${esc(c.item_name)} — stok ${c.current_stock.toLocaleString('id-ID')} ${esc(c.unit)}</option>`).join('')}
-            <option value="__CUSTOM__" ${it.item_name==='__CUSTOM__'?'selected':''}>+ Barang lain (belum ada di katalog)</option>
-          </select>`
+        ? `<div style="position:relative">
+            <input class="pq-name" placeholder="ketik nama barang untuk mencari di gudang AA Soft..." value="${esc(it.item_name)}" autocomplete="off" style="width:100%">
+            <input type="hidden" class="pq-aa" value="${esc(it.aa_item_id||'')}">
+            <input type="hidden" class="pq-stok-h" value="${esc(it.stok_ada||'')}">
+            <div class="pq-sug" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:60;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.12);max-height:230px;overflow-y:auto"></div>
+            <div class="pq-info small" style="margin-top:3px;min-height:1em">${it.aa_item_id?`<span style="color:#166534">✓ Terhubung ke gudang · stok ${Number(it.stok_ada||0).toLocaleString('id-ID')}</span>`:'<span class="muted">Pilih dari daftar yang muncul</span>'}</div>
+          </div>`
         : `<input class="pq-name" placeholder="nama barang baru" value="${esc(it.item_name)}" style="width:100%">`}
       <div class="row" style="margin-top:8px">
         <select class="pq-cat" onchange="pqCatChange(${idx})" style="flex:1">
@@ -12947,17 +12946,55 @@ function pqRenderItems(){
         <input class="pq-qty" type="number" value="${it.qty}" placeholder="qty" style="width:70px;flex-shrink:0">
         <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="pqRemoveRow(${idx})">✕</button>
       </div>
-      ${it.category==='umum' && it.item_name==='__CUSTOM__'
-        ? `<div class="row" style="margin-top:6px"><input class="pq-name-custom" placeholder="tulis nama barang" value="${esc(it.item_name_custom)}"></div>`:''}
       ${it.category==='umum'
-        ? `<div class="row" style="margin-top:6px"><input class="pq-stok" type="number" placeholder="stok (otomatis dari AA Soft)" value="${esc(it.stok_ada)}" readonly style="background:#F3F4F6"></div>`
+        ? ''
         : `<div class="row" style="margin-top:6px"><textarea class="pq-ket" placeholder="keterangan barang baru" rows="2" style="flex:1">${esc(it.keterangan)}</textarea></div>
            <div class="row" style="margin-top:6px"><input class="pq-est" type="number" placeholder="perkiraan harga (Rp)" value="${esc(it.est_price)}"></div>`}
     </div>`).join('') : '<p class="muted small">Belum ada item, klik Tambah Item.</p>';
-  // pasang ulang listener supaya munculnya kolom "tulis manual" langsung reaktif
-  document.querySelectorAll('.pq-row .pq-name').forEach((el,idx)=>{
-    if(el.tagName==='SELECT') el.onchange = ()=>{ pqSyncFromDOM(); pqRenderItems(); };
+  // Pasang pencarian ke tiap kolom nama (kategori Umum)
+  document.querySelectorAll('.pq-row').forEach((row,idx)=>{
+    if(pqDraft[idx]?.category!=='umum') return;
+    pqAttachSearch(row, catalog);
   });
+}
+// Pencarian barang: ketik sebagian nama → muncul daftar yang mirip (nama, kategori, stok, harga).
+// Cara kerja sama dengan AA Soft. Barang yang dipilih tersimpan lewat kolom tersembunyi
+// (pq-aa = ID barang AA Soft, pq-stok-h = stok saat dipilih).
+function pqAttachSearch(row, catalog){
+  const inp=row.querySelector('.pq-name'), aa=row.querySelector('.pq-aa'),
+        stk=row.querySelector('.pq-stok-h'), box=row.querySelector('.pq-sug'), info=row.querySelector('.pq-info');
+  if(!inp||!box) return;
+  const norm = s => String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+  const tutup = () => { box.style.display='none'; };
+  const render = () => {
+    const qy = norm(inp.value);
+    if(!qy || qy.length<2){ tutup(); return; }
+    // Cocok "mirip": semua kata yang diketik ada di nama barang (urutan bebas)
+    const kata = qy.split(' ');
+    const hits = catalog.filter(c=>{ const n=norm(c.item_name); return kata.every(k=>n.includes(k)); }).slice(0,10);
+    if(!hits.length){
+      box.innerHTML = `<div class="small muted" style="padding:8px 10px">Tidak ada barang mirip. Kalau memang belum ada di gudang, ganti kategori ke <b>Baru</b>.</div>`;
+      box.style.display=''; return;
+    }
+    box.innerHTML = hits.map(c=>`
+      <div class="pq-sug-item" data-id="${c.aa_item_id}" data-name="${esc(c.item_name)}" data-stok="${c.current_stock}"
+           style="padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--line)">
+        <div style="font-weight:600">${esc(c.item_name)}</div>
+        <div class="small muted">${esc(c.category_aa)||'—'} · stok <b style="color:${c.current_stock<=0?'#B91C1C':'inherit'}">${c.current_stock.toLocaleString('id-ID')} ${esc(c.unit)}</b> · Rp ${Number(c.avg_cost||0).toLocaleString('id-ID')}/${esc(c.unit||'pcs')}</div>
+      </div>`).join('');
+    box.style.display='';
+    box.querySelectorAll('.pq-sug-item').forEach(el=>{
+      el.addEventListener('mousedown', ev=>{   // mousedown: jalan sebelum blur
+        ev.preventDefault();
+        inp.value = el.dataset.name; aa.value = el.dataset.id; stk.value = el.dataset.stok;
+        info.innerHTML = `<span style="color:#166534">✓ Terhubung ke gudang · stok ${Number(el.dataset.stok).toLocaleString('id-ID')}</span>`;
+        tutup();
+      });
+    });
+  };
+  inp.addEventListener('input', ()=>{ aa.value=''; stk.value=''; info.innerHTML='<span class="muted">Pilih dari daftar yang muncul</span>'; render(); });
+  inp.addEventListener('focus', render);
+  inp.addEventListener('blur', ()=>setTimeout(tutup,120));
 }
 /* ================= INTEGRASI AA SOFT (baca langsung) ================= */
 // Kode departemen Opslog = kode departemen AA Soft (sudah diseragamkan).
@@ -13021,14 +13058,12 @@ async function pqLoadPosBudget(){
 async function submitPengadaan(){
   pqSyncFromDOM();
   const dept = $('pqDept').value;
-  // Resolusi nama barang: kalau kategori Umum & pilih "barang lain", pakai nama manual
-  pqDraft.forEach(it=>{
-    if(it.category==='umum' && it.item_name==='__CUSTOM__'){
-      it.item_name = (it.item_name_custom||'').trim();
-    }
-  });
   const valid = pqDraft.filter(it=>it.item_name && it.item_name.trim());
   if(!valid.length){ toast('Isi minimal 1 nama barang'); return; }
+  // Barang kategori Umum harus DIPILIH dari daftar (punya ID AA Soft), bukan sekadar diketik —
+  // supaya saat diterima nanti stoknya bisa dipotong ke barang yang benar.
+  const takTerhubung = valid.filter(it=>it.category==='umum' && !it.aa_item_id);
+  if(takTerhubung.length){ toast(`"${takTerhubung[0].item_name}" belum dipilih dari daftar gudang. Ketik lalu pilih dari saran yang muncul, atau ganti kategori ke Baru.`); return; }
   const posSel = $('pqPosBudget'); const posId = posSel?.value||''; const posName = posSel?.selectedOptions[0]?.dataset.name||null;
   if(!posId){ toast('Pilih Pos Budget dulu — diperlukan untuk memotong anggaran di AA Soft'); return; }
   const r = await q(db.from('procurement_requests').insert({department:dept, requested_by:me.id, notes:$('pqNotes').value.trim()||null,
