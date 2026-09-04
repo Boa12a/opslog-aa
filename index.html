@@ -13565,7 +13565,7 @@ async function kirimAsetAA(a){
     const {data, error} = await aa.rpc('daftarkan_aset_opslog', {p_secret:_aaSecret, p:{
       opslog_asset_id:a.id, code:a.code, name:a.name, department:a.department,
       category:a.category_aa||'peralatan', location:a.location, condition:a.condition,
-      authorized_by_name:me.name }});
+      opslog_created_at:a.created_at, authorized_by_name:me.name }});
     const r = Array.isArray(data)?data[0]:data;
     if(error) throw new Error(error.message);
     if(!r?.ok) throw new Error(r?.pesan||'ditolak');
