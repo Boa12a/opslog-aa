@@ -11171,9 +11171,11 @@ async function loadJadwalGrid(){
     const fresh = await q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('id', s.id));
     s = fresh[0]; missingCount = 0;
   }
-  // Kelompok libur terpisah untuk departemen ini (dipakai pengecekan konflik)
-  _offGroups = await q(db.from('off_conflict_groups').select('*').eq('department',dept).eq('active',true));
+  // Kelompok libur terpisah — LINTAS DEPARTEMEN. Pengecekan memakai libur dari
+  // semua departemen di bulan ini (fungsi database, agar tidak terhalang RLS antar-dept).
+  _offGroups = await q(db.from('off_conflict_groups').select('*').eq('active',true));
   _offSched = s;
+  try{ _offMonth = await q(db.rpc('libur_bulan', {p_month: month})); }catch(e){ _offMonth = []; }
   const STAT = {draft:{l:'Draft',c:'#F3F4F6',t:'#6B7280'},diajukan:{l:'Menunggu Otorisasi Manager',c:'#FEF3C7',t:'#92400E'},disetujui:{l:'Disetujui (Resmi)',c:'#DCFCE7',t:'#166534'}};
   const st = STAT[s.status];
   const canEditGrid = canEdit && (isMgr() || s.status==='draft'); // SPV cuma bisa ubah saat draft; Manager bisa ubah kapan saja
@@ -11280,7 +11282,14 @@ async function fillMissingSchedule(scheduleId, dept, month){
 /* ── KELOMPOK LIBUR TERPISAH ──
    Anggota satu kelompok tidak boleh libur di hari yang sama.
    Contoh: {A,B}, {A,C,D}, {C,D,F}. Seseorang bisa ada di beberapa kelompok. */
-let _offGroups = [], _offSched = null;
+let _offGroups = [], _offSched = null, _offMonth = [];   // _offMonth: libur semua dept bulan ini
+// Gabungkan libur lintas-dept + entri jadwal yang sedang dibuka (yang terbaru menang)
+function gabungLibur(entries){
+  const map = new Map();
+  (_offMonth||[]).forEach(e=>map.set(e.staff_id+'|'+e.work_date, {staff_id:e.staff_id, work_date:e.work_date, is_off:true}));
+  (entries||[]).forEach(e=>map.set(e.staff_id+'|'+e.work_date, {staff_id:e.staff_id, work_date:e.work_date, is_off:!!e.is_off}));
+  return [...map.values()];
+}
 
 // Cari siapa saja dalam kelompok yang sama dengan staffId yang SUDAH libur di tanggal itu
 function cekKonflikLibur(staffId, workDate, entries){
@@ -11308,9 +11317,9 @@ function semuaKonflikLibur(entries){
 }
 function renderOffConflictBox(entries){
   const box = $('offConflictBox'); if(!box) return;
-  const k = semuaKonflikLibur(entries);
+  const k = semuaKonflikLibur(gabungLibur(entries));
   box.innerHTML = k.length ? `<div style="margin-top:8px;padding:8px 10px;background:#FEE2E2;color:#B91C1C;border-radius:8px" class="small">
-    <b>⚠ ${k.length} pelanggaran aturan libur:</b><br>${k.map(x=>`${fdate(x.tgl)}: <b>${x.staff.map(uname).join(', ')}</b> libur bersamaan (kelompok "${esc(x.group.name)}")`).join('<br>')}</div>` : '';
+    <b>⚠ ${k.length} pelanggaran aturan libur:</b><br>${k.map(x=>`${fdate(x.tgl)}: <b>${x.staff.map(id=>uname(id)+' ('+(DEPTS[profilesCache.find(p=>p.id===id)?.department]?.label||'?')+')').join(', ')}</b> libur bersamaan (kelompok "${esc(x.group.name)}")`).join('<br>')}</div>` : '';
 }
 
 async function setScheduleCell(scheduleId, staffId, workDate, val, el){
@@ -11320,7 +11329,7 @@ async function setScheduleCell(scheduleId, staffId, workDate, val, el){
   // ── Tolak libur yang melanggar kelompok libur terpisah ──
   if(isOff && _offGroups.length){
     const entries = _offSched?.work_schedule_entries || [];
-    const konflik = cekKonflikLibur(staffId, workDate, entries);
+    const konflik = cekKonflikLibur(staffId, workDate, gabungLibur(entries));
     if(konflik.length){
       const k = konflik[0];
       toast(`Tidak bisa libur ${fdate(workDate)}: ${k.staff.map(uname).join(', ')} sudah libur di hari itu (kelompok "${k.group.name}")`);
@@ -11349,29 +11358,35 @@ async function setScheduleCell(scheduleId, staffId, workDate, val, el){
 /* ── Pengelolaan kelompok ── */
 async function openOffGroups(dept){
   const [groups, staff] = await Promise.all([
-    q(db.from('off_conflict_groups').select('*').eq('department',dept).eq('active',true).order('name')),
-    q(db.from('profiles').select('id,name').eq('department',dept).in('role',['spv','staff']).eq('active',true).order('name')),
+    q(db.from('off_conflict_groups').select('*').eq('active',true).order('name')),
+    q(db.from('profiles').select('id,name,department').in('role',['spv','staff']).eq('active',true).order('department').order('name')),
   ]);
-  openModal(`<div class="mhead"><h3>Aturan Libur — ${DEPTS[dept]?.label||dept}</h3><button onclick="closeModal()">✕</button></div>
-    <p class="small muted">Anggota satu kelompok <b>tidak boleh libur di hari yang sama</b>. Satu orang boleh masuk beberapa kelompok.</p>
+  const deptOf = id => { const p=staff.find(x=>x.id===id); return p ? (DEPTS[p.department]?.label||p.department) : '?'; };
+  // Kelompokkan pilihan anggota per departemen, departemen yang sedang dibuka di atas
+  const byDept = {}; staff.forEach(p=>{ (byDept[p.department]=byDept[p.department]||[]).push(p); });
+  const urutDept = [dept, ...Object.keys(byDept).filter(d=>d!==dept)].filter(d=>byDept[d]);
+  openModal(`<div class="mhead"><h3>Aturan Libur (lintas departemen)</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small muted">Anggota satu kelompok <b>tidak boleh libur di hari yang sama</b> — boleh dari departemen berbeda yang saling mendukung. Satu orang boleh masuk beberapa kelompok. Jumlah kelompok & anggota tidak dibatasi.</p>
     <div id="ogList">${groups.length ? groups.map(g=>`
       <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)">
-        <span><b>${esc(g.name)}</b><br><span class="small muted">${(g.member_ids||[]).map(uname).join(' · ')}</span></span>
-        <button class="btn-sm btn-ghost" onclick="hapusOffGroup(${g.id},'${dept}')">Hapus</button></div>`).join('') : '<p class="small muted">Belum ada kelompok.</p>'}</div>
-    <hr style="margin:12px 0">
-    <label>Nama kelompok baru</label><input id="ogName" placeholder="mis. Tim Pagi, Kasir Utama">
-    <label>Anggota (pilih 2 atau lebih)</label>
-    <div style="max-height:200px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
-      ${staff.map(p=>`<label class="row" style="gap:8px;padding:4px 0;cursor:pointer"><input type="checkbox" class="ogMember" value="${p.id}"><span>${esc(p.name)}</span></label>`).join('')}
+        <span><b>${esc(g.name)}</b><br><span class="small muted">${(g.member_ids||[]).map(id=>uname(id)+' <i>('+deptOf(id)+')</i>').join(' · ')}</span></span>
+        ${isMgr()?`<button class="btn-sm btn-ghost" onclick="hapusOffGroup(${g.id},'${dept}')">Hapus</button>`:''}</div>`).join('') : '<p class="small muted">Belum ada kelompok.</p>'}</div>
+    ${isMgr() ? `<hr style="margin:12px 0">
+    <label>Nama kelompok baru</label><input id="ogName" placeholder="mis. Tim Kolam Pagi, Kasir & FD">
+    <label>Anggota (pilih 2 atau lebih, boleh lintas departemen)</label>
+    <div style="max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+      ${urutDept.map(d=>`<div class="small muted" style="margin-top:6px;font-weight:700">${DEPTS[d]?.label||d}</div>`+
+        byDept[d].map(p=>`<label class="row" style="gap:8px;padding:3px 0;cursor:pointer"><input type="checkbox" class="ogMember" value="${p.id}"><span>${esc(p.name)}</span></label>`).join('')).join('')}
     </div>
-    <button class="btn btn-teal" style="margin-top:12px;width:100%" onclick="simpanOffGroup('${dept}')">+ Tambah Kelompok</button>`);
+    <button class="btn btn-teal" style="margin-top:12px;width:100%" onclick="simpanOffGroup('${dept}')">+ Tambah Kelompok</button>`
+    : '<p class="small muted" style="margin-top:10px">Kelompok lintas departemen diatur oleh Manager.</p>'}`);
 }
 async function simpanOffGroup(dept){
   const name = $('ogName').value.trim();
   const ids = [...document.querySelectorAll('.ogMember:checked')].map(e=>e.value);
   if(!name){ toast('Nama kelompok wajib'); return; }
   if(ids.length<2){ toast('Pilih minimal 2 anggota'); return; }
-  await q(db.from('off_conflict_groups').insert({department:dept, name, member_ids:ids, created_by:me.id}).select());
+  await q(db.from('off_conflict_groups').insert({department:dept||null, name, member_ids:ids, created_by:me.id}).select());
   toast('Kelompok ditambahkan'); openOffGroups(dept);
   if(page==='jadwal') loadJadwalGrid();
 }
@@ -11382,13 +11397,13 @@ async function hapusOffGroup(id, dept){
   if(page==='jadwal') loadJadwalGrid();
 }
 async function submitSchedule(id){
-  const k = semuaKonflikLibur(_offSched?.work_schedule_entries||[]);
+  const k = semuaKonflikLibur(gabungLibur(_offSched?.work_schedule_entries||[]));
   if(k.length){ toast(`Masih ada ${k.length} pelanggaran aturan libur — perbaiki dulu sebelum diajukan`); return; }
   await q(db.from('work_schedules').update({status:'diajukan', submitted_at:new Date().toISOString()}).eq('id',id));
   toast('Jadwal diajukan ke Manager'); loadJadwalGrid();
 }
 async function authorizeSchedule(id){
-  const k = semuaKonflikLibur(_offSched?.work_schedule_entries||[]);
+  const k = semuaKonflikLibur(gabungLibur(_offSched?.work_schedule_entries||[]));
   if(k.length && !confirm(`Ada ${k.length} pelanggaran aturan libur bersamaan. Tetap otorisasi?`)) return;
   await q(db.from('work_schedules').update({status:'disetujui', authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',id));
   toast('Jadwal diotorisasi, jadi acuan resmi'); loadJadwalGrid();
@@ -11503,8 +11518,9 @@ async function cekSwapKonflik(swapId){
   const month = r.original_date.slice(0,7);
   const sched = await q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('department',r.department).eq('period_month',month));
   if(!sched.length) return [];
-  _offGroups = await q(db.from('off_conflict_groups').select('*').eq('department',r.department).eq('active',true));
-  const entries = sched[0].work_schedule_entries||[];
+  _offGroups = await q(db.from('off_conflict_groups').select('*').eq('active',true));
+  try{ _offMonth = await q(db.rpc('libur_bulan', {p_month: month})); }catch(e){ _offMonth = []; }
+  const entries = gabungLibur(sched[0].work_schedule_entries||[]);
   const pesan = [];
   // Requester akan libur di original_date
   cekKonflikLibur(r.requester_id, r.original_date, entries).forEach(k=>
