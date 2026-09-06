@@ -11171,16 +11171,21 @@ async function loadJadwalGrid(){
     const fresh = await q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('id', s.id));
     s = fresh[0]; missingCount = 0;
   }
+  // Kelompok libur terpisah untuk departemen ini (dipakai pengecekan konflik)
+  _offGroups = await q(db.from('off_conflict_groups').select('*').eq('department',dept).eq('active',true));
+  _offSched = s;
   const STAT = {draft:{l:'Draft',c:'#F3F4F6',t:'#6B7280'},diajukan:{l:'Menunggu Otorisasi Manager',c:'#FEF3C7',t:'#92400E'},disetujui:{l:'Disetujui (Resmi)',c:'#DCFCE7',t:'#166534'}};
   const st = STAT[s.status];
   const canEditGrid = canEdit && (isMgr() || s.status==='draft'); // SPV cuma bisa ubah saat draft; Manager bisa ubah kapan saja
   let h = `<div class="card"><div class="row" style="justify-content:space-between">
     <span class="badge" style="background:${st.c};color:${st.t}">${st.l}</span>
     <div class="row">
+      ${canEdit?`<button class="btn btn-ghost btn-sm" onclick="openOffGroups('${dept}')">👥 Aturan Libur</button>`:''}
       ${(canEdit && s.status==='draft')?`<button class="btn btn-navy btn-sm" onclick="submitSchedule(${s.id})">Ajukan ke Manager</button>`:''}
       ${(isMgr() && s.status==='diajukan')?`<button class="btn btn-teal btn-sm" onclick="authorizeSchedule(${s.id})">✓ Otorisasi (Jadikan Resmi)</button>`:''}
       ${(isMgr() && ['diajukan','disetujui'].includes(s.status))?`<button class="btn btn-ghost btn-sm" onclick="revertSchedule(${s.id})">Kembalikan ke Draft</button>`:''}
     </div></div>
+    <div id="offConflictBox"></div>
     <p class="small muted" style="margin-top:6px">Tanggal <span style="color:var(--red);font-weight:700">merah</span> = Sabtu/Minggu/tanggal merah — ${weekendOffRule==='forbidden' ? 'departemen ini TIDAK BOLEH memberi libur di hari itu sama sekali, termasuk Manager/Owner.' : 'SPV tidak bisa memberi libur di hari itu, cuma Manager/Owner yang bisa kalau memang perlu.'}</p>
     ${(missingCount>0 && s.status!=='draft')?`<div class="row" style="justify-content:space-between;margin-top:8px;background:#FEF3C7;padding:8px 10px;border-radius:8px">
       <span class="small" style="color:#92400E">⚠ Ada staff yang belum punya entri di jadwal resmi ini (mis. baru ditambahkan setelah jadwal dibuat).</span>
@@ -11240,6 +11245,7 @@ async function loadJadwalGrid(){
     h += `</table></div>`;
   });
   $('jwGridArea').innerHTML = h;
+  renderOffConflictBox(s.work_schedule_entries||[]);
 }
 async function createSchedule(dept, month){
   const r = await q(db.from('work_schedules').insert({department:dept, period_month:month, created_by:me.id}).select());
@@ -11271,19 +11277,119 @@ async function fillMissingSchedule(scheduleId, dept, month){
   const n = await backfillScheduleEntries(scheduleId, dept, month, staffList);
   toast(n>0 ? `${n} entri ditambahkan (Kerja)` : 'Tidak ada yang perlu dilengkapi'); loadJadwalGrid();
 }
+/* ── KELOMPOK LIBUR TERPISAH ──
+   Anggota satu kelompok tidak boleh libur di hari yang sama.
+   Contoh: {A,B}, {A,C,D}, {C,D,F}. Seseorang bisa ada di beberapa kelompok. */
+let _offGroups = [], _offSched = null;
+
+// Cari siapa saja dalam kelompok yang sama dengan staffId yang SUDAH libur di tanggal itu
+function cekKonflikLibur(staffId, workDate, entries){
+  const offToday = new Set((entries||[]).filter(e=>e.work_date===workDate && e.is_off && e.staff_id!==staffId).map(e=>e.staff_id));
+  const konflik = [];
+  for(const g of _offGroups){
+    if(!(g.member_ids||[]).includes(staffId)) continue;
+    const bentrok = (g.member_ids||[]).filter(id=>id!==staffId && offToday.has(id));
+    if(bentrok.length) konflik.push({group:g, staff:bentrok});
+  }
+  return konflik;
+}
+// Semua konflik dalam satu jadwal (untuk banner & pengecekan sebelum ajukan/otorisasi)
+function semuaKonflikLibur(entries){
+  const byDate = {};
+  (entries||[]).filter(e=>e.is_off).forEach(e=>{ (byDate[e.work_date]=byDate[e.work_date]||new Set()).add(e.staff_id); });
+  const hasil = [];
+  for(const [tgl, offs] of Object.entries(byDate)){
+    for(const g of _offGroups){
+      const bentrok = (g.member_ids||[]).filter(id=>offs.has(id));
+      if(bentrok.length>=2) hasil.push({tgl, group:g, staff:bentrok});
+    }
+  }
+  return hasil.sort((a,b)=>a.tgl.localeCompare(b.tgl));
+}
+function renderOffConflictBox(entries){
+  const box = $('offConflictBox'); if(!box) return;
+  const k = semuaKonflikLibur(entries);
+  box.innerHTML = k.length ? `<div style="margin-top:8px;padding:8px 10px;background:#FEE2E2;color:#B91C1C;border-radius:8px" class="small">
+    <b>⚠ ${k.length} pelanggaran aturan libur:</b><br>${k.map(x=>`${fdate(x.tgl)}: <b>${x.staff.map(uname).join(', ')}</b> libur bersamaan (kelompok "${esc(x.group.name)}")`).join('<br>')}</div>` : '';
+}
+
 async function setScheduleCell(scheduleId, staffId, workDate, val, el){
   const isOff = val==='off';
   const shiftId = (!isOff && val!=='kerja') ? Number(val) : null;
+
+  // ── Tolak libur yang melanggar kelompok libur terpisah ──
+  if(isOff && _offGroups.length){
+    const entries = _offSched?.work_schedule_entries || [];
+    const konflik = cekKonflikLibur(staffId, workDate, entries);
+    if(konflik.length){
+      const k = konflik[0];
+      toast(`Tidak bisa libur ${fdate(workDate)}: ${k.staff.map(uname).join(', ')} sudah libur di hari itu (kelompok "${k.group.name}")`);
+      if(el){ // kembalikan pilihan ke nilai sebelumnya
+        const prev = entries.find(e=>e.staff_id===staffId && e.work_date===workDate);
+        el.value = prev ? (prev.is_off?'off':(prev.shift_id||'kerja')) : 'kerja';
+      }
+      return;
+    }
+  }
+
   if(el){ el.style.background = isOff?'#F3F4F6':'#DCFCE7'; el.style.color = isOff?'#6B7280':'#166534'; }
   await q(db.from('work_schedule_entries').upsert({
     schedule_id:scheduleId, staff_id:staffId, work_date:workDate, is_off:isOff, shift_id:shiftId
   }, {onConflict:'schedule_id,staff_id,work_date'}).select());
+  // perbarui salinan lokal supaya pengecekan berikutnya akurat tanpa reload
+  if(_offSched){
+    const arr = _offSched.work_schedule_entries = _offSched.work_schedule_entries||[];
+    const i = arr.findIndex(e=>e.staff_id===staffId && e.work_date===workDate);
+    const row = {schedule_id:scheduleId, staff_id:staffId, work_date:workDate, is_off:isOff, shift_id:shiftId};
+    if(i>=0) arr[i]={...arr[i],...row}; else arr.push(row);
+    renderOffConflictBox(arr);
+  }
+}
+
+/* ── Pengelolaan kelompok ── */
+async function openOffGroups(dept){
+  const [groups, staff] = await Promise.all([
+    q(db.from('off_conflict_groups').select('*').eq('department',dept).eq('active',true).order('name')),
+    q(db.from('profiles').select('id,name').eq('department',dept).in('role',['spv','staff']).eq('active',true).order('name')),
+  ]);
+  openModal(`<div class="mhead"><h3>Aturan Libur — ${DEPTS[dept]?.label||dept}</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small muted">Anggota satu kelompok <b>tidak boleh libur di hari yang sama</b>. Satu orang boleh masuk beberapa kelompok.</p>
+    <div id="ogList">${groups.length ? groups.map(g=>`
+      <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)">
+        <span><b>${esc(g.name)}</b><br><span class="small muted">${(g.member_ids||[]).map(uname).join(' · ')}</span></span>
+        <button class="btn-sm btn-ghost" onclick="hapusOffGroup(${g.id},'${dept}')">Hapus</button></div>`).join('') : '<p class="small muted">Belum ada kelompok.</p>'}</div>
+    <hr style="margin:12px 0">
+    <label>Nama kelompok baru</label><input id="ogName" placeholder="mis. Tim Pagi, Kasir Utama">
+    <label>Anggota (pilih 2 atau lebih)</label>
+    <div style="max-height:200px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+      ${staff.map(p=>`<label class="row" style="gap:8px;padding:4px 0;cursor:pointer"><input type="checkbox" class="ogMember" value="${p.id}"><span>${esc(p.name)}</span></label>`).join('')}
+    </div>
+    <button class="btn btn-teal" style="margin-top:12px;width:100%" onclick="simpanOffGroup('${dept}')">+ Tambah Kelompok</button>`);
+}
+async function simpanOffGroup(dept){
+  const name = $('ogName').value.trim();
+  const ids = [...document.querySelectorAll('.ogMember:checked')].map(e=>e.value);
+  if(!name){ toast('Nama kelompok wajib'); return; }
+  if(ids.length<2){ toast('Pilih minimal 2 anggota'); return; }
+  await q(db.from('off_conflict_groups').insert({department:dept, name, member_ids:ids, created_by:me.id}).select());
+  toast('Kelompok ditambahkan'); openOffGroups(dept);
+  if(page==='jadwal') loadJadwalGrid();
+}
+async function hapusOffGroup(id, dept){
+  if(!confirm('Hapus kelompok ini?')) return;
+  await q(db.from('off_conflict_groups').update({active:false}).eq('id',id));
+  toast('Kelompok dihapus'); openOffGroups(dept);
+  if(page==='jadwal') loadJadwalGrid();
 }
 async function submitSchedule(id){
+  const k = semuaKonflikLibur(_offSched?.work_schedule_entries||[]);
+  if(k.length){ toast(`Masih ada ${k.length} pelanggaran aturan libur — perbaiki dulu sebelum diajukan`); return; }
   await q(db.from('work_schedules').update({status:'diajukan', submitted_at:new Date().toISOString()}).eq('id',id));
   toast('Jadwal diajukan ke Manager'); loadJadwalGrid();
 }
 async function authorizeSchedule(id){
+  const k = semuaKonflikLibur(_offSched?.work_schedule_entries||[]);
+  if(k.length && !confirm(`Ada ${k.length} pelanggaran aturan libur bersamaan. Tetap otorisasi?`)) return;
   await q(db.from('work_schedules').update({status:'disetujui', authorized_by:me.id, authorized_at:new Date().toISOString()}).eq('id',id));
   toast('Jadwal diotorisasi, jadi acuan resmi'); loadJadwalGrid();
 }
@@ -11380,12 +11486,33 @@ async function decideSwapSpv(id, approve){
   toast(approve?'Disetujui, diteruskan ke Manager':'Ditolak'); closeModal(); loadSwapList();
 }
 async function decideSwapManager(id, approve){
+  if(approve){
+    const kf = await cekSwapKonflik(id);
+    if(kf.length && !confirm('Tukar libur ini melanggar aturan libur bersamaan:\n\n'+kf.join('\n')+'\n\nTetap setujui?')) return;
+  }
   let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
   await q(db.from('swap_requests').update({
     status: approve?'disetujui_manager':'ditolak_manager', manager_decision_by:me.id, manager_decision_at:new Date().toISOString(), manager_decision_note:note
   }).eq('id',id));
   if(approve) await applySwapToSchedule(id);
   toast(approve?'Tukar libur diotorisasi':'Ditolak'); closeModal(); loadSwapList();
+}
+// Cek apakah hasil tukar libur akan melanggar kelompok libur terpisah
+async function cekSwapKonflik(swapId){
+  const [r] = await q(db.from('swap_requests').select('*').eq('id',swapId));
+  const month = r.original_date.slice(0,7);
+  const sched = await q(db.from('work_schedules').select('*, work_schedule_entries(*)').eq('department',r.department).eq('period_month',month));
+  if(!sched.length) return [];
+  _offGroups = await q(db.from('off_conflict_groups').select('*').eq('department',r.department).eq('active',true));
+  const entries = sched[0].work_schedule_entries||[];
+  const pesan = [];
+  // Requester akan libur di original_date
+  cekKonflikLibur(r.requester_id, r.original_date, entries).forEach(k=>
+    pesan.push(`${uname(r.requester_id)} libur ${fdate(r.original_date)} bersamaan dengan ${k.staff.map(uname).join(', ')} (kelompok "${k.group.name}")`));
+  // Partner (bila ada) akan libur di new_date
+  if(r.partner_id && r.new_date) cekKonflikLibur(r.partner_id, r.new_date, entries).forEach(k=>
+    pesan.push(`${uname(r.partner_id)} libur ${fdate(r.new_date)} bersamaan dengan ${k.staff.map(uname).join(', ')} (kelompok "${k.group.name}")`));
+  return pesan;
 }
 async function applySwapToSchedule(swapId){
   // Terapkan hasil tukar libur yang sudah diotorisasi ke jadwal resmi bulan terkait (kalau ada).
