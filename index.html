@@ -11367,16 +11367,25 @@ async function openOffGroups(dept){
   const urutDept = [dept, ...Object.keys(byDept).filter(d=>d!==dept)].filter(d=>byDept[d]);
   openModal(`<div class="mhead"><h3>Aturan Libur (lintas departemen)</h3><button onclick="closeModal()">✕</button></div>
     <p class="small muted">Anggota satu kelompok <b>tidak boleh libur di hari yang sama</b> — boleh dari departemen berbeda yang saling mendukung. Satu orang boleh masuk beberapa kelompok. Jumlah kelompok & anggota tidak dibatasi.</p>
-    <div id="ogList">${groups.length ? groups.map(g=>`
-      <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)">
-        <span><b>${esc(g.name)}</b><br><span class="small muted">${(g.member_ids||[]).map(id=>uname(id)+' <i>('+deptOf(id)+')</i>').join(' · ')}</span></span>
-        ${isMgr()?`<button class="btn-sm btn-ghost" onclick="hapusOffGroup(${g.id},'${dept}')">Hapus</button>`:''}</div>`).join('') : '<p class="small muted">Belum ada kelompok.</p>'}</div>
+    <div id="ogList" style="border:1px solid var(--line);border-radius:8px;overflow:hidden">${groups.length ? groups.map(g=>`
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:10px 12px;border-bottom:1px solid #F3F4F6">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700">${esc(g.name)} <span class="small muted" style="font-weight:400">· ${(g.member_ids||[]).length} orang</span></div>
+          <div class="small muted" style="margin-top:3px;line-height:1.5">${(g.member_ids||[]).map(id=>`<span style="display:inline-block;background:#F3F4F6;border-radius:6px;padding:1px 7px;margin:2px 4px 2px 0">${esc(uname(id))} <span style="opacity:.7">· ${esc(deptOf(id))}</span></span>`).join('')}</div>
+        </div>
+        ${isMgr()?`<button class="btn-sm btn-ghost" style="flex:none" onclick="hapusOffGroup(${g.id},'${dept}')">Hapus</button>`:''}
+      </div>`).join('') : '<p class="small muted" style="padding:10px 12px;margin:0">Belum ada kelompok.</p>'}</div>
     ${isMgr() ? `<hr style="margin:12px 0">
     <label>Nama kelompok baru</label><input id="ogName" placeholder="mis. Tim Kolam Pagi, Kasir & FD">
     <label>Anggota (pilih 2 atau lebih, boleh lintas departemen)</label>
-    <div style="max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px">
-      ${urutDept.map(d=>`<div class="small muted" style="margin-top:6px;font-weight:700">${DEPTS[d]?.label||d}</div>`+
-        byDept[d].map(p=>`<label class="row" style="gap:8px;padding:3px 0;cursor:pointer"><input type="checkbox" class="ogMember" value="${p.id}"><span>${esc(p.name)}</span></label>`).join('')).join('')}
+    <div style="max-height:280px;overflow-y:auto;border:1px solid var(--line);border-radius:8px">
+      ${urutDept.map(d=>`
+        <div style="position:sticky;top:0;background:#F3F4F6;padding:6px 12px;font-size:.75rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#374151;border-bottom:1px solid var(--line)">${DEPTS[d]?.label||d}</div>
+        ${byDept[d].map(p=>`
+        <label style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #F3F4F6;cursor:pointer;font-size:.9rem">
+          <input type="checkbox" class="ogMember" value="${p.id}" style="width:16px;height:16px;margin:0;flex:none">
+          <span style="flex:1">${esc(p.name)}</span>
+        </label>`).join('')}`).join('')}
     </div>
     <button class="btn btn-teal" style="margin-top:12px;width:100%" onclick="simpanOffGroup('${dept}')">+ Tambah Kelompok</button>`
     : '<p class="small muted" style="margin-top:10px">Kelompok lintas departemen diatur oleh Manager.</p>'}`);
