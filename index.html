@@ -13292,7 +13292,7 @@ async function openPengadaan(id){
   let [r] = await q(db.from('procurement_requests').select('*, procurement_items(*), procurement_updates(*)').eq('id',id));
   // Stok terkini dari AA Soft untuk item gudang yang belum selesai (supaya departemen tahu
   // barangnya masih ada atau tidak sebelum diambil)
-  if(!_catAAcache && (r.procurement_items||[]).some(it=>it.aa_item_id && it.status!=='selesai')){
+  if(!_catAAcache && (r.procurement_items||[]).some(it=>it.aa_item_id && (it.status!=='selesai' || it.aa_sync_status==='gagal'))){
     try{ _catAAcache = await loadKatalogAA(); }catch(e){}
   }
   // Segarkan status jalur beli dari AA Soft (nota sudah diinput Admin?)
@@ -13337,7 +13337,7 @@ async function openPengadaan(id){
     }
     if(it.category==='umum'){
       const live = it.aa_item_id && _catAAcache ? _catAAcache.find(k=>k.aa_item_id===it.aa_item_id) : null;
-      h += `<div class="small muted">Stok saat diminta: ${it.stok_ada??'-'}${live?` · <b style="color:${live.current_stock<Number(it.qty)?'#B91C1C':'#166534'}">stok sekarang: ${live.current_stock.toLocaleString('id-ID')} ${esc(live.unit)}</b>`:''}</div>`;
+      h += `<div class="small muted">Stok saat diminta (catatan): ${it.stok_ada??'-'}${live?` · <b style="color:${live.current_stock<Number(it.qty)?'#B91C1C':'#166534'}">stok sekarang di AA Soft: ${live.current_stock.toLocaleString('id-ID')} ${esc(live.unit)}</b>`:''}</div>`;
     } else {
       h += `<div class="small muted">Keterangan: ${esc(it.keterangan||'-')}</div>
         <div class="small muted">Perkiraan harga: ${rp(it.est_price)}</div>`;
