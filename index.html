@@ -10313,6 +10313,32 @@ const SUPABASE_URL = "https://hsenozdmrpxppzzuxsaq.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhzZW5vemRtcnB4cHB6enV4c2FxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzMzQzMjYsImV4cCI6MjA5OTkxMDMyNn0.8YVSBECx1jIehn5xqN0iZgG3_CWtNk45G7dq8Azhp9A";
 /* =============================================== */
 
+// ── Pencocokan pencarian yang toleran (SAMA dengan Utils.cocokKata di AA Soft) ──
+//   • tiap kata boleh di mana saja ("cat envi" → "Cat besi kayu Envi Prime")
+//   • tiap kata boleh meleset satu huruf ("envy" → "Envi")
+//   • kata < 3 huruf harus persis
+const _normCari = s => String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+function _beda1(a, b) {
+  if (a === b) return true;
+  const la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > 1) return false;
+  let i = 0, j = 0, beda = 0;
+  while (i < la && j < lb) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++beda > 1) return false;
+    if (la > lb) i++; else if (lb > la) j++; else { i++; j++; }
+  }
+  return beda + (la - i) + (lb - j) <= 1;
+}
+function cocokKata(teks, query) {
+  const n = _normCari(teks);
+  const kata = _normCari(query).split(' ').filter(Boolean);
+  if (!kata.length) return true;
+  if (!n) return false;
+  const words = n.split(' ');
+  return kata.every(k => n.includes(k) || (k.length >= 3 && words.some(w => w.startsWith(k) || _beda1(w, k))));
+}
+
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 // Lazy-load xlsx (library besar, cuma dipakai fitur Export Excel) -- supaya
 // tidak lagi ikut membebani setiap kali app dibuka. Dipanggil di awal tiap
@@ -13083,8 +13109,8 @@ async function loadPengadaan(){
   if(search){
     list = list.filter(r=>
       String(r.id).includes(search) ||
-      uname(r.requested_by).toLowerCase().includes(search) ||
-      r.procurement_items.some(i=>(i.item_name_custom||i.item_name||'').toLowerCase().includes(search))
+      cocokKata(uname(r.requested_by), search) ||
+      r.procurement_items.some(i=>cocokKata(i.item_name_custom||i.item_name, search))
     );
   }
   $('pengadaanList').innerHTML = list.length ? list.map(reqRow).join('') : '<p class="muted">Tidak ada permintaan.</p>';
@@ -13152,9 +13178,8 @@ function pqAttachSearch(row, catalog){
   const render = () => {
     const qy = norm(inp.value);
     if(!qy || qy.length<2){ tutup(); return; }
-    // Cocok "mirip": semua kata yang diketik ada di nama barang (urutan bebas)
-    const kata = qy.split(' ');
-    const hits = catalog.filter(c=>{ const n=norm(c.item_name); return kata.every(k=>n.includes(k)); }).slice(0,10);
+    // Cocok "mirip": urutan kata bebas DAN toleran salah satu huruf
+    const hits = catalog.filter(c=>cocokKata(c.item_name, qy)).slice(0,10);
     if(!hits.length){
       box.innerHTML = `<div class="small muted" style="padding:8px 10px">Tidak ada barang mirip. Kalau memang belum ada di gudang, ganti kategori ke <b>Baru</b>.</div>`;
       box.style.display=''; return;
@@ -15482,7 +15507,7 @@ async function loadCatalog(reload=false){
   try{
     if(reload || !_catCache) _catCache = await loadKatalogAA();
     const cari = ($('catCari')?.value||'').toLowerCase();
-    const items = _catCache.filter(i=>!cari || i.item_name.toLowerCase().includes(cari));
+    const items = _catCache.filter(i=>!cari || cocokKata(i.item_name, cari));
     box.innerHTML = items.length ? items.map(i=>
       `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)">
         <span>${esc(i.item_name)}${i.category_aa?` <span class="badge" style="background:#E5E7EB;color:#374151">${esc(i.category_aa)}</span>`:''}</span>
