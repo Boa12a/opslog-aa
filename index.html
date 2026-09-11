@@ -10259,6 +10259,33 @@ table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700
 .age-amber{color:var(--amber);font-weight:700}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .filters select{width:auto;padding:7px 10px;font-size:13px}
+
+/* ── Tiket kerusakan: penunjuk tahap, kotak giliran, material, riwayat ── */
+.tahap-wrap{display:flex;align-items:center;margin:14px 0 4px;font-size:11px}
+.tahap{flex:1;text-align:center}.tahap-line{flex:1;height:2px;background:#E5E7EB;margin-bottom:18px}.tahap-line.tahap-done{background:#0F766E}
+.tahap-dot{width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:#F3F4F6;color:#9CA3AF;border:1px solid #D1D5DB}
+.tahap-lbl{margin-top:3px;color:#9CA3AF}
+.tahap-done .tahap-dot{background:#0F766E;color:#fff;border-color:#0F766E}.tahap-done .tahap-lbl{color:#374151}
+.tahap-now .tahap-dot{background:#1D4ED8;color:#fff;border-color:#1D4ED8}.tahap-now .tahap-lbl{color:#111827;font-weight:700}
+.kotak{border-radius:10px;padding:12px 14px;margin:12px 0}.kotak-judul{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}.kotak-teks{margin-top:3px;font-size:13.5px}
+.k-biru{background:#DBEAFE}.k-biru .kotak-judul{color:#1D4ED8}
+.k-kuning{background:#FEF3C7}.k-kuning .kotak-judul{color:#92400E}
+.k-hijau{background:#DCFCE7}.k-hijau .kotak-judul{color:#166534}
+.k-merah{background:#FEE2E2}.k-merah .kotak-judul{color:#B91C1C}
+.pil-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.pil{display:flex;align-items:center;gap:6px;font-size:13px;border:1px solid #D1D5DB;padding:6px 12px;border-radius:8px;cursor:pointer;background:#fff}
+.pil:has(input:checked){border-color:#1D4ED8;background:#DBEAFE}
+.mat-head,.mat-grid{display:grid;grid-template-columns:1fr 60px 110px 32px;gap:6px;align-items:center}
+.mat-head{margin:10px 0 4px}.mat-row{margin-bottom:8px}.mat-info{margin-top:3px}
+.mat-drop{position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #D1D5DB;border-radius:8px;z-index:20;max-height:220px;overflow:auto;box-shadow:0 4px 12px rgba(0,0,0,.08)}
+.mat-opt{padding:8px 10px;border-bottom:1px solid #F3F4F6;cursor:pointer;font-size:13px}.mat-opt:hover{background:#F3F4F6}.mat-opt-beli{color:#1D4ED8;border-bottom:0}
+.tag-gudang{background:#CCFBF1;color:#0F766E;font-size:11px;padding:2px 8px;border-radius:6px}.tag-beli{background:#FEF3C7;color:#92400E;font-size:11px;padding:2px 8px;border-radius:6px}
+.lipat{border:1px solid #E5E7EB;border-radius:10px;padding:10px 14px;margin-top:12px}.lipat summary{cursor:pointer;list-style:none}.lipat summary::-webkit-details-marker{display:none}
+.lipat-box{border:1px solid #E5E7EB;border-radius:10px;padding:10px 14px;margin-top:12px}
+.tl-wrap{border-left:2px solid #E5E7EB;margin-left:8px;padding-left:16px}
+.tl-item{position:relative;margin-bottom:10px;font-size:13px}.tl-dot{position:absolute;left:-23px;top:3px;width:12px;height:12px;border-radius:50%;background:#fff;border:2px solid #9CA3AF}
+.tl-dot.tl-hijau{border-color:#0F766E;background:#CCFBF1}.tl-dot.tl-merah{border-color:#DC2626;background:#FEE2E2}.tl-dot.tl-kuning{border-color:#D97706;background:#FEF3C7}.tl-dot.tl-biru{border-color:#1D4ED8;background:#DBEAFE}
+.tl-nama{font-weight:700}
 </style>
 </head>
 <body>
@@ -12706,197 +12733,373 @@ async function rejectUsulan(id){
   await q(db.from('tickets').delete().eq('id',id).select());
   closeModal(); toast('Usulan ditolak & dihapus'); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
+// ── Tahapan per jalur (untuk penunjuk di atas modal) ────────────────
+// a = dikerjakan sendiri tanpa material; b = sendiri, ada material;
+// c = diserahkan ke management. Tiket lama tanpa route dibaca dari isinya.
+function tiketJalur(t){
+  if(t.route) return t.route;
+  if(t.status==='menunggu_keputusan' || t.status==='dijadwalkan') return 'c';
+  return (t.ticket_items||[]).length ? 'b' : 'a';
+}
+const TAHAP = {
+  a: [['dilaporkan','Dilaporkan'],['ditindaklanjuti','Dikerjakan'],['menunggu_verifikasi','Diperiksa'],['selesai','Selesai']],
+  b: [['dilaporkan','Dilaporkan'],['disetujui','ACC Manager'],['barang_tersedia','Barang siap'],['diperbaiki','Dikerjakan'],['selesai','Selesai']],
+  c: [['menunggu_keputusan','Ke Manager'],['dijadwalkan','Dijadwalkan'],['diperbaiki','Dikerjakan'],['selesai','Selesai']],
+};
+// status yang "setara" untuk keperluan penunjuk
+const TAHAP_ALIAS = { ditindaklanjuti:{b:'dilaporkan'}, dijadwalkan:{b:'barang_tersedia'}, diperbaiki:{a:'menunggu_verifikasi'},
+  menunggu_verifikasi:{b:'diperbaiki', c:'diperbaiki'}, barang_tersedia:{c:'dijadwalkan'}, disetujui:{c:'menunggu_keputusan'} };
+function tahapHtml(t){
+  const jalur = tiketJalur(t), steps = TAHAP[jalur];
+  let st = t.status; if(TAHAP_ALIAS[st] && TAHAP_ALIAS[st][jalur]) st = TAHAP_ALIAS[st][jalur];
+  const cur = steps.findIndex(x=>x[0]===st);
+  const macet = ['ditolak','ditunda'].includes(t.status);
+  return `<div class="tahap-wrap">${steps.map((x,i)=>{
+    const cls = macet ? 'tahap-off' : (i<cur ? 'tahap-done' : (i===cur ? 'tahap-now' : 'tahap-off'));
+    return `<div class="tahap ${cls}"><div class="tahap-dot">${i<cur&&!macet?'✓':i+1}</div><div class="tahap-lbl">${x[1]}</div></div>` +
+           (i<steps.length-1 ? `<div class="tahap-line ${i<cur&&!macet?'tahap-done':''}"></div>` : '');
+  }).join('')}</div>`;
+}
+
+// ── Baris material dengan ketik-cari katalog gudang AA Soft ─────────
+// Setiap baris menyimpan: nama, qty, perkiraan harga, dan sumber
+// ('gudang' + aa_item_id kalau dipilih dari katalog; 'beli' kalau tidak).
+function matRowHtml(pre){
+  pre = pre||{};
+  const gud = pre.sumber==='gudang';
+  return `<div class="mat-row" data-aa="${pre.aa_item_id||''}" data-sumber="${pre.sumber||''}">
+    <div class="mat-grid">
+      <div style="position:relative"><input class="mat-nama" placeholder="ketik nama barang / jasa" value="${esc(pre.item_name||'')}" oninput="matCari(this)" onfocus="matCari(this)" autocomplete="off"><div class="mat-drop" style="display:none"></div></div>
+      <input class="mat-qty" type="number" min="1" value="${pre.qty||1}">
+      <input class="mat-harga" type="number" placeholder="Rp" value="${pre.est_price||''}" ${gud?'disabled':''}>
+      <button class="btn-sm btn-ghost" type="button" onclick="this.closest('.mat-row').remove(); matRingkas()">✕</button>
+    </div>
+    <div class="mat-info small">${matInfoHtml(pre.sumber, pre.stok)}</div>
+  </div>`;
+}
+function matInfoHtml(sumber, stok){
+  if(sumber==='gudang') return `<span class="tag-gudang">Dari gudang${stok!=null?' · stok '+stok:''}</span> <span class="muted">dibebankan ke departemen sebagai pemakaian barang</span>`;
+  if(sumber==='beli')   return `<span class="tag-beli">Beli</span> <span class="muted">dicatat sebagai biaya perawatan &amp; perbaikan departemen</span>`;
+  return `<span class="muted">pilih dari daftar, atau pakai sebagai barang beli</span>`;
+}
+async function matPastikanKatalog(){
+  if(!window._catalog || !window._catalog.length){
+    try{ window._catalog = await loadKatalogAA(); }catch(e){ window._catalog = []; }
+  }
+}
+async function matCari(inp){
+  await matPastikanKatalog();
+  const row = inp.closest('.mat-row'), drop = row.querySelector('.mat-drop');
+  const qy = inp.value.trim();
+  if(qy.length < 2){ drop.style.display='none'; return; }
+  const hits = (window._catalog||[]).filter(c=>cocokKata(c.item_name, qy)).slice(0,8);
+  drop.innerHTML = hits.map(c=>`<div class="mat-opt" onmousedown="matPilih(this,'${c.aa_item_id}',${JSON.stringify(c.item_name).replace(/"/g,'&quot;')},${c.current_stock??'null'})">${esc(c.item_name)} <span class="muted small">· stok ${c.current_stock??'-'}</span></div>`).join('') +
+    `<div class="mat-opt mat-opt-beli" onmousedown="matPilihBeli(this)">+ Pakai "${esc(qy)}" sebagai barang beli</div>`;
+  drop.style.display='block';
+}
+function matPilih(el, aaId, nama, stok){
+  const row = el.closest('.mat-row');
+  row.dataset.aa = aaId; row.dataset.sumber = 'gudang';
+  row.querySelector('.mat-nama').value = nama;
+  const h = row.querySelector('.mat-harga'); h.value=''; h.disabled=true;
+  row.querySelector('.mat-info').innerHTML = matInfoHtml('gudang', stok);
+  row.querySelector('.mat-drop').style.display='none';
+  matRingkas();
+}
+function matPilihBeli(el){
+  const row = el.closest('.mat-row');
+  row.dataset.aa = ''; row.dataset.sumber = 'beli';
+  row.querySelector('.mat-harga').disabled=false;
+  row.querySelector('.mat-info').innerHTML = matInfoHtml('beli');
+  row.querySelector('.mat-drop').style.display='none';
+  matRingkas();
+}
+function matTambah(){ $('matList').insertAdjacentHTML('beforeend', matRowHtml()); matRingkas(); }
+function matBaca(){
+  return [...document.querySelectorAll('#matList .mat-row')].map(r=>({
+    item_name: r.querySelector('.mat-nama').value.trim(),
+    qty: Number(r.querySelector('.mat-qty').value)||1,
+    est_price: Number(r.querySelector('.mat-harga').value)||0,
+    aa_item_id: r.dataset.aa||null,
+    sumber: r.dataset.sumber||'',
+  })).filter(x=>x.item_name);
+}
+function matRingkas(){
+  const box = $('matRingkas'); if(!box) return;
+  const rows = matBaca();
+  const nGud = rows.filter(r=>r.sumber==='gudang').length, nBeli = rows.filter(r=>r.sumber==='beli').length;
+  const nTanpa = rows.length - nGud - nBeli;
+  const est = rows.filter(r=>r.sumber==='beli').reduce((s,r)=>s+r.qty*r.est_price,0);
+  box.innerHTML = rows.length
+    ? `${nGud} dari gudang · ${nBeli} beli${est?' · perkiraan beli '+rp(est):''}${nTanpa?` · <span style="color:var(--red)">${nTanpa} belum ditentukan sumbernya</span>`:''}`
+    : '';
+  const peringatan = $('matPeringatan'); if(peringatan) peringatan.style.display = nBeli ? 'block' : 'none';
+  const btn = $('btnKirimUsulan'); if(btn) btn.textContent = labelKirimUsulan();
+}
+function labelKirimUsulan(){
+  const siapa = document.querySelector('input[name="uSiapa"]:checked')?.value || 'sendiri';
+  const perlu = document.querySelector('input[name="uMat"]:checked')?.value || 'tidak';
+  const rows = perlu==='ya' ? matBaca() : [];
+  if(siapa==='management') return 'Serahkan ke Manager';
+  if(rows.some(r=>r.sumber==='beli')) return 'Kirim ke Manager (ada pembelian)';
+  if(rows.length) return 'Minta barang dari gudang & mulai';
+  return 'Mulai dikerjakan';
+}
+function usulanToggle(){
+  const perlu = document.querySelector('input[name="uMat"]:checked')?.value;
+  const box = $('matBox'); if(box) box.style.display = perlu==='ya' ? 'block' : 'none';
+  if(perlu==='ya' && $('matList') && !$('matList').children.length) matTambah();
+  matRingkas();
+}
+
+// ── Log tiket yang terbaca manusia ──────────────────────────────────
+function logTiketBaris(nama, teks, waktu, warna){
+  return `<div class="tl-item"><div class="tl-dot ${warna||''}"></div><div><span class="tl-nama">${esc(nama)}</span> <span class="muted">${teks}</span><div class="small muted">${fdt(waktu)}</div></div></div>`;
+}
+function logTiketTeks(note){
+  let n = note||'';
+  let m;
+  if((m = n.match(/^Status → (.+)$/))) return ['mengubah status jadi '+esc(m[1]), ''];
+  if(/^Ditolak:/.test(n)) return [esc(n.replace(/^Ditolak:\s*/,'menolak: ')), 'tl-merah'];
+  if(/^Ditunda:/.test(n)) return [esc(n.replace(/^Ditunda:\s*/,'menunda: ')), 'tl-kuning'];
+  if(/^SPV pilih Jalur/.test(n)) return ['memilih jalur '+esc(n.replace(/^SPV pilih Jalur\s*/,'')), ''];
+  if(/^Manager putuskan/.test(n)) return [esc(n.replace(/^Manager putuskan:\s*/,'memutuskan: ')), ''];
+  if(/^Disetujui/.test(n)) return ['menyetujui pembelian, diteruskan ke Accounting', 'tl-hijau'];
+  if(/^Barang tersedia/.test(n)) return ['menandai barang sudah tersedia', 'tl-hijau'];
+  if(/^Dicek & diotorisasi SPV/.test(n)) return ['memeriksa &amp; mengotorisasi hasil perbaikan', 'tl-hijau'];
+  return [esc(n), 'tl-biru'];
+}
+
 async function openTicket(id){
   const [tk] = await q(db.from('tickets').select('*, ticket_items(*), ticket_updates(*), assets(name)').eq('id',id));
   const t = tk;
   const canEdit = isMgr() || (me.role==='spv' && (me.department===t.department || me.department===t.handling_division));
-  const hasCost = t.ticket_items.length > 0;
-  const estTotal = t.ticket_items.reduce((s,i)=>s + i.qty*i.est_price, 0);
-  const actTotal = t.ticket_items.reduce((s,i)=>s + (i.actual_price!=null ? i.qty*i.actual_price : 0), 0);
-  const hasActual = t.ticket_items.some(i=>i.actual_price!=null);
+  const canRoute = isMgr() || (me.role==='spv' && me.department===t.department);
+  const items = t.ticket_items||[];
+  const hasCost = items.length > 0;
+  const adaBeli = items.some(i=>i.sumber!=='gudang');          // tiket lama tanpa sumber = beli
+  const estTotal = items.reduce((s,i)=>s + i.qty*i.est_price, 0);
+  const actTotal = items.reduce((s,i)=>s + (i.actual_price!=null ? i.qty*i.actual_price : 0), 0);
+  const hasActual = items.some(i=>i.actual_price!=null);
+  const deptLbl = d => (DIVS[d]?.label||d||'-');
+  const picNama = t.pic_user_id ? uname(t.pic_user_id) : (t.pic_followup||'');
 
   let h = `<div class="mhead"><h3>#${t.id} · ${esc(t.title)}</h3><button onclick="closeModal()">✕</button></div>
-  <div class="row">${deptTag(t.department)} ${divTag(t.handling_division)} ${statBadge(t.status)} ${urgBadge(t.urgency)} ${ageHtml(t.created_at)}</div>
-  ${ticketBallHolder(t)?`<p class="small" style="color:#1D4ED8;font-weight:600;margin-top:6px">🔵 ${ticketBallHolder(t)}</p>`:''}
+  <div class="row">${deptTag(t.department)} ${t.handling_division?divTag(t.handling_division):''} ${statBadge(t.status)} ${urgBadge(t.urgency)} ${ageHtml(t.created_at)}</div>
   <p class="small" style="margin-top:8px">${esc(t.description||'')}</p>
   <p class="small muted">Aset: ${t.assets?esc(t.assets.name):'-'} · Pelapor: ${uname(t.reported_by)} · ${fdt(t.created_at)}</p>`;
-  if(t.handling_division){
-    const divSince = t.handling_division_since || t.created_at;
-    const da = ageDays(divSince);
-    const daCls = da>7?'age-red':(da>3?'age-amber':'muted');
-    h += `<p class="small ${daCls}">Sudah ${da} hari berada di divisi ${DIVS[t.handling_division].label}</p>`;
-  }
-  if(t.status==='ditunda') h += `<p class="small age-amber">Ditunda: ${esc(t.hold_reason||'')}</p>`;
-  if(t.status==='ditolak') h += `<p class="small" style="color:var(--red)">Ditolak: ${esc(t.hold_reason||'')}</p>`;
 
-  // Alur tahapan (indikator visual, hanya untuk tiket berbiaya)
-  if(hasCost){
-    const steps = [['dilaporkan','Dilaporkan'],['disetujui','Disetujui'],['barang_tersedia','Barang Tersedia'],['dijadwalkan','Dijadwalkan'],['diperbaiki','Diperbaiki'],['selesai','Selesai']];
-    const curIdx = steps.findIndex(s=>s[0]===t.status);
-    h += `<div class="small muted" style="margin-top:8px;line-height:1.8">${steps.map((s,i)=>
-      `<span style="${i<=curIdx&&!['ditolak','ditunda'].includes(t.status)?'color:var(--teal-d);font-weight:700':''}">${s[1]}</span>`
-    ).join(' → ')}</div>`;
-  }
+  if(t.status!=='usulan') h += tahapHtml(t);
 
-  // PIC & rencana — disembunyikan total untuk Jalur C sampai Manager putuskan
-  if(t.status==='usulan'){
-    // belum ada apa-apa, ditampilkan di bagian Aksi
-  } else if(t.status==='menunggu_keputusan'){
-    h += `<p class="small muted" style="margin-top:8px">PIC &amp; rencana perbaikan akan ditentukan Manager/Owner sekaligus dengan divisi pelaksana.</p>`;
-  } else {
-    // Jalur C: begitu sudah diputuskan Manager, PIC/rencana jadi baca-saja untuk
-    // semua orang (SPV tidak bisa ubah) — kecuali Manager/Owner yang selalu boleh.
-    const editablePic = t.status!=='selesai' && (isMgr() || (canEdit && t.route!=='c'));
-    if(editablePic){
-      h += `<label>PIC Internal (karyawan, otomatis jadi Tugas di Dashboard-nya)</label>
-      <select id="tPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${(isMgr() ? profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active) : profilesCache.filter(p=>p.role==='staff'&&p.active&&p.department===me.department)).map(p=>`<option value="${p.id}" ${t.pic_user_id===p.id?'selected':''}>${esc(p.name)}${isMgr()&&p.department?' - '+(DIVS[p.department]?DIVS[p.department].label:p.department):''}</option>`).join('')}</select>
-      <label>Atau PIC Eksternal (vendor/teknisi luar, teks bebas)</label>
-      <input id="tPic" value="${esc(t.pic_user_id?'':(t.pic_followup||''))}" placeholder="nama teknisi / vendor luar">
-      <label>Notasi Rencana Perbaikan</label><textarea id="tPlan" rows="2">${esc(t.repair_plan||'')}</textarea>
-      <label>Target Tanggal Pasti</label><input type="date" id="tTarget" value="${t.target_date||''}">
-      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="saveTicketPlan(${t.id})">Simpan Rencana</button>`;
-    } else {
-      h += `<p class="small"><b>PIC:</b> ${t.pic_user_id?esc(uname(t.pic_user_id)):esc(t.pic_followup||'-')} · <b>Target:</b> ${fdate(t.target_date)}<br><b>Rencana:</b> ${esc(t.repair_plan||'-')}</p>`;
-    }
-  }
-
-  // Rincian kebutuhan biaya
-  h += `<h3 style="margin-top:16px">Rincian Kebutuhan Biaya</h3>`;
-  const itemEditableStatuses = ['usulan','dilaporkan','ditindaklanjuti','menunggu_keputusan'];
-  if(t.ticket_items.length){
-    h += `<table class="respTable"><tr><th>Barang/Jasa</th><th>Qty</th><th>Perkiraan</th><th>Realisasi</th><th></th></tr>`;
-    t.ticket_items.forEach(i=>{
-      h += `<tr><td data-label="Barang/Jasa">${esc(i.item_name)}</td><td data-label="Qty">${i.qty}</td><td data-label="Perkiraan">${rp(i.est_price)}</td>
-        <td data-label="Realisasi">${isAccSpv() && t.status!=='selesai'
-          ? `<input type="number" value="${i.actual_price??''}" placeholder="Rp" style="width:100px;padding:4px" onchange="setActual(${i.id},this.value,${t.id})">`
-          : (i.actual_price!=null?rp(i.actual_price):'-')}</td>
-        <td>${canEdit && itemEditableStatuses.includes(t.status)
-          ? `<button class="btn-sm btn-ghost" onclick="delItem(${i.id},${t.id})">✕ Hapus</button>`:''}</td></tr>`;
-    });
-    h += `<tr><td data-label="Total"><b>Total</b></td><td></td><td data-label="Perkiraan"><b>${rp(estTotal)}</b></td><td data-label="Realisasi"><b>${hasActual?rp(actTotal):'-'}</b></td><td></td></tr></table>`;
-  } else h += `<p class="muted small">Belum ada rincian. Tanpa rincian, tiket ini dianggap perbaikan tanpa biaya.</p>`;
-  if(canEdit && itemEditableStatuses.includes(t.status)){
-    h += `<div class="row" style="margin-top:8px">
-      <input id="niName" placeholder="barang/jasa" style="flex:2">
-      <input id="niQty" type="number" value="1" style="width:60px">
-      <input id="niPrice" type="number" placeholder="perkiraan harga" style="flex:1">
-      <button class="btn btn-ghost btn-sm" onclick="addItem(${t.id})">Tambah</button></div>`;
-  }
-
-  // Aksi status
-  h += `<h3 style="margin-top:16px">Aksi</h3><div class="row">`;
-  const setS = (s,label,cls) => `<button class="btn ${cls} btn-sm" onclick="setStatus(${t.id},'${s}')">${label}</button>`;
+  // ── Kotak "Giliran Anda": SATU kalimat posisi + SATU aksi utama ──
+  let kJudul='', kTeks='', kAksi='', kWarna='k-biru';
+  const tombol = (fn,label,cls='btn-teal') => `<button class="btn ${cls} btn-sm" onclick="${fn}">${label}</button>`;
+  const setS = (s,label,cls='btn-teal') => tombol(`setStatus(${t.id},'${s}')`, label, cls);
+  const tunggu = (teks) => { kJudul='Menunggu'; kTeks=teks; kWarna='k-kuning'; };
 
   if(t.status==='usulan'){
-    if(isMgr() || (me.role==='spv' && me.department===t.department)){
-      h += `<label>Urgensi</label><select id="tUrg">
-        <option value="rendah" ${t.urgency==='rendah'?'selected':''}>Rendah</option>
-        <option value="sedang" ${t.urgency==='sedang'?'selected':''}>Sedang</option>
-        <option value="tinggi" ${t.urgency==='tinggi'?'selected':''}>Tinggi</option></select>
-      <label style="margin-top:10px">Pilih Jalur Penanganan</label>
-      <div class="row" style="margin-top:4px;flex-wrap:wrap">
-        <button class="btn btn-teal btn-sm" onclick="routeTicket(${t.id},'a')">A · Kerjakan Sendiri (Tanpa Biaya)</button>
-        <button class="btn btn-navy btn-sm" onclick="routeTicket(${t.id},'b')">B · Kerjakan Sendiri (Perlu Biaya)</button>
-        <button class="btn btn-gold btn-sm" onclick="routeTicket(${t.id},'c')">C · Tidak Bisa Sendiri (ke Manager)</button>
-      </div>
-      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="rejectUsulan(${t.id})">Tolak Usulan</button>`;
-    } else {
-      h += `<p class="small muted">Usulan dari staff, menunggu diotorisasi SPV departemen pelapor.</p>`;
-    }
+    if(canRoute){
+      kJudul='Giliran Anda'; kWarna='k-biru';
+      kTeks='Jawab dua pertanyaan di bawah, lalu kirim. Sistem yang menentukan langkah berikutnya.';
+    } else tunggu(`SPV ${deptLbl(t.department)} belum meninjau usulan ini.`);
   } else if(t.status==='menunggu_keputusan'){
-    if(isMgr()){
-      h += `<label>PIC Internal (karyawan, otomatis jadi Tugas di Dashboard-nya)</label>
-      <select id="tcPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active).map(p=>`<option value="${p.id}">${esc(p.name)}${p.department?' — '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
-      <label>Atau PIC Eksternal (vendor/teknisi luar, teks bebas)</label>
-      <input id="tcPic" placeholder="nama teknisi / vendor luar">
-      <label>Notasi Rencana Perbaikan</label><textarea id="tcPlan" rows="2"></textarea>
-      <label>Target Tanggal Pasti</label><input type="date" id="tcTarget">
-      <button class="btn btn-teal btn-sm" style="margin-top:8px" onclick="decideRouteC(${t.id})">✓ Putuskan</button>
-      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="rejectTicket(${t.id})">Tolak</button>`;
+    if(isMgr()){ kJudul='Giliran Anda'; kTeks='Tentukan siapa yang mengerjakan dan targetnya. Tiket akan pindah ke divisi PIC yang dipilih.'; }
+    else tunggu('Manager belum menentukan siapa yang mengerjakan.');
+  } else if(t.status==='dilaporkan' || t.status==='ditindaklanjuti'){
+    if(hasCost && adaBeli && t.status==='dilaporkan'){
+      if(isMgr()){ kJudul='Giliran Anda'; kTeks=`Ada barang yang harus dibeli (perkiraan ${rp(estTotal)}). Setujui atau tolak.`;
+        kAksi = tombol(`approveTicket(${t.id})`,'Setujui pembelian') + tombol(`rejectTicket(${t.id})`,'Tolak','btn-ghost'); }
+      else tunggu(`Manager belum menyetujui pembelian (perkiraan ${rp(estTotal)}).`);
+    } else if(t.status==='dilaporkan'){
+      if(canEdit){ kJudul='Giliran Anda'; kTeks = picNama ? `Tugas ada di ${esc(picNama)}. Tandai kalau perbaikan sudah mulai dikerjakan.` : 'Tentukan siapa yang mengerjakan di bagian Rencana, lalu tandai mulai.';
+        kAksi = setS('ditindaklanjuti','Mulai dikerjakan'); }
+      else tunggu(`${deptLbl(t.handling_division||t.department)} belum mulai mengerjakan.`);
     } else {
-      h += `<p class="small muted">Menunggu keputusan Manager/Owner (divisi pelaksana, PIC, dan rencana perbaikan).</p>`;
-    }
-  } else if(t.status==='dilaporkan'){
-    if(hasCost){
-      if(isMgr()){
-        h += `<button class="btn btn-teal btn-sm" onclick="approveTicket(${t.id})">✓ Setujui Perbaikan</button>`;
-        h += `<button class="btn btn-ghost btn-sm" onclick="rejectTicket(${t.id})">Tolak</button>`;
-      } else h += `<p class="small muted">Menunggu persetujuan Manager/Owner (ada rincian biaya).</p>`;
-    } else if(canEdit){
-      h += setS('ditindaklanjuti','Tandai Ditindaklanjuti','btn-teal');
-    }
-  } else if(t.status==='ditindaklanjuti'){
-    if(hasCost){
-      if(isMgr()){
-        h += `<button class="btn btn-teal btn-sm" onclick="approveTicket(${t.id})">✓ Setujui Perbaikan</button>`;
-        h += `<button class="btn btn-ghost btn-sm" onclick="rejectTicket(${t.id})">Tolak</button>`;
-      } else h += `<p class="small muted">Rincian biaya ditambahkan, menunggu persetujuan Manager/Owner.</p>`;
-    } else if(canEdit){
-      h += setS('menunggu_verifikasi','Klaim Selesai (minta verifikasi)','btn-navy');
+      const bisa = t.pic_user_id ? (t.pic_user_id===me.id || canEdit) : canEdit;
+      if(bisa){ kJudul='Giliran Anda'; kTeks='Perbaikan sedang berjalan. Tekan kalau sudah selesai.'; kAksi = setS('menunggu_verifikasi','Selesai diperbaiki','btn-navy'); }
+      else tunggu(`${picNama?esc(picNama):deptLbl(t.handling_division||t.department)} sedang mengerjakan.`);
     }
   } else if(t.status==='disetujui'){
-    if(isAccSpv()){
-      h += `<button class="btn btn-teal btn-sm" onclick="markBarangTersedia(${t.id},'${t.department}')">Tandai Barang Sudah Tersedia</button>`;
-    } else {
-      h += `<p class="small muted">Posisi tiket ada di Accounting untuk proses pengadaan. Accounting akan menandai jika barang sudah tersedia.</p>`;
-    }
-  } else if(t.status==='barang_tersedia'){
-    // PIC yang ditugaskan (kalau ada) yang menandai selesai dari sisi
-    // eksekusi -- kalau tidak ada PIC (dikerjakan sendiri oleh SPV), SPV
-    // pelapor yang menandai langsung.
+    if(isAccSpv()){ kJudul='Giliran Anda'; kTeks='Siapkan barangnya lewat menu Pengadaan, lalu tandai di sini.'; kAksi = tombol(`markBarangTersedia(${t.id},'${t.department}')`,'Barang sudah siap'); }
+    else tunggu('Accounting sedang menyiapkan barang.');
+  } else if(t.status==='barang_tersedia' || t.status==='dijadwalkan'){
     const canMarkDone = t.pic_user_id ? t.pic_user_id===me.id : (isMgr() || (me.role==='spv' && me.department===t.department));
-    if(canMarkDone){
-      h += setS('diperbaiki','✓ Sudah Diperbaiki','btn-teal');
-    } else {
-      h += `<p class="small muted">Barang sudah tersedia. Menunggu ${t.pic_user_id?uname(t.pic_user_id):'SPV departemen pelapor'} menyelesaikan perbaikan.</p>`;
-    }
-  } else if(t.status==='dijadwalkan'){
-    // Sama seperti di atas -- PIC yang menandai selesai dari sisi eksekusi.
-    const canMarkDone = t.pic_user_id ? t.pic_user_id===me.id : (isMgr() || (me.role==='spv' && me.department===t.department));
-    if(canMarkDone){
-      h += setS('diperbaiki','✓ Sudah Diperbaiki','btn-teal');
-    } else {
-      h += `<p class="small muted">Menunggu ${t.pic_user_id?uname(t.pic_user_id):'SPV departemen pelapor'} menandai perbaikan selesai.</p>`;
-    }
+    if(canMarkDone){ kJudul='Giliran Anda'; kTeks = t.status==='barang_tersedia' ? 'Barang sudah siap. Tekan kalau perbaikan sudah selesai.' : 'Tekan kalau perbaikan sudah selesai.'; kAksi = setS('diperbaiki','Selesai diperbaiki'); }
+    else tunggu(`${picNama?esc(picNama):'SPV '+deptLbl(t.department)} belum menyelesaikan perbaikan.`);
   } else if(t.status==='diperbaiki'){
-    // PIC sudah selesai dari sisi eksekusi -- SEKARANG giliran SPV departemen
-    // PELAPOR mengecek & mengotorisasi, baru masuk antrian Manager.
     const canVerifySpv = isMgr() || (me.role==='spv' && me.department===t.department);
-    if(canVerifySpv){
-      h += `<button class="btn btn-navy btn-sm" onclick="spvVerifyRepair(${t.id})">✓ Cek &amp; Otorisasi</button>`;
-    } else {
-      h += `<p class="small muted">Perbaikan ditandai selesai oleh ${t.pic_user_id?uname(t.pic_user_id):'-'}. Menunggu SPV departemen pelapor mengecek &amp; mengotorisasi.</p>`;
-    }
+    if(canVerifySpv){ kJudul='Giliran Anda'; kTeks=`${picNama?esc(picNama):'Pelaksana'} melaporkan selesai. Periksa hasilnya.`;
+      kAksi = tombol(`spvVerifyRepair(${t.id})`,'Sudah benar','btn-navy') + setS('ditindaklanjuti','Belum, kembalikan','btn-ghost'); }
+    else tunggu(`SPV ${deptLbl(t.department)} belum memeriksa hasil perbaikan.`);
   } else if(t.status==='menunggu_verifikasi'){
-    if(isMgr()) h += setS('selesai','✓ Verifikasi &amp; Selesaikan','btn-teal');
-    else h += `<p class="small muted">Sudah dicek &amp; diotorisasi SPV. Menunggu penutupan oleh Manager/Owner.</p>`;
-  } else if(['butuh_biaya','dibiayai'].includes(t.status) && isMgr()){
-    // Kompatibilitas data lama sebelum alur baru
-    h += `<button class="btn btn-ghost btn-sm" onclick="setStatus(${t.id}, '${t.status==='butuh_biaya'?'disetujui':'barang_tersedia'}')">Pindahkan ke Alur Baru</button>`;
-  } else if(t.status==='ditolak' && isMgr()){
-    h += setS('dilaporkan','Aktifkan Kembali','btn-teal');
+    if(isMgr()){ kJudul='Giliran Anda'; kTeks='Sudah diperiksa SPV. Tutup tiket ini.'; kAksi = setS('selesai','Tutup tiket'); }
+    else tunggu('Manager belum menutup tiket.');
+  } else if(t.status==='selesai'){
+    kJudul='Selesai'; kWarna='k-hijau'; kTeks=`Ditutup ${t.closed_at?fdt(t.closed_at):''}${t.closed_by?' oleh '+esc(uname(t.closed_by)):''}.`;
+  } else if(t.status==='ditolak'){
+    kJudul='Ditolak'; kWarna='k-merah'; kTeks=esc(t.hold_reason||'');
+    if(isMgr()) kAksi = setS('dilaporkan','Aktifkan kembali','btn-ghost');
+  } else if(t.status==='ditunda'){
+    kJudul='Ditunda'; kWarna='k-kuning'; kTeks=esc(t.hold_reason||'');
+    if(isMgr()) kAksi = setS('ditindaklanjuti','Aktifkan lagi','btn-ghost');
+  } else if(['butuh_biaya','dibiayai'].includes(t.status)){
+    kJudul='Data lama'; kWarna='k-kuning'; kTeks='Tiket ini dari alur lama.';
+    if(isMgr()) kAksi = setS(t.status==='butuh_biaya'?'disetujui':'barang_tersedia','Pindahkan ke alur baru','btn-ghost');
+  }
+  h += `<div class="kotak ${kWarna}"><div class="kotak-judul">${kJudul}</div><div class="kotak-teks">${kTeks}</div>${kAksi?`<div class="row" style="margin-top:10px">${kAksi}</div>`:''}</div>`;
+
+  // ── Form usulan: dua pertanyaan ───────────────────────────────────
+  if(t.status==='usulan' && canRoute){
+    const staf = profilesCache.filter(p=>p.role==='staff'&&p.active&&p.department===t.department);
+    h += `<label>Urgensi</label><div class="pil-row">
+      ${['rendah','sedang','tinggi'].map(u=>`<label class="pil"><input type="radio" name="uUrg" value="${u}" ${(t.urgency||'sedang')===u?'checked':''}> ${u[0].toUpperCase()+u.slice(1)}</label>`).join('')}</div>
+    <label style="margin-top:12px"><b>1. Siapa yang mengerjakan?</b></label><div class="pil-row">
+      <label class="pil"><input type="radio" name="uSiapa" value="sendiri" checked onchange="usulanToggle()"> Dikerjakan sendiri</label>
+      <label class="pil"><input type="radio" name="uSiapa" value="management" onchange="usulanToggle()"> Serahkan ke management</label></div>
+    <div id="uPicBox"><select id="uPic"><option value="">- pilih staff ${esc(deptLbl(t.department))} (boleh nanti) -</option>${staf.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <p class="small muted" style="margin:2px 0 0">Otomatis jadi tugas di dashboard staff itu.</p></div>
+    <label style="margin-top:12px"><b>2. Perlu material?</b></label><div class="pil-row">
+      <label class="pil"><input type="radio" name="uMat" value="tidak" checked onchange="usulanToggle()"> Tidak</label>
+      <label class="pil"><input type="radio" name="uMat" value="ya" onchange="usulanToggle()"> Ya, isi rinciannya</label></div>
+    <div id="matBox" style="display:none">
+      <div class="mat-head small muted"><span>Barang / jasa</span><span>Qty</span><span>Perkiraan</span><span></span></div>
+      <div id="matList"></div>
+      <button class="btn btn-ghost btn-sm" type="button" onclick="matTambah()">+ Tambah baris</button>
+      <div id="matRingkas" class="small muted" style="margin-top:6px"></div>
+      <div id="matPeringatan" class="kotak k-kuning small" style="display:none;margin-top:8px">Ada barang yang harus dibeli, jadi tiket ini butuh persetujuan Manager sebelum berjalan.</div>
+    </div>
+    <div class="row" style="margin-top:14px;justify-content:flex-end">
+      <button class="btn btn-ghost btn-sm" onclick="rejectUsulan(${t.id})">Tolak usulan</button>
+      <button class="btn btn-teal btn-sm" id="btnKirimUsulan" onclick="kirimUsulan(${t.id})">Mulai dikerjakan</button></div>`;
   }
 
-  if(t.status!=='selesai' && isMgr()){
-    if(t.status!=='ditunda') h += `<button class="btn btn-ghost btn-sm" onclick="holdTicket(${t.id})">Tunda</button>`;
-    else h += setS('ditindaklanjuti','Aktifkan Lagi','btn-teal');
+  // ── Keputusan Manager (jalur c) ───────────────────────────────────
+  if(t.status==='menunggu_keputusan' && isMgr()){
+    h += `<label>PIC (karyawan)</label>
+      <select id="tcPicUser"><option value="">- pilih kalau PIC karyawan internal -</option>${profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active).map(p=>`<option value="${p.id}">${esc(p.name)}${p.department?' — '+deptLbl(p.department):''}</option>`).join('')}</select>
+      <label>Atau vendor / teknisi luar</label><input id="tcPic" placeholder="nama teknisi / vendor luar">
+      <label>Catatan rencana</label><textarea id="tcPlan" rows="2"></textarea>
+      <label>Target selesai</label><input type="date" id="tcTarget">
+      <div class="row" style="margin-top:8px"><button class="btn btn-teal btn-sm" onclick="decideRouteC(${t.id})">Putuskan</button>
+      <button class="btn btn-ghost btn-sm" onclick="rejectTicket(${t.id})">Tolak</button></div>`;
   }
-  if(isMgr()) h += `<button class="btn btn-red btn-sm" onclick="deleteTicket(${t.id})">Hapus Tiket</button>`;
-  h += `</div>`;
 
-  // Update / timeline
-  h += `<h3 style="margin-top:16px">Riwayat Update</h3><div class="timeline">`;
-  t.ticket_updates.sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(u=>{
-    h += `<div class="tl"><span class="small muted">${fdt(u.created_at)} · ${uname(u.created_by)}</span><br>${esc(u.note)}</div>`;
+  // ── Rencana perbaikan (terlipat, opsional) ───────────────────────
+  if(!['usulan','menunggu_keputusan','selesai','ditolak'].includes(t.status)){
+    const editablePic = isMgr() || (canEdit && t.route!=='c');
+    const ringkas = `${picNama?esc(picNama):'<span class="muted">PIC belum ditentukan</span>'}${t.target_date?' · target '+fdate(t.target_date):''}`;
+    h += `<details class="lipat" ${!picNama?'open':''}><summary><b>Rencana perbaikan</b> <span class="small muted">— ${ringkas}</span></summary>`;
+    if(editablePic){
+      const pilihan = isMgr() ? profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active) : profilesCache.filter(p=>p.role==='staff'&&p.active&&p.department===me.department);
+      h += `<label>Siapa yang mengerjakan</label>
+        <select id="tPicUser"><option value="">- karyawan -</option>${pilihan.map(p=>`<option value="${p.id}" ${t.pic_user_id===p.id?'selected':''}>${esc(p.name)}${isMgr()&&p.department?' — '+deptLbl(p.department):''}</option>`).join('')}</select>
+        <label>Atau vendor / teknisi luar</label><input id="tPic" value="${esc(t.pic_user_id?'':(t.pic_followup||''))}" placeholder="nama teknisi / vendor luar">
+        <div class="row"><div style="flex:1"><label>Target selesai</label><input type="date" id="tTarget" value="${t.target_date||''}"></div>
+        <div style="flex:2"><label>Catatan</label><input id="tPlan" value="${esc(t.repair_plan||'')}" placeholder="cth: beli oring di toko X dulu"></div></div>
+        <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="saveTicketPlan(${t.id})">Simpan rencana</button>`;
+    } else {
+      h += `<p class="small"><b>PIC:</b> ${picNama?esc(picNama):'-'} · <b>Target:</b> ${fdate(t.target_date)}<br><b>Catatan:</b> ${esc(t.repair_plan||'-')}</p>`;
+    }
+    h += `</details>`;
+  }
+
+  // ── Material (setelah usulan) ─────────────────────────────────────
+  if(t.status!=='usulan'){
+    const itemEditable = canEdit && ['dilaporkan','ditindaklanjuti','menunggu_keputusan'].includes(t.status);
+    const terkunci = hasCost && ['disetujui','barang_tersedia'].includes(t.status);
+    h += `<div class="lipat-box"><div class="row" style="justify-content:space-between"><b>Material</b>${terkunci?'<span class="small muted">🔒 terkunci, sedang diproses</span>':''}</div>`;
+    if(items.length){
+      h += `<table class="respTable"><tr><th>Barang/Jasa</th><th>Qty</th><th>Sumber</th><th>Perkiraan</th><th>Realisasi</th><th></th></tr>`;
+      items.forEach(i=>{
+        h += `<tr><td data-label="Barang/Jasa">${esc(i.item_name)}</td><td data-label="Qty">${i.qty}</td>
+          <td data-label="Sumber">${i.sumber==='gudang'?'<span class="tag-gudang">Dari gudang</span>':'<span class="tag-beli">Beli</span>'}</td>
+          <td data-label="Perkiraan">${i.sumber==='gudang'?'—':rp(i.est_price)}</td>
+          <td data-label="Realisasi">${isAccSpv() && t.status!=='selesai' && i.sumber!=='gudang'
+            ? `<input type="number" value="${i.actual_price??''}" placeholder="Rp" style="width:100px;padding:4px" onchange="setActual(${i.id},this.value,${t.id})">`
+            : (i.actual_price!=null?rp(i.actual_price):'-')}</td>
+          <td>${itemEditable ? `<button class="btn-sm btn-ghost" onclick="delItem(${i.id},${t.id})">✕</button>`:''}</td></tr>`;
+      });
+      h += `<tr><td data-label="Total"><b>Total beli</b></td><td></td><td></td><td data-label="Perkiraan"><b>${rp(estTotal)}</b></td><td data-label="Realisasi"><b>${hasActual?rp(actTotal):'-'}</b></td><td></td></tr></table>`;
+    } else h += `<p class="muted small">Tanpa material — perbaikan tanpa biaya.</p>`;
+    if(itemEditable){
+      h += `<div class="mat-head small muted"><span>Barang / jasa</span><span>Qty</span><span>Perkiraan</span><span></span></div><div id="matList">${matRowHtml()}</div>
+        <div class="row" style="margin-top:6px"><button class="btn btn-ghost btn-sm" type="button" onclick="matTambah()">+ Tambah baris</button>
+        <button class="btn btn-ghost btn-sm" onclick="addItemsDariForm(${t.id})">Simpan material</button></div><div id="matRingkas" class="small muted"></div>`;
+    }
+    h += `</div>`;
+  }
+
+  // ── Lainnya (Manager) ─────────────────────────────────────────────
+  if(isMgr() && t.status!=='selesai'){
+    h += `<div class="row small" style="margin-top:12px;gap:6px">`;
+    if(t.status!=='ditunda' && t.status!=='ditolak') h += `<button class="btn-sm btn-ghost" onclick="holdTicket(${t.id})">Tunda</button>`;
+    h += `<button class="btn-sm btn-ghost" style="color:var(--red)" onclick="deleteTicket(${t.id})">Hapus tiket</button></div>`;
+  }
+
+  // ── Riwayat ───────────────────────────────────────────────────────
+  h += `<h3 style="margin-top:16px">Riwayat</h3><div class="tl-wrap">`;
+  h += logTiketBaris(uname(t.reported_by), 'membuat tiket', t.created_at, '');
+  (t.ticket_updates||[]).sort((a,b)=>new Date(a.created_at)-new Date(b.created_at)).forEach(u=>{
+    const [teks, warna] = logTiketTeks(u.note);
+    h += logTiketBaris(uname(u.created_by), teks, u.created_at, warna);
   });
-  h += `</div><textarea id="tNote" rows="3" placeholder="tulis update progres..." style="width:100%;resize:vertical"></textarea>
-    <button class="btn btn-ghost" style="width:100%;margin-top:8px" onclick="addUpdate(${t.id})">Kirim</button>`;
+  h += `</div><div class="row" style="margin-top:10px"><input id="tNote" placeholder="tulis catatan atau progres" style="flex:1">
+    <button class="btn btn-ghost btn-sm" onclick="addUpdate(${t.id})">Kirim</button></div>`;
   openModal(h);
+}
+
+// ── Kirim usulan: dua jawaban menentukan jalurnya ───────────────────
+async function kirimUsulan(id){
+  const siapa = document.querySelector('input[name="uSiapa"]:checked')?.value || 'sendiri';
+  const perlu = document.querySelector('input[name="uMat"]:checked')?.value || 'tidak';
+  const urg   = document.querySelector('input[name="uUrg"]:checked')?.value || 'sedang';
+  const pic   = $('uPic')?.value || '';
+  const rows  = perlu==='ya' ? matBaca() : [];
+  if(perlu==='ya' && !rows.length){ toast('Isi minimal satu baris material, atau pilih "Tidak"'); return; }
+  if(rows.some(r=>!r.sumber)){ toast('Ada baris yang belum ditentukan sumbernya — pilih dari daftar atau "pakai sebagai barang beli"'); return; }
+
+  // simpan material
+  if(rows.length){
+    await q(db.from('ticket_items').insert(rows.map(r=>({ticket_id:id, item_name:r.item_name, qty:r.qty,
+      est_price:r.sumber==='gudang'?0:r.est_price, aa_item_id:r.aa_item_id, sumber:r.sumber}))).select());
+  }
+  const adaBeli = rows.some(r=>r.sumber==='beli');
+  let upd = {urgency:urg}, note='';
+  if(siapa==='management'){
+    upd.status='menunggu_keputusan'; upd.route='c';
+    note = 'menyerahkan ke management' + (rows.length?` (${rows.length} material)`:'');
+  } else if(!rows.length){
+    upd.status='dilaporkan'; upd.route='a';
+    note = pic ? 'menugaskan ke '+uname(pic) : 'akan dikerjakan sendiri';
+  } else if(adaBeli){
+    upd.status='dilaporkan'; upd.route='b';
+    note = `mengirim ke Manager — ${rows.filter(r=>r.sumber==='beli').length} barang beli, ${rows.filter(r=>r.sumber==='gudang').length} dari gudang`;
+  } else {
+    // semua dari gudang → tidak perlu Manager, langsung minta ke Accounting
+    upd.status='disetujui'; upd.route='b'; upd.handling_division='ACC'; upd.handling_division_since=new Date().toISOString();
+    note = `minta ${rows.length} barang dari gudang ke Accounting`;
+  }
+  if(pic && siapa==='sendiri'){ upd.pic_user_id = pic; const pp = profilesCache.find(p=>p.id===pic); if(pp?.department && upd.status!=='disetujui'){ upd.handling_division=pp.department; upd.handling_division_since=new Date().toISOString(); } }
+  await q(db.from('tickets').update(upd).eq('id',id));
+  await q(db.from('ticket_updates').insert({ticket_id:id, note, created_by:me.id}).select());
+  if(pic && siapa==='sendiri') await assignPicTask(id, pic, null);
+  if(upd.status==='disetujui') await createPengadaanFromTicket(id);
+  toast('Tersimpan'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
+}
+async function addItemsDariForm(tid){
+  const rows = matBaca();
+  if(!rows.length){ toast('Isi nama barang dulu'); return; }
+  if(rows.some(r=>!r.sumber)){ toast('Ada baris yang belum ditentukan sumbernya'); return; }
+  await q(db.from('ticket_items').insert(rows.map(r=>({ticket_id:tid, item_name:r.item_name, qty:r.qty,
+    est_price:r.sumber==='gudang'?0:r.est_price, aa_item_id:r.aa_item_id, sumber:r.sumber}))).select());
+  await q(db.from('ticket_updates').insert({ticket_id:tid, note:`menambah ${rows.length} material`, created_by:me.id}).select());
+  openTicket(tid);
 }
 async function approveTicket(id){
   await q(db.from('tickets').update({status:'disetujui', handling_division:'ACC',
     handling_division_since:new Date().toISOString()}).eq('id',id));
   await q(db.from('ticket_updates').insert({ticket_id:id, note:'Disetujui, posisi dipindahkan ke Accounting untuk pengadaan', created_by:me.id}).select());
+  // (teks log ini dibaca ulang oleh logTiketTeks → "menyetujui pembelian, diteruskan ke Accounting")
   await createPengadaanFromTicket(id);
   toast('Tiket disetujui, permintaan pengadaan otomatis dibuat'); openTicket(id); if(page==='tiket') loadTickets(); if(page==='dashboard') renderDashboard();
 }
@@ -12907,12 +13110,12 @@ async function createPengadaanFromTicket(ticketId){
   if(existing.length) return; // sudah pernah dibuat, jangan duplikat
   const [t] = await q(db.from('tickets').select('*, ticket_items(*)').eq('id',ticketId));
   if(!t.ticket_items.length) return; // tidak ada rincian biaya, tidak perlu pengadaan
-  // Pos budget AA Soft untuk kebutuhan perbaikan: "Peralatan dan Perlengkapan"
-  // (bisa diubah Manager/Accounting di detail permintaan bila tidak sesuai)
+  // Pos budget AA Soft untuk perbaikan: "Perawatan dan Perbaikan" (keputusan
+  // Owner 11 Sep 2026). Cadangan: pos yang mengandung "peralatan", lalu pos pertama.
   let posId=null, posName=null;
   try{
     const pos = await loadPosBudgetAA(t.department);
-    const p = pos.find(x=>/peralatan/i.test(x.name)) || pos[0];
+    const p = pos.find(x=>/perawatan|perbaikan|maintenance/i.test(x.name)) || pos.find(x=>/peralatan/i.test(x.name)) || pos[0];
     if(p){ posId=p.id; posName=p.name; }
   }catch(e){}
   const r = await q(db.from('procurement_requests').insert({
@@ -12922,11 +13125,19 @@ async function createPengadaanFromTicket(ticketId){
     aa_budget_position_id: posId, aa_budget_position_name: posName
   }).select());
   const reqId = r[0].id;
-  const items = t.ticket_items.map(it=>({
-    request_id: reqId, ticket_item_id: it.id, item_name: it.item_name,
-    category: 'baru', qty: it.qty, keterangan: 'Kebutuhan perbaikan tiket #'+t.id,
-    est_price: it.est_price, status: 'diproses' // sudah disetujui via approval tiket, langsung ke Accounting
-  }));
+  // Barang yang dipilih dari katalog gudang → 'umum' + aa_item_id (Accounting
+  // ambil dari stok, otomatis GKL- ke departemen). Selain itu → 'baru' (beli,
+  // masuk daftar pembelian AA Soft). Dulu semuanya dikirim sebagai 'baru'.
+  const items = t.ticket_items.map(it=>{
+    const gudang = it.sumber==='gudang' && it.aa_item_id;
+    return {
+      request_id: reqId, ticket_item_id: it.id, item_name: it.item_name,
+      category: gudang ? 'umum' : 'baru', aa_item_id: gudang ? it.aa_item_id : null,
+      qty: it.qty, keterangan: 'Kebutuhan perbaikan tiket #'+t.id,
+      est_price: gudang ? null : it.est_price,
+      status: 'diproses' // sudah disetujui via tiket, langsung ke Accounting
+    };
+  });
   await q(db.from('procurement_items').insert(items).select());
   await q(db.from('procurement_updates').insert({request_id:reqId, note:'Dibuat otomatis dari Tiket Kerusakan #'+t.id, created_by:me.id}).select());
 }
