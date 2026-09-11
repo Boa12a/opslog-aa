@@ -10260,6 +10260,12 @@ table.calGrid .calSelect{width:100%;padding:2px 0;font-size:11px;font-weight:700
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .filters select{width:auto;padding:7px 10px;font-size:13px}
 
+/* ── Lembur: tabel ── */
+.lb-table{width:100%;border-collapse:collapse;font-size:13px}.lb-table th{text-align:left;font-size:11px;color:#6B7280;font-weight:600;padding:6px 8px;border-bottom:1px solid #E5E7EB;white-space:nowrap}
+.lb-table td{padding:8px;border-bottom:1px solid #F3F4F6;vertical-align:top}.lb-tr{cursor:pointer}.lb-tr:hover td{background:#F9FAFB}
+.lb-tgl{white-space:nowrap}.lb-jam{white-space:nowrap;font-variant-numeric:tabular-nums}.lb-num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.lb-void td{opacity:.5}.lb-kurang{color:#B91C1C;font-weight:700}
+.table-wrap{overflow-x:auto}
 /* ── Tiket kerusakan: penunjuk tahap, kotak giliran, material, riwayat ── */
 .tahap-wrap{display:flex;align-items:center;margin:14px 0 4px;font-size:11px}
 .tahap{flex:1;text-align:center}.tahap-line{flex:1;height:2px;background:#E5E7EB;margin-bottom:18px}.tahap-line.tahap-done{background:#0F766E}
@@ -14406,17 +14412,46 @@ async function loadLembur(){
   const nGanda = Object.values(hitung).filter(n=>n>1).length;
   $('lemburList').innerHTML =
     (nGanda ? `<div class="kotak k-kuning small" style="margin-bottom:8px">⚠ ${nGanda} orang punya lebih dari satu catatan lembur aktif di tanggal yang sama — periksa yang bertanda ganda.</div>` : '') +
-    `<p class="small muted">${list.length} catatan</p>` +
-    (list.length ? list.map(lemburRow).join('') : '<p class="muted">Tidak ada catatan.</p>');
+    `<div class="row small muted" style="justify-content:space-between"><span>${list.length} catatan</span><span id="lbTotal"></span></div>` +
+    (list.length
+      ? `<div class="table-wrap"><table class="lb-table"><thead><tr><th>Tanggal</th><th>Nama</th><th>Rencana</th><th class="lb-num">Jam rencana</th><th class="lb-num">Jam aktual</th><th>Pekerjaan</th><th>Status</th></tr></thead><tbody>${list.map(lemburRow).join('')}</tbody></table></div>`
+      : '<p class="muted">Tidak ada catatan.</p>');
+  isiJamAktual(list);
 }
+const jamFmt = h => (h==null ? '—' : (Math.round(h*100)/100).toLocaleString('id-ID') + ' jam');
 function lemburRow(r){
   const st = LSTAT[r.status];
   const byOther = r.created_by && r.created_by!==r.staff_id;
-  return `<div class="item" style="border-left-color:${DEPTS[r.department]?.color||'#999'}" onclick="openLembur(${r.id})">
-    <div class="row" style="justify-content:space-between">
-      <div>${deptTag(r.department)} <b>${uname(r.staff_id)}</b>${byOther?` <span class="small muted">(dicatat ${uname(r.created_by)})</span>`:''}</div>
-      <span>${r._ganda?'<span class="badge" style="background:#FEE2E2;color:#B91C1C;margin-right:4px">GANDA</span>':''}<span class="badge" style="background:${r.voided_at?'#FEE2E2':st.c};color:${r.voided_at?'#B91C1C':st.t}">${r.voided_at?'Dibatalkan (Void)':st.l}</span></span></div>
-    <div class="small muted">${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'} · ${esc(r.reason)}</div></div>`;
+  const rencana = (r.planned_start && r.planned_end) ? normalDurationHours(r.planned_start.slice(0,5), r.planned_end.slice(0,5)) : null;
+  const lintas = r.planned_start && r.planned_end && hmToMinutes(r.planned_end.slice(0,5)) <= hmToMinutes(r.planned_start.slice(0,5));
+  return `<tr class="lb-tr ${r.voided_at?'lb-void':''}" onclick="openLembur(${r.id})">
+    <td class="lb-tgl">${fdate(r.requested_date)}</td>
+    <td><b>${esc(uname(r.staff_id))}</b> ${deptTag(r.department)}${byOther?`<div class="small muted">dicatat ${esc(uname(r.created_by))}</div>`:''}</td>
+    <td class="lb-jam">${(r.planned_start||'?').slice(0,5)}–${(r.planned_end||'?').slice(0,5)}${lintas?' <span class="small muted">(+1 hari)</span>':''}</td>
+    <td class="lb-num">${jamFmt(rencana)}</td>
+    <td class="lb-num" id="lbAkt-${r.id}">${(r.status==='disetujui' && !r.voided_at) ? '<span class="muted">…</span>' : '—'}</td>
+    <td class="small">${esc(r.reason||'')}</td>
+    <td>${r._ganda?'<span class="badge" style="background:#FEE2E2;color:#B91C1C;margin-right:4px">GANDA</span>':''}<span class="badge" style="background:${r.voided_at?'#FEE2E2':st.c};color:${r.voided_at?'#B91C1C':st.t}">${r.voided_at?'Dibatalkan':st.l}</span></td>
+  </tr>`;
+}
+// Jam aktual dihitung belakangan, satu per satu, supaya daftar tampil dulu.
+// Dibatasi 80 baris teratas — kalau lebih, sempitkan filter (bulan / orang).
+async function isiJamAktual(list){
+  const target = list.filter(r=>r.status==='disetujui' && !r.voided_at).slice(0,80);
+  let totalAkt = 0, totalRen = 0, n = 0;
+  for(const r of target){
+    const el = $('lbAkt-'+r.id); if(!el) return; // daftar sudah berganti
+    try{
+      const jam = await computeLemburForRequest(r);
+      el.textContent = jamFmt(jam);
+      const ren = (r.planned_start && r.planned_end) ? normalDurationHours(r.planned_start.slice(0,5), r.planned_end.slice(0,5)) : 0;
+      if(jam < ren*0.5 && ren>0) el.classList.add('lb-kurang');
+      totalAkt += jam; totalRen += ren; n++;
+    }catch(e){ el.textContent = '?'; }
+  }
+  const tot = $('lbTotal');
+  if(tot && n) tot.innerHTML = `<b>${n}</b> lembur disetujui · rencana <b>${jamFmt(totalRen)}</b> · aktual <b>${jamFmt(totalAkt)}</b>` +
+    (target.length < list.filter(r=>r.status==='disetujui' && !r.voided_at).length ? ' <span class="muted">(80 teratas — sempitkan filter untuk total lengkap)</span>' : '');
 }
 async function newLemburModal(){
   let staffList;
