@@ -14355,13 +14355,17 @@ async function renderLembur(){
   const canViewAll = isMgr() || isHrSpv();
   let h = `<h2>Lembur</h2>
     <div class="row" style="margin-bottom:12px;justify-content:space-between;flex-wrap:wrap">
-      <div class="filters">
+      <div class="filters" style="flex-wrap:wrap;gap:6px">
         <select id="lbFilter" onchange="loadLembur()">
           ${me.role==='spv'?'<option value="dept">Departemen Saya</option>':''}
           ${isMgr()?'<option value="approve">Perlu Persetujuan Saya</option>':''}
           ${canViewAll?'<option value="all">Semua</option>':''}
           <option value="mine">Punya Saya</option>
         </select>
+        <input type="month" id="lbBulan" onchange="loadLembur()" title="Bulan">
+        <select id="lbStaf" onchange="loadLembur()"><option value="">Semua orang</option></select>
+        <input id="lbCari" placeholder="cari nama / alasan" oninput="loadLembur()" style="min-width:160px">
+        <label class="small" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="lbVoid" onchange="loadLembur()"> tampilkan yang dibatalkan</label>
       </div>
       <div class="row">
         ${canViewAll?`<button class="btn btn-ghost" onclick="exportLemburExcel()">⬇ Excel</button>`:''}
@@ -14370,17 +14374,40 @@ async function renderLembur(){
     </div><div id="lemburList"></div>`;
   $('main').innerHTML = h;
   $('lbFilter').value = canViewAll ? 'all' : (me.role==='spv' ? 'dept' : (isMgr()?'approve':'mine'));
+  // Pilihan orang: Manager semua staf; SPV staf departemennya + dirinya.
+  const orang = (isMgr()||isHrSpv()) ? profilesCache.filter(p=>['spv','staff'].includes(p.role)&&p.active)
+              : profilesCache.filter(p=>p.active && (p.id===me.id || (p.role==='staff' && p.department===me.department)));
+  $('lbStaf').innerHTML = '<option value="">Semua orang</option>' + orang.sort((a,b)=>a.name.localeCompare(b.name)).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
   loadLembur();
 }
 const LSTAT = {diajukan:{l:'Menunggu Persetujuan',c:'#FEF3C7',t:'#92400E'}, disetujui:{l:'Disetujui',c:'#DCFCE7',t:'#166534'}, ditolak:{l:'Ditolak',c:'#FEE2E2',t:'#B91C1C'}};
 async function loadLembur(){
   const f = $('lbFilter').value;
-  let query = db.from('overtime_requests').select('*').order('requested_date',{ascending:false}).limit(200);
+  const bulan = $('lbBulan')?.value || '';
+  const staf  = $('lbStaf')?.value || '';
+  const cari  = ($('lbCari')?.value || '').trim();
+  const tampilVoid = $('lbVoid')?.checked;
+  let query = db.from('overtime_requests').select('*').order('requested_date',{ascending:false}).order('created_at',{ascending:false});
   if(f==='mine') query = query.eq('staff_id', me.id);
   else if(f==='dept') query = query.eq('department', me.department);
   else if(f==='approve') query = query.eq('status','diajukan');
-  const list = await q(query);
-  $('lemburList').innerHTML = list.length ? list.map(lemburRow).join('') : '<p class="muted">Tidak ada catatan.</p>';
+  if(staf) query = query.eq('staff_id', staf);
+  if(bulan){ const [y,m] = bulan.split('-').map(Number); const akhir = new Date(y, m, 0).getDate();
+    query = query.gte('requested_date', `${bulan}-01`).lte('requested_date', `${bulan}-${String(akhir).padStart(2,'0')}`); }
+  if(!tampilVoid) query = query.is('voided_at', null);
+  query = query.limit(bulan||staf||cari ? 1000 : 200);
+  let list = await q(query);
+  if(cari) list = list.filter(r => cocokKata(uname(r.staff_id), cari) || cocokKata(r.reason, cari));
+  // Tandai kalau ada orang yang punya >1 lembur aktif di tanggal yang sama —
+  // supaya SPV langsung melihat catatan ganda tanpa harus menghitung sendiri.
+  const kunci = r => r.staff_id+'|'+r.requested_date;
+  const hitung = {}; list.forEach(r=>{ if(!r.voided_at && r.status!=='ditolak') hitung[kunci(r)] = (hitung[kunci(r)]||0)+1; });
+  list.forEach(r=>{ r._ganda = !r.voided_at && r.status!=='ditolak' && hitung[kunci(r)] > 1; });
+  const nGanda = Object.values(hitung).filter(n=>n>1).length;
+  $('lemburList').innerHTML =
+    (nGanda ? `<div class="kotak k-kuning small" style="margin-bottom:8px">⚠ ${nGanda} orang punya lebih dari satu catatan lembur aktif di tanggal yang sama — periksa yang bertanda ganda.</div>` : '') +
+    `<p class="small muted">${list.length} catatan</p>` +
+    (list.length ? list.map(lemburRow).join('') : '<p class="muted">Tidak ada catatan.</p>');
 }
 function lemburRow(r){
   const st = LSTAT[r.status];
@@ -14388,7 +14415,7 @@ function lemburRow(r){
   return `<div class="item" style="border-left-color:${DEPTS[r.department]?.color||'#999'}" onclick="openLembur(${r.id})">
     <div class="row" style="justify-content:space-between">
       <div>${deptTag(r.department)} <b>${uname(r.staff_id)}</b>${byOther?` <span class="small muted">(dicatat ${uname(r.created_by)})</span>`:''}</div>
-      <span class="badge" style="background:${r.voided_at?'#FEE2E2':st.c};color:${r.voided_at?'#B91C1C':st.t}">${r.voided_at?'Dibatalkan (Void)':st.l}</span></div>
+      <span>${r._ganda?'<span class="badge" style="background:#FEE2E2;color:#B91C1C;margin-right:4px">GANDA</span>':''}<span class="badge" style="background:${r.voided_at?'#FEE2E2':st.c};color:${r.voided_at?'#B91C1C':st.t}">${r.voided_at?'Dibatalkan (Void)':st.l}</span></span></div>
     <div class="small muted">${fdate(r.requested_date)} · ${r.planned_start||'?'}–${r.planned_end||'?'} · ${esc(r.reason)}</div></div>`;
 }
 async function newLemburModal(){
@@ -14478,8 +14505,8 @@ async function openLembur(id){
   if(r.voided_at){
     h += `<div style="margin-top:12px;padding:10px;background:#FEF2F2;border-radius:8px">
       <p class="small" style="color:#B91C1C"><b>Di-void oleh:</b> ${uname(r.voided_by)} · ${fdt(r.voided_at)}<br><b>Alasan:</b> ${esc(r.void_reason)}</p></div>`;
-  } else if(me.role==='owner'){
-    h += `<button class="btn btn-ghost btn-sm" style="margin-top:12px;color:var(--red)" onclick="voidLembur(${r.id})">Void Lembur Ini</button>`;
+  } else if(isMgr() || (me.role==='spv' && r.department===me.department && r.staff_id!==me.id)){
+    h += `<button class="btn btn-ghost btn-sm" style="margin-top:12px;color:var(--red)" onclick="voidLembur(${r.id})">Batalkan lembur ini</button>`;
   }
   openModal(h);
 }
@@ -14495,7 +14522,11 @@ async function decideLembur(id, approve){
 // level database lewat trigger (lihat migration_overtime_void_and_rls.sql) --
 // jadi walau ada celah lain, kolom void ini tetap terkunci untuk Owner saja.
 async function voidLembur(id){
-  if(me.role!=='owner'){ toast('Cuma Owner yang bisa void lembur'); return; }
+  // Owner & Manager: semua. SPV: hanya staf departemennya sendiri (bukan
+  // dirinya). Aturan yang sama ditegakkan trigger di database.
+  const [r] = await q(db.from('overtime_requests').select('staff_id,department').eq('id',id));
+  const bolehSpv = me.role==='spv' && r.department===me.department && r.staff_id!==me.id;
+  if(!isMgr() && !bolehSpv){ toast('Anda tidak berhak membatalkan lembur ini'); return; }
   const reason = prompt('Alasan void (WAJIB diisi):');
   if(!reason || !reason.trim()){ toast('Void dibatalkan — alasan wajib diisi'); return; }
   await q(db.from('overtime_requests').update({voided_by:me.id, voided_at:new Date().toISOString(), void_reason:reason.trim()}).eq('id',id));
