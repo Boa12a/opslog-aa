@@ -14336,24 +14336,45 @@ async function jamNormalForDate(staff, dateStr){
 // - Total dibatasi maksimal sesuai planned_start/planned_end pengajuan.
 async function computeLemburForRequest(req){
   if(req.voided_at) return 0;
-  const staff = (await q(db.from('profiles').select('*').eq('id',req.staff_id)))[0];
-  if(!staff) return 0;
   const dateStr = req.requested_date;
   const from = addDays(dateStr,-1), to = addDays(dateStr,1)+'T23:59:59';
   const logs = await q(db.from('attendance_logs').select('*').eq('staff_id',req.staff_id).eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
-  const sessions = pairSessions(logs, l=>'k').filter(s=>s.start && localDateOf(s.start)===dateStr).sort((a,b)=>new Date(a.start)-new Date(b.start));
+  const sessions = pairSessions(logs, l=>'k').filter(s=>s.start && s.end);
   if(!sessions.length) return 0;
+
+  // ── Cara hitung: IRISAN sesi absen dengan JENDELA RENCANA lembur ──
+  // Jam rencana yang diisi saat mengajukan menjadi batas: hanya waktu yang
+  // benar-benar berada di dalam rentang rencana yang dihitung sebagai lembur.
+  // Ini benar untuk semua kasus: lembur lanjutan setelah shift, lembur malam
+  // terpisah, lembur di hari libur, maupun lembur pagi sebelum shift.
+  // (Rumus lama menganggap sesi pertama hari itu = shift normal lalu
+  //  mengurangi 8 jam — sehingga lembur malam 10 jam terbaca 1,83 jam.)
+  if(req.planned_start && req.planned_end){
+    const ps = req.planned_start.slice(0,5), pe = req.planned_end.slice(0,5);
+    const winStart = new Date(dateStr+'T'+ps+':00');
+    let   winEnd   = new Date(dateStr+'T'+pe+':00');
+    if(winEnd <= winStart) winEnd = new Date(winEnd.getTime() + 24*3600000); // lintas tengah malam
+    let total = 0;
+    sessions.forEach(sess=>{
+      const a = Math.max(new Date(sess.start).getTime(), winStart.getTime());
+      const b = Math.min(new Date(sess.end).getTime(),   winEnd.getTime());
+      if(b > a) total += (b - a) / 3600000;
+    });
+    return Math.round(total*100)/100;
+  }
+
+  // ── Cadangan untuk catatan lama tanpa jam rencana: rumus lama ──
+  const staff = (await q(db.from('profiles').select('*').eq('id',req.staff_id)))[0];
+  if(!staff) return 0;
+  const hariIni = sessions.filter(s=>localDateOf(s.start)===dateStr).sort((a,b)=>new Date(a.start)-new Date(b.start));
+  if(!hariIni.length) return 0;
   const normal = await jamNormalForDate(staff, dateStr);
   const normalDur = normal ? normalDurationHours(normal.mulai, normal.selesai) : 0;
   let total = 0;
-  sessions.forEach((s,idx)=>{
-    if(!s.end) return;
+  hariIni.forEach((s,idx)=>{
     const durHours = (new Date(s.end)-new Date(s.start))/3600000;
     total += (idx===0 && normal) ? Math.max(0, durHours-normalDur) : durHours;
   });
-  if(req.planned_start && req.planned_end){
-    total = Math.min(total, normalDurationHours(req.planned_start, req.planned_end));
-  }
   return Math.round(total*100)/100;
 }
 async function renderLembur(){
