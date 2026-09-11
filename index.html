@@ -14338,8 +14338,13 @@ async function computeLemburForRequest(req){
   if(req.voided_at) return 0;
   const dateStr = req.requested_date;
   const from = addDays(dateStr,-1), to = addDays(dateStr,1)+'T23:59:59';
-  const logs = await q(db.from('attendance_logs').select('*').eq('staff_id',req.staff_id).eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to));
-  const sessions = pairSessions(logs, l=>'k').filter(s=>s.start && s.end);
+  // Sesi KEHADIRAN dan sesi TREATMENT sama-sama dihitung. Staf POOL yang
+  // vakum kolam malam hari absen lewat Mulai/Selesai Treatment, bukan
+  // Datang/Pulang — dulu kategori itu tidak dibaca, jadi lemburnya selalu 0.
+  // Dipasangkan per kategori (kunci beda) supaya sesi treatment tidak
+  // tertukar dengan sesi kehadiran, lalu digabung.
+  const logs = await q(db.from('attendance_logs').select('*').eq('staff_id',req.staff_id).in('kategori',['kehadiran','treatment']).gte('scanned_at',from).lte('scanned_at',to));
+  const sessions = pairSessions(logs, l=>l.kategori+':'+(l.pool_type_id||'')).filter(s=>s.start && s.end);
   if(!sessions.length) return 0;
 
   // ── Cara hitung: IRISAN sesi absen dengan JENDELA RENCANA lembur ──
@@ -14354,13 +14359,19 @@ async function computeLemburForRequest(req){
     const winStart = new Date(dateStr+'T'+ps+':00');
     let   winEnd   = new Date(dateStr+'T'+pe+':00');
     if(winEnd <= winStart) winEnd = new Date(winEnd.getTime() + 24*3600000); // lintas tengah malam
-    let total = 0;
-    sessions.forEach(sess=>{
-      const a = Math.max(new Date(sess.start).getTime(), winStart.getTime());
-      const b = Math.min(new Date(sess.end).getTime(),   winEnd.getTime());
-      if(b > a) total += (b - a) / 3600000;
+    // Gabungkan dulu rentang yang tumpang tindih (mis. kehadiran 21:00–02:00
+    // dan treatment 22:00–01:00) supaya jam yang sama tidak dihitung dua kali.
+    const potong = sessions.map(sess=>[
+      Math.max(new Date(sess.start).getTime(), winStart.getTime()),
+      Math.min(new Date(sess.end).getTime(),   winEnd.getTime())
+    ]).filter(([a,b])=>b>a).sort((x,y)=>x[0]-y[0]);
+    let total = 0, cur = null;
+    potong.forEach(([a,b])=>{
+      if(!cur || a > cur[1]){ if(cur) total += cur[1]-cur[0]; cur=[a,b]; }
+      else cur[1] = Math.max(cur[1], b);
     });
-    return Math.round(total*100)/100;
+    if(cur) total += cur[1]-cur[0];
+    return Math.round(total/3600000*100)/100;
   }
 
   // ── Cadangan untuk catatan lama tanpa jam rencana: rumus lama ──
@@ -14393,6 +14404,7 @@ async function renderLembur(){
         <select id="lbStaf" onchange="loadLembur()"><option value="">Semua orang</option></select>
         <input id="lbCari" placeholder="cari nama / alasan" oninput="loadLembur()" style="min-width:160px">
         <label class="small" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="lbVoid" onchange="loadLembur()"> tampilkan yang dibatalkan</label>
+        <label class="small" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="lbTB" onchange="loadLembur()"> hanya tanpa bukti</label>
       </div>
       <div class="row">
         ${canViewAll?`<button class="btn btn-ghost" onclick="exportLemburExcel()">⬇ Excel</button>`:''}
@@ -14422,6 +14434,7 @@ async function loadLembur(){
   if(bulan){ const [y,m] = bulan.split('-').map(Number); const akhir = new Date(y, m, 0).getDate();
     query = query.gte('requested_date', `${bulan}-01`).lte('requested_date', `${bulan}-${String(akhir).padStart(2,'0')}`); }
   if(!tampilVoid) query = query.is('voided_at', null);
+  if($('lbTB')?.checked) query = query.eq('tanpa_bukti', true);
   query = query.limit(bulan||staf||cari ? 1000 : 200);
   let list = await q(query);
   if(cari) list = list.filter(r => cocokKata(uname(r.staff_id), cari) || cocokKata(r.reason, cari));
@@ -14452,7 +14465,7 @@ function lemburRow(r){
     <td class="lb-num">${jamFmt(rencana)}</td>
     <td class="lb-num" id="lbAkt-${r.id}">${(r.status==='disetujui' && !r.voided_at) ? '<span class="muted">…</span>' : '—'}</td>
     <td class="small">${esc(r.reason||'')}</td>
-    <td>${r._ganda?'<span class="badge" style="background:#FEE2E2;color:#B91C1C;margin-right:4px">GANDA</span>':''}<span class="badge" style="background:${r.voided_at?'#FEE2E2':st.c};color:${r.voided_at?'#B91C1C':st.t}">${r.voided_at?'Dibatalkan':st.l}</span></td>
+    <td>${r._ganda?'<span class="badge" style="background:#FEE2E2;color:#B91C1C;margin-right:4px">GANDA</span>':''}${r.tanpa_bukti?'<span class="badge" style="background:#FEF3C7;color:#92400E;margin-right:4px" title="'+esc(r.alasan_tanpa_bukti||'')+'">Tanpa bukti</span>':''}<span class="badge" style="background:${r.voided_at?'#FEE2E2':st.c};color:${r.voided_at?'#B91C1C':st.t}">${r.voided_at?'Dibatalkan':st.l}</span></td>
   </tr>`;
 }
 // Jam aktual dihitung belakangan, satu per satu, supaya daftar tampil dulu.
@@ -14529,6 +14542,15 @@ async function submitJadwalLembur(){
     payload.status = 'disetujui'; payload.approver_id = me.id;
     payload.decided_at = new Date().toISOString();
     payload.decision_note = isMgr() ? 'Dicatat langsung oleh '+me.name+' (Manager/Owner)' : 'Dicatat langsung oleh SPV '+me.name;
+    // Dicatat langsung untuk tanggal yang SUDAH LEWAT → periksa scan dulu.
+    if(tgl < today()){
+      const bukti = await computeLemburForRequest({staff_id:staffId, requested_date:tgl, planned_start:start, planned_end:end, voided_at:null});
+      if(!(bukti > 0)){
+        const alasanTB = (prompt(`Tidak ada scan ${uname(staffId)} di jam ${start}–${end} tanggal ${fdate(tgl)}.\nTetap catat sebagai disetujui? Isi alasan (WAJIB), atau kosongkan untuk batal:`)||'').trim();
+        if(!alasanTB){ toast('Dibatalkan'); $('btnSubmitJadwalLembur').disabled=false; return; }
+        payload.tanpa_bukti = true; payload.alasan_tanpa_bukti = alasanTB;
+      }
+    }
   }
   await q(db.from('overtime_requests').insert(payload).select());
   closeModal();
@@ -14547,9 +14569,26 @@ async function openLembur(id){
     <b>Rencana Jam:</b> ${r.planned_start||'-'} – ${r.planned_end||'-'}<br>
     <b>Alasan:</b> ${esc(r.reason)}</p>`;
   if(r.status==='diajukan' && canDecide){
+    // Opsi 3 (keputusan Owner, 11 Sep 2026): untuk tanggal yang SUDAH LEWAT,
+    // periksa scan di jam rencana sebelum menyetujui. Tanpa scan → tombolnya
+    // berubah jadi "Setujui tanpa bukti" dan minta alasan; tercatat tanpa_bukti.
+    const sudahLewat = r.requested_date < today();
+    let bukti = null;
+    if(sudahLewat) bukti = await computeLemburForRequest({...r, voided_at:null});
+    const rencana = (r.planned_start && r.planned_end) ? normalDurationHours(r.planned_start.slice(0,5), r.planned_end.slice(0,5)) : null;
+    if(sudahLewat){
+      h += bukti > 0
+        ? `<div class="kotak k-hijau small" style="margin-top:12px">Ada scan di jam lembur ini: <b>${jamFmt(bukti)}</b> dari rencana ${jamFmt(rencana)}.</div>`
+        : `<div class="kotak k-kuning small" style="margin-top:12px">Tidak ada scan di jam lembur ini (${(r.planned_start||'?').slice(0,5)}–${(r.planned_end||'?').slice(0,5)}). Kalau tetap disetujui, akan tercatat <b>tanpa bukti</b>.</div>`;
+    }
     h += `<div class="row" style="margin-top:12px">
-      <button class="btn btn-teal btn-sm" onclick="decideLembur(${r.id},true)">✓ Setujui</button>
+      ${(sudahLewat && !(bukti > 0))
+        ? `<button class="btn btn-gold btn-sm" onclick="decideLembur(${r.id},true,true)">Setujui tanpa bukti</button>`
+        : `<button class="btn btn-teal btn-sm" onclick="decideLembur(${r.id},true)">✓ Setujui</button>`}
       <button class="btn btn-ghost btn-sm" onclick="decideLembur(${r.id},false)">Tolak</button></div>`;
+  }
+  if(r.tanpa_bukti){
+    h += `<div class="kotak k-kuning small" style="margin-top:10px"><b>Disetujui tanpa bukti scan.</b> ${esc(r.alasan_tanpa_bukti||'')}</div>`;
   }
   if(r.status!=='diajukan'){
     h += `<p class="small muted" style="margin-top:8px">Diputuskan oleh ${uname(r.approver_id)} · ${fdt(r.decided_at)}${r.decision_note?' — '+esc(r.decision_note):''}</p>`;
@@ -14566,12 +14605,16 @@ async function openLembur(id){
   }
   openModal(h);
 }
-async function decideLembur(id, approve){
-  let note = null;
+async function decideLembur(id, approve, tanpaBukti=false){
+  let note = null, alasanTB = null;
   if(!approve){ note = prompt('Alasan penolakan (opsional):') || null; }
-  await q(db.from('overtime_requests').update({
-    status: approve?'disetujui':'ditolak', approver_id: me.id, decided_at: new Date().toISOString(), decision_note: note
-  }).eq('id',id));
+  if(approve && tanpaBukti){
+    alasanTB = (prompt('Tidak ada scan di jam lembur ini. Alasan tetap disetujui (WAJIB):')||'').trim();
+    if(!alasanTB){ toast('Persetujuan tanpa bukti butuh alasan'); return; }
+  }
+  const upd = { status: approve?'disetujui':'ditolak', approver_id: me.id, decided_at: new Date().toISOString(), decision_note: note };
+  if(approve){ upd.tanpa_bukti = !!tanpaBukti; upd.alasan_tanpa_bukti = alasanTB; }
+  await q(db.from('overtime_requests').update(upd).eq('id',id));
   toast(approve?'Lembur disetujui':'Lembur ditolak'); openLembur(id); if(page==='lembur') loadLembur(); if(page==='dashboard') renderDashboard();
 }
 // Void: khusus Owner, bisa di status manapun, wajib alasan. Ditegakkan juga di
