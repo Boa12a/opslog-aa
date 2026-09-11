@@ -11584,29 +11584,50 @@ async function cekSwapKonflik(swapId){
   try{ _offMonth = await q(db.rpc('libur_bulan', {p_month: month})); }catch(e){ _offMonth = []; }
   const entries = gabungLibur(sched[0].work_schedule_entries||[]);
   const pesan = [];
-  // Requester akan libur di original_date
-  cekKonflikLibur(r.requester_id, r.original_date, entries).forEach(k=>
-    pesan.push(`${uname(r.requester_id)} libur ${fdate(r.original_date)} bersamaan dengan ${k.staff.map(uname).join(', ')} (kelompok "${k.group.name}")`));
-  // Partner (bila ada) akan libur di new_date
-  if(r.partner_id && r.new_date) cekKonflikLibur(r.partner_id, r.new_date, entries).forEach(k=>
-    pesan.push(`${uname(r.partner_id)} libur ${fdate(r.new_date)} bersamaan dengan ${k.staff.map(uname).join(', ')} (kelompok "${k.group.name}")`));
+  // original_date = libur saat ini, new_date = libur pengganti.
+  // Setelah tukar: pemohon LIBUR di new_date (dulu dicek di original_date — terbalik).
+  cekKonflikLibur(r.requester_id, r.new_date, entries).forEach(k=>
+    pesan.push(`${uname(r.requester_id)} libur ${fdate(r.new_date)} bersamaan dengan ${k.staff.map(uname).join(', ')} (kelompok "${k.group.name}")`));
+  // Partner (bila ada) mengambil libur pemohon → LIBUR di original_date
+  if(r.partner_id && r.original_date) cekKonflikLibur(r.partner_id, r.original_date, entries).forEach(k=>
+    pesan.push(`${uname(r.partner_id)} libur ${fdate(r.original_date)} bersamaan dengan ${k.staff.map(uname).join(', ')} (kelompok "${k.group.name}")`));
   return pesan;
 }
 async function applySwapToSchedule(swapId){
-  // Terapkan hasil tukar libur yang sudah diotorisasi ke jadwal resmi bulan terkait (kalau ada).
+  // Terapkan hasil tukar libur yang sudah diotorisasi ke jadwal resmi.
+  // original_date = "Tanggal Libur Saat Ini", new_date = "Tanggal Pengganti".
+  // Hasil yang benar: pemohon KERJA di original_date, LIBUR di new_date.
+  // (Versi lama menulis kebalikannya, menghapus shift_id, dan menaruh kedua
+  //  tanggal di jadwal bulan tanggal asal meski tanggal pengganti di bulan lain.)
   const [r] = await q(db.from('swap_requests').select('*').eq('id',swapId));
-  const month = r.original_date.slice(0,7);
-  const sched = await q(db.from('work_schedules').select('*').eq('department',r.department).eq('period_month',month));
-  if(!sched.length) return; // belum ada jadwal resmi bulan itu, lewati
-  const scheduleId = sched[0].id;
-  // Requester: tanggal asal jadi Libur, tanggal baru jadi Kerja
-  await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.requester_id, work_date:r.original_date, is_off:true, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
-  await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.requester_id, work_date:r.new_date, is_off:false, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
+  const jadwalUtk = async (tgl) => {
+    const sched = await q(db.from('work_schedules').select('id').eq('department',r.department).eq('period_month',tgl.slice(0,7)));
+    return sched.length ? sched[0].id : null;
+  };
+  // Shift dipertahankan: kalau hari itu jadi kerja, pakai shift yang sudah ada
+  // di entri (kalau ada); kalau tidak ada, pakai shift terakhir orang itu di
+  // bulan yang sama supaya tidak jadi "kerja tanpa shift".
+  const shiftUtk = async (scheduleId, staffId, tgl) => {
+    const ada = await q(db.from('work_schedule_entries').select('shift_id').eq('schedule_id',scheduleId).eq('staff_id',staffId).eq('work_date',tgl));
+    if(ada.length && ada[0].shift_id) return ada[0].shift_id;
+    const lain = await q(db.from('work_schedule_entries').select('shift_id').eq('schedule_id',scheduleId).eq('staff_id',staffId).eq('is_off',false).not('shift_id','is',null).limit(1));
+    return lain.length ? lain[0].shift_id : null;
+  };
+  const tulis = async (staffId, tgl, isOff) => {
+    const sid = await jadwalUtk(tgl);
+    if(!sid) return false; // jadwal bulan itu belum dibuat — lewati tanggal ini
+    const shift = isOff ? null : await shiftUtk(sid, staffId, tgl);
+    await q(db.from('work_schedule_entries').upsert({schedule_id:sid, staff_id:staffId, work_date:tgl, is_off:isOff, shift_id:shift}, {onConflict:'schedule_id,staff_id,work_date'}).select());
+    return true;
+  };
+  const hasil = [];
+  hasil.push(await tulis(r.requester_id, r.original_date, false));  // kerja di hari libur lama
+  hasil.push(await tulis(r.requester_id, r.new_date, true));        // libur di hari pengganti
   if(r.partner_id){
-    // Partner: kebalikannya
-    await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.partner_id, work_date:r.original_date, is_off:false, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
-    await q(db.from('work_schedule_entries').upsert({schedule_id:scheduleId, staff_id:r.partner_id, work_date:r.new_date, is_off:true, shift_id:null}, {onConflict:'schedule_id,staff_id,work_date'}).select());
+    hasil.push(await tulis(r.partner_id, r.original_date, true));   // partner libur di hari itu
+    hasil.push(await tulis(r.partner_id, r.new_date, false));       // partner kerja di hari penggantinya
   }
+  if(hasil.some(x=>x===false)) toast('Sebagian tanggal belum punya jadwal resmi bulan itu — atur manual setelah jadwalnya dibuat');
 }
 
 /* ================= IJIN & SAKIT ================= */
@@ -11697,6 +11718,15 @@ async function toggleCutiNote(){
 async function submitCuti(){
   const start = $('cuStart').value, end = $('cuEnd').value, reason = $('cuReason').value.trim();
   if(!start || !end || !reason){ toast('Semua kolom wajib diisi'); return; }
+  if(new Date(end) < new Date(start)){ toast('Tanggal selesai sebelum tanggal mulai'); return; }
+  if($('cuType').value==='cuti'){
+    const staff = profilesCache.find(p=>p.id===$('cuStaff').value);
+    if(staff?.cuti_enabled){
+      const {remaining} = await cutiRemainingDays(staff.id, Number(start.slice(0,4)));
+      const minta = dayCount(start, end);
+      if(minta > remaining && !confirm(`Sisa jatah cuti ${remaining} hari, pengajuan ini ${minta} hari. Tetap ajukan? (Manager akan diberi tahu)`)) return;
+    }
+  }
   if(!lockBtn($('btnSubmitCuti'))) return;
   await q(db.from('leave_requests').insert({
     staff_id:$('cuStaff').value, department:me.department, leave_type:$('cuType').value,
@@ -11766,6 +11796,22 @@ async function decideCutiHrd(id, approve){
 // Keputusan final KHUSUS Cuti -- terpisah dari HRD, cuma Manager/Owner
 // (ditegakkan juga di database lewat trigger, lihat migration_cuti.sql).
 async function decideCutiManager(id, approve){
+  if(approve){
+    // Kuota dicek saat DISETUJUI, bukan hanya ditampilkan saat diajukan.
+    // Dulu tidak ada pengecekan sama sekali di sini — cuti bisa disetujui
+    // melebihi jatah tanpa peringatan. Manager tetap boleh melampaui, tapi
+    // harus sadar dan mengonfirmasi.
+    const [r] = await q(db.from('leave_requests').select('staff_id,start_date,end_date,leave_type').eq('id',id));
+    const staff = profilesCache.find(p=>p.id===r.staff_id);
+    if(r.leave_type==='cuti' && staff?.cuti_enabled){
+      const yr = Number(r.start_date.slice(0,4));
+      const {total, used, remaining} = await cutiRemainingDays(r.staff_id, yr);
+      const minta = dayCount(r.start_date, r.end_date);
+      if(minta > remaining){
+        if(!confirm(`Jatah cuti ${staff.name} ${yr}: sisa ${remaining} hari (dari ${total}, sudah dipakai ${used}).\nPengajuan ini ${minta} hari — MELEBIHI jatah ${minta-remaining} hari.\n\nTetap setujui?`)) return;
+      }
+    }
+  }
   let note=null; if(!approve) note = prompt('Alasan penolakan (opsional):')||null;
   await q(db.from('leave_requests').update({
     status: approve?'disetujui_manager':'ditolak_manager', manager_decision_by:me.id, manager_decision_at:new Date().toISOString(), manager_decision_note:note
@@ -13652,8 +13698,12 @@ async function ambilTugasSaya(itemId, requestId){
   await q(db.from('procurement_items').update({prepared_by:me.id, prepared_at:new Date().toISOString()}).eq('id',itemId).is('prepared_by',null));
   const [it] = await q(db.from('procurement_items').select('item_name,prepared_by').eq('id',itemId));
   if(it.prepared_by!==me.id){ toast('Sudah diambil orang lain'); openPengadaan(requestId); return; }
-  try{ await db.from('task_items').insert({staff_id:me.id, department:'ACC',
-    task_text:'Siapkan barang: '+(it.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select(); }catch(e){ console.warn('task_items:', e); }
+  // try/catch tidak menangkap error Supabase (ia mengembalikan {error}, tidak
+  // melempar). Kalau tugas gagal dibuat, orangnya tidak akan melihat apa-apa di
+  // dashboard — beri tahu, jangan diamkan.
+  { const {error:tErr} = await db.from('task_items').insert({staff_id:me.id, department:'ACC',
+      task_text:'Siapkan barang: '+(it.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select();
+    if(tErr) toast('Tugas diambil, tapi gagal muncul di dashboard: '+tErr.message); }
   await q(db.from('procurement_updates').insert({request_id:requestId, note:'Diambil sebagai tugas oleh '+me.name+': '+it.item_name, created_by:me.id}).select());
   toast('Tugas diambil'); openPengadaan(requestId); if(page==='pengadaan') loadPengadaan();
 }
@@ -13670,8 +13720,9 @@ async function authorizeAndAssign(itemId, requestId){
   closeModal();
   await q(db.from('procurement_items').update({prepared_by:staffId, prepared_at:new Date().toISOString()}).eq('id',itemId));
   const [it] = await q(db.from('procurement_items').select('item_name').eq('id',itemId));
-  try{ await db.from('task_items').insert({staff_id:staffId, department:'ACC',
-    task_text:'Beli barang: '+(it?.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select(); }catch(e){ console.warn('task_items:', e); }
+  { const {error:tErr} = await db.from('task_items').insert({staff_id:staffId, department:'ACC',
+      task_text:'Beli barang: '+(it?.item_name||'')+' (Permintaan #'+requestId+')', task_date:today(), created_by:me.id, procurement_request_id:requestId}).select();
+    if(tErr) toast('Penanggung jawab tersimpan, tapi tugasnya gagal muncul di dashboard: '+tErr.message); }
   await authorizeItem(itemId, true);   // ini yang mengirim ke daftar pembelian AA Soft
 }
 async function assignPrepare(itemId, requestId){
