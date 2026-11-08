@@ -10681,7 +10681,8 @@ function buildNav(){
   }
   if(isMgr()) grupOperasional.push(['checklist','Checklist & Shift']);
   if(isMgr() || isSpvOps) grupOperasional.push(['rekap','Rekap']);
-  if(isHrdOrMgr()) grupOperasional.push(['rekapind','Rekap Individu']);
+  if(isHrdOrMgr()) grupOperasional.push(['rekapind','Rekap Individu'],['kalabsen','Kalender Absensi']);
+  if(isMgr() || ['POL','HRD'].includes(me.department)) grupOperasional.push(['treatment','Catat Treatment']);
 
   const grupPengadaan = [];
   const isAccStaff = me.role==='staff' && me.department==='ACC';
@@ -10711,7 +10712,7 @@ function buildNav(){
 function openDrawer(){ $('drawer').classList.add('open'); $('drawerOverlay').classList.add('open'); }
 function closeDrawer(){ $('drawer').classList.remove('open'); $('drawerOverlay').classList.remove('open'); }
 function go(p){
-  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,rekapind:renderRekapIndividu,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz,kuishist:renderKuisHistori,dw:renderDW};
+  const routes = {dashboard:renderDashboard,absen:renderAbsen,log:renderLog,tiket:renderTiket,pengadaan:renderPengadaan,aset:renderAset,mtc:renderMtc,lembur:renderLembur,jadwal:renderJadwal,cuti:renderCuti,rekap:renderRekap,rekapind:renderRekapIndividu,kalabsen:renderKalAbsen,treatment:renderTreatment,checklist:renderChecklist,katalog:renderKatalog,hrd:renderHrd,users:renderUsers,tugas:renderTugas,pengumuman:renderPengumuman,quiz:renderQuiz,kuishist:renderKuisHistori,dw:renderDW};
   if(!routes[p]) p='dashboard'; // jaga-jaga: halaman tersimpan sudah tidak ada/tidak valid lagi
   page=p;
   try{ localStorage.setItem('lastPage', p); }catch(e){} // aman kalau localStorage diblokir browser
@@ -10762,7 +10763,7 @@ async function renderKioskScreen(isEmergency){
       <div style="font-size:20px;font-weight:800;margin-bottom:4px">Absensi ${me.department?(ALL_STAFF_DEPTS[me.department]?.label||me.department):''}</div>
       <div class="small" style="opacity:.75;margin-bottom:18px">Buka menu <b>Absen</b> di aplikasi masing-masing, lalu pindai QR ini</div>
       <div id="kioskQrBox" style="background:#fff;padding:18px;border-radius:16px"><p style="color:#333">Memuat QR...</p></div>
-      <div id="kioskLast" class="small" style="opacity:.6;margin-top:20px"></div>
+      <div id="kioskLast" class="small" style="opacity:.85;margin-top:20px"></div>
       <div class="small" style="opacity:.55;margin-top:24px;max-width:320px">Jika aplikasi/HP bermasalah: foto selfie + kirim ke WhatsApp HRD${waNum?` (<b>${esc(waNum)}</b>)`:''} sebagai bukti, HRD akan catatkan manual.</div>
       ${isEmergency?`<button class="btn btn-ghost" style="margin-top:20px" onclick="exitEmergencyKiosk()">Keluar dari Mode Kios</button>`:''}
       <button class="btn btn-ghost btn-sm" style="margin-top:24px;opacity:.5" onclick="doLogout()">Keluar / Ganti Akun</button>
@@ -10813,10 +10814,11 @@ async function kioskNewToken(){
       box.innerHTML='';
       new QRCode(box, {text:token, width:240, height:240, correctLevel:QRCode.CorrectLevel.M});
     }
-    const {data:recent} = await db.from('attendance_logs').select('*').order('scanned_at',{ascending:false}).limit(1);
+    const {data:recent} = await db.from('attendance_logs').select('*').order('scanned_at',{ascending:false}).limit(5);
     if(recent && recent.length && $('kioskLast')){
-      const r = recent[0];
-      $('kioskLast').textContent = `Terakhir tercatat: ${uname(r.staff_id)} · ${fdt(r.scanned_at)}`;
+      const lbl = r => r.kategori==='kehadiran' ? (r.fase==='mulai'?'Datang':'Pulang') : (r.fase==='mulai'?'Mulai Treatment':'Selesai Treatment');
+      $('kioskLast').innerHTML = '<div style="margin-bottom:6px;font-weight:700">5 absen terakhir</div>' +
+        recent.map(r=>`<div style="font-size:14px;margin:2px 0">${esc(uname(r.staff_id))} · <b>${lbl(r)}</b> · ${_jam(r.scanned_at)}</div>`).join('');
     }
   }catch(err){
     console.error('kioskNewToken error:', err);
@@ -10863,15 +10865,21 @@ async function absenGateState(){
   const openKehadiranDate = openKehadiranToday ? localDateOf(lastK[0].scanned_at) : null;
   // Treatment: TIDAK dibatasi hari (bisa ganti hari) -- selama belum ada
   // Selesai Treatment yang menutup sesi mulai terakhir, tetap terbuka.
-  const openTreatment = !!(lastT.length && lastT[0].fase==='mulai');
-  return {openKehadiranToday, openKehadiranShiftId, openKehadiranDate, openTreatment};
+  const openTreatment = false; // treatment tidak lagi memengaruhi absensi (dicatat per sesi di menu Catat Treatment)
+  const openKehadiranSince = openKehadiranToday ? lastK[0].scanned_at : null;
+  const lastKehadiranAt = lastK.length ? lastK[0].scanned_at : null;
+  // Sesi terbuka > 16 jam hampir pasti Absen Pulang-nya terlewat. Saat itu Absen Datang BOLEH lagi --
+  // kalau tidak, Datang berikutnya terpaksa tercatat sebagai 'Pulang' (kasus nyata: jam kerja jadi 21 jam).
+  const staleKehadiran = !!(openKehadiranSince && (Date.now()-new Date(openKehadiranSince).getTime())>16*3600*1000);
+  return {openKehadiranToday, openKehadiranShiftId, openKehadiranDate, openTreatment, openKehadiranSince, lastKehadiranAt, staleKehadiran};
 }
 function absenTypeOptions(gate){
   return Object.entries(ABSEN_TYPES).filter(([k,v])=>{
-    if(v.kategori==='treatment' && me.department==='SEC') return false; // Security tidak menjalankan Treatment
+    if(v.kategori==='treatment') return false; // Treatment kini dicatat lewat menu 'Catat Treatment' (per sesi), bukan absen
     if(v.kategori==='kehadiran'){
       // Treatment masih terbuka -> Absen Datang terkunci total sampai Selesai Treatment dulu.
       if(gate.openTreatment && v.fase==='mulai') return false;
+      if(gate.staleKehadiran) return true;
       return gate.openKehadiranToday ? v.fase==='selesai' : v.fase==='mulai';
     }
     if(v.kategori==='treatment'){
@@ -10888,7 +10896,13 @@ async function renderAbsen(){
   // punya waktu jauh lebih panjang (biasanya beberapa detik sampai user
   // selesai isi form) sebelum benar-benar dibutuhkan saat submit.
   window._pendingGeo = getGeoTag();
-  let h = `<h2>Absen</h2>
+  const sejak = gate.openKehadiranSince;
+  const basi = sejak && (Date.now()-new Date(sejak).getTime())>16*3600*1000;
+  const banner = sejak
+    ? `<div class="card" style="border-left:5px solid ${basi?'var(--red)':'#16a34a'}"><b>${basi?'⚠ Sesi kehadiran masih terbuka':'✅ Anda sudah Absen Datang'}</b><br>
+        <span class="small">Sejak ${fdt(sejak)}. ${basi?'Lebih dari 16 jam — kemungkinan lupa Absen Pulang. Jika Anda baru tiba, pilih <b>Absen Datang</b>; HRD akan mengoreksi sesi lama.':'Saat pulang pilih <b>Absen Pulang</b>.'}</span></div>`
+    : `<div class="card" style="border-left:5px solid var(--amber)"><b>Belum ada sesi kehadiran terbuka</b><br><span class="small">${gate.lastKehadiranAt?'Absen terakhir: '+fdt(gate.lastKehadiranAt)+'. ':''}Pilih <b>Absen Datang</b> saat mulai bekerja.</span></div>`;
+  let h = `<h2>Absen</h2>${banner}
     <div class="card">
     <label>Jenis Pencatatan</label>
     <select id="abType" onchange="loadAbsenExtra()">${absenTypeOptions(gate)}</select>
@@ -11012,15 +11026,43 @@ function stopScanner(){
 }
 function closeScanner(){ stopScanner(); closeModal(); }
 
+
+// Popup konfirmasi/penolakan Absen -- sengaja BUKAN toast: harus ditutup manual
+// supaya karyawan pasti melihat apakah absennya masuk atau tidak.
+function absenGagal(msg){
+  const info = /sudah tercatat/i.test(msg);
+  openModal(`<div style="text-align:center;padding:8px 4px">
+    <div style="font-size:54px">${info?'ℹ️':'❌'}</div>
+    <h3 style="margin:6px 0;color:${info?'inherit':'var(--red)'}">${info?'Sudah Tercatat':'ABSEN BELUM TERCATAT'}</h3>
+    <p style="margin:8px 0 14px">${esc(msg)}</p>
+    ${info?'':'<p class="small muted">Jangan tinggalkan halaman ini sebelum absen berhasil. Coba pindai lagi, atau minta HRD/SPV mencatat manual.</p>'}
+    <button class="btn btn-teal" style="width:100%" onclick="absenTutupPopup()">Mengerti</button></div>`);
+}
+function absenSukses(type, row){
+  const t = row?.scanned_at || new Date().toISOString();
+  openModal(`<div style="text-align:center;padding:8px 4px">
+    <div style="font-size:60px">✅</div>
+    <h3 style="margin:6px 0;color:var(--green,#16a34a)">${esc(type.l.toUpperCase())} TERCATAT</h3>
+    <div style="font-size:30px;font-weight:800;margin:6px 0">${_jam(t)}</div>
+    <div class="small muted">${esc(me.name||'')} · ${fdate(localDateOf(t))}</div>
+    ${row?.out_of_radius?'<p class="small age-red" style="margin-top:8px">📍 Tercatat di luar radius lokasi</p>':''}
+    <button class="btn btn-teal" style="width:100%;margin-top:16px" onclick="absenTutupPopup()">OK</button></div>`);
+}
+function absenTutupPopup(){ closeModal(); if(page==='absen') renderAbsen(); }
+
 async function handleScannedToken(token){
-  const rows = await q(db.from('attendance_qr_tokens').select('*').eq('token',token));
-  const tk = rows[0];
-  const cutoff = new Date(Date.now()-10000).toISOString();
-  if(!tk || tk.created_at < cutoff){
-    toast('Kode sudah kedaluwarsa, coba pindai lagi QR yang sedang tampil');
-    closeModal(); return;
+  try{
+    const rows = await q(db.from('attendance_qr_tokens').select('*').eq('token',token));
+    const tk = rows[0];
+    const cutoff = new Date(Date.now()-10000).toISOString();
+    if(!tk || tk.created_at < cutoff){
+      absenGagal('Kode QR sudah kedaluwarsa. Pindai lagi QR yang sedang tampil di kios.');
+      return;
+    }
+    await submitAttendance(tk.id);
+  }catch(err){
+    absenGagal('Gagal menyimpan ke sistem: '+(err?.message||err)+'. Periksa sinyal internet lalu coba lagi.');
   }
-  await submitAttendance(tk.id);
 }
 async function submitAttendance(tokenId){
   const type = ABSEN_TYPES[$('abType')?.value || 'kehadiran_mulai'];
@@ -11033,19 +11075,22 @@ async function submitAttendance(tokenId){
   // basi (mis. dibuka lama sebelum scan, atau ada input manual di antaranya).
   const gate = await absenGateState();
   if(type.kategori==='kehadiran' && type.fase==='mulai'){
-    if(gate.openTreatment){ toast('Treatment masih berjalan — selesaikan Treatment dulu sebelum Absen Datang'); closeModal(); return; }
-    if(gate.openKehadiranToday){ toast('Sudah Absen Datang hari ini — cuma bisa Absen Pulang'); closeModal(); return; }
+    if(gate.openTreatment){ absenGagal('Treatment masih berjalan — selesaikan Treatment dulu sebelum Absen Datang'); return; }
+    if(gate.openKehadiranToday && !gate.staleKehadiran){ absenGagal('Sudah Absen Datang hari ini — cuma bisa Absen Pulang'); return; }
   }
   // Absen Pulang: dropdown Shift sudah tidak ditampilkan lagi (tidak perlu
   // isi ulang) -- ambil shift_id dari sesi Absen Datang yang sedang dibuka.
+  if(type.kategori==='kehadiran' && type.fase==='selesai' && gate.staleKehadiran){
+    if(!confirm('Absen Datang terakhir Anda '+fdt(gate.openKehadiranSince)+' (lebih dari 16 jam lalu). Apakah ini benar Absen PULANG untuk sesi itu? Kalau Anda baru tiba, batalkan lalu pilih Absen Datang.')){ closeModal(); return; }
+  }
   if(type.kategori==='kehadiran' && type.fase==='selesai'){
     shiftId = gate.openKehadiranShiftId;
   }
   if(type.kategori==='treatment' && me.department==='SEC'){
-    toast('Departemen Security tidak menjalankan Treatment'); closeModal(); return;
+    absenGagal('Departemen Security tidak menjalankan Treatment'); return;
   }
   if(type.kategori==='treatment' && type.fase==='mulai' && gate.openTreatment){
-    toast('Masih ada sesi Treatment yang belum Selesai'); closeModal(); return;
+    absenGagal('Masih ada sesi Treatment yang belum Selesai'); return;
   }
 
   // WAJIB Serah Terima dulu untuk Security -- semua Security (SPV & staff)
@@ -11056,8 +11101,7 @@ async function submitAttendance(tokenId){
     hoQuery = gate.openKehadiranShiftId ? hoQuery.eq('shift_id', gate.openKehadiranShiftId) : hoQuery.is('shift_id', null);
     const hoCheck = await q(hoQuery);
     if(!hoCheck.length){
-      toast('Absen Pulang ditolak — isi Serah Terima Shift dulu di menu Log Harian sebelum pulang.');
-      closeModal(); return;
+      absenGagal('Absen Pulang ditolak — isi Serah Terima Shift dulu di menu Log Harian sebelum pulang.'); return;
     }
   }
 
@@ -11065,7 +11109,7 @@ async function submitAttendance(tokenId){
   const since = new Date(Date.now()-2*60000).toISOString();
   const dup = await q(db.from('attendance_logs').select('id').eq('staff_id',me.id)
     .eq('kategori',type.kategori).eq('fase',type.fase).gte('scanned_at',since));
-  if(dup.length){ toast('Sudah tercatat baru saja, tidak perlu diulang'); closeModal(); return; }
+  if(dup.length){ absenGagal('Sudah tercatat baru saja, tidak perlu diulang'); return; }
 
   // Peringatan lembut kalau "Selesai" tanpa "Mulai" yang cocok
   if(type.fase==='selesai'){
@@ -11084,8 +11128,7 @@ async function submitAttendance(tokenId){
   // tetap boleh, cuma ditandai). Ini cuma untuk GPS yang benar-benar mati/
   // gagal total (geo_lat null). Lapis kedua selain yang sudah dikunci di UI.
   if(geo.geo_lat==null){
-    toast('Absen ditolak — GPS Anda mati/tidak terdeteksi. Nyalakan GPS dulu di Pengaturan HP.');
-    closeModal(); return;
+    absenGagal('Absen ditolak — GPS Anda mati/tidak terdeteksi. Nyalakan GPS dulu di Pengaturan HP.'); return;
   }
   const payload = {
     staff_id: me.id, department: me.department, shift_id: shiftId||null,
@@ -11120,9 +11163,9 @@ async function submitAttendance(tokenId){
     }
   }
 
-  await q(db.from('attendance_logs').insert(payload).select());
-  closeModal(); toast('Absen tercatat: '+type.l);
-  if(page==='absen'){ loadAbsenHist(); }
+  const saved = await q(db.from('attendance_logs').insert(payload).select());
+  if(!saved || !saved.length){ absenGagal('Server tidak mengonfirmasi penyimpanan. Absen mungkin BELUM masuk — coba lagi.'); return; }
+  absenSukses(type, saved[0]);
 }
 
 /* ---------- Input manual (HRD/Manager/Owner) ---------- */
@@ -14347,7 +14390,7 @@ async function computeLemburForRequest(req){
   // Datang/Pulang — dulu kategori itu tidak dibaca, jadi lemburnya selalu 0.
   // Dipasangkan per kategori (kunci beda) supaya sesi treatment tidak
   // tertukar dengan sesi kehadiran, lalu digabung.
-  const logs = await q(db.from('attendance_logs').select('*').eq('staff_id',req.staff_id).in('kategori',['kehadiran','treatment']).gte('scanned_at',from).lte('scanned_at',to));
+  const logs = await q(db.from('attendance_logs').select('*').eq('staff_id',req.staff_id).eq('kategori','kehadiran').gte('scanned_at',from).lte('scanned_at',to)); // treatment dibayar per sesi, tidak dihitung sebagai jam lembur
   const sessions = pairSessions(logs, l=>l.kategori+':'+(l.pool_type_id||'')).filter(s=>s.start && s.end);
   if(!sessions.length) return 0;
 
@@ -15367,6 +15410,123 @@ function monthsBack(n){
   return arr;
 }
 function riColor(pct){ return pct==null?'var(--muted)':(pct>=90?'var(--green)':pct>=70?'var(--amber)':'var(--red)'); }
+
+/* ---------- Kalender Absensi per Karyawan (HRD/Manager/Owner) ---------- */
+let _kaCtx = null;
+async function renderKalAbsen(){
+  const list = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active)
+    .sort((a,b)=>((a.department||'')+a.name).localeCompare((b.department||'')+b.name));
+  const depts = [...new Set(list.map(p=>p.department||''))];
+  const opts = depts.map(d=>`<optgroup label="${esc(d?(DIVS[d]?.label||d):'Tanpa departemen')}">`+
+    list.filter(p=>(p.department||'')===d).map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')+`</optgroup>`).join('');
+  $('main').innerHTML = `<h2>Kalender Absensi</h2>
+    <div class="card"><div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
+      <div style="flex:1;min-width:180px"><label style="margin:0">Karyawan</label><select id="kaStaff" onchange="loadKalAbsen()">${opts}</select></div>
+      <div><label style="margin:0">Bulan</label><input type="month" id="kaMonth" value="${today().slice(0,7)}" onchange="loadKalAbsen()"></div>
+      <button class="btn btn-ghost btn-sm" onclick="kalAbsenGeser(-1)">◀</button>
+      <button class="btn btn-ghost btn-sm" onclick="kalAbsenGeser(1)">▶</button>
+    </div></div><div id="kaArea"></div>`;
+  loadKalAbsen();
+}
+function kalAbsenGeser(d){
+  const el=$('kaMonth'); if(!el.value) return;
+  const dt=new Date(Number(el.value.slice(0,4)), Number(el.value.slice(5,7))-1+d, 1);
+  el.value = dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0'); loadKalAbsen();
+}
+const _jam = iso => new Date(iso).toLocaleTimeString('sv-SE',{hour:'2-digit',minute:'2-digit'});
+async function loadKalAbsen(){
+  const sid=$('kaStaff')?.value, m=$('kaMonth')?.value; if(!sid||!m) return;
+  const y=Number(m.slice(0,4)), mo=Number(m.slice(5,7)), daysIn=new Date(y,mo,0).getDate();
+  // Batas bulan memakai waktu LOKAL (bukan UTC) supaya absen jam 00:00-06:59 WIB tidak lari ke bulan lain.
+  // Ambil 2 hari sebelum & 1 hari sesudah supaya sesi lintas hari/bulan tetap berpasangan.
+  const fromIso=new Date(new Date(y,mo-1,1).getTime()-2*864e5).toISOString();
+  const toIso=new Date(new Date(y,mo,1).getTime()+864e5).toISOString();
+  const [logs, sched, shifts] = await Promise.all([
+    q(db.from('attendance_logs').select('*').eq('staff_id',sid).eq('kategori','kehadiran').gte('scanned_at',fromIso).lt('scanned_at',toIso).order('scanned_at',{ascending:true}).limit(2000)),
+    q(db.from('work_schedule_entries').select('*').eq('staff_id',sid).gte('work_date',m+'-01').lte('work_date',m+'-'+String(daysIn).padStart(2,'0'))),
+    q(db.from('shifts').select('id,shift_name'))
+  ]);
+  const shiftName = Object.fromEntries(shifts.map(x=>[x.id,x.shift_name]));
+  const sessions = pairSessions(logs, l=>'k');
+  const byDay = {};
+  sessions.forEach(s=>{
+    const d = localDateOf(s.start||s.end);
+    if(d.slice(0,7)!==m) return;
+    (byDay[d]=byDay[d]||[]).push(s);
+  });
+  Object.values(byDay).forEach(a=>a.sort((x,y)=>new Date(x.start||x.end)-new Date(y.start||y.end)));
+  const schedBy = Object.fromEntries(sched.map(e=>[e.work_date,e]));
+  const t0 = today(), nowMs = Date.now();
+  const STALE_MS = 16*3600*1000; // sesi terbuka > 16 jam dianggap lupa Absen Pulang
+  let hadir=0, jadwalKerja=0, tanpaAbsen=0, belumPulang=0, luar=0, totalMs=0;
+  const perluKoreksi = [];
+  const first = new Date(y,mo-1,1);
+  const lead = (first.getDay()+6)%7; // Senin = 0
+  let cells = '';
+  for(let i=0;i<lead;i++) cells += '<td class="calEmpty"></td>';
+  for(let d=1; d<=daysIn; d++){
+    const ds = m+'-'+String(d).padStart(2,'0');
+    const ss = byDay[ds]||[], en = schedBy[ds];
+    const isOff = !!(en && en.is_off), isWork = !!(en && !en.is_off);
+    if(isWork) jadwalKerja++;
+    let bg='', body='', flag='';
+    if(ss.length){
+      hadir++;
+      body = ss.map(s=>{
+        const stale = !s.end && s.start && (nowMs-new Date(s.start).getTime())>STALE_MS;
+        const open = !s.end && !stale;
+        if(!s.end && s.start){ if(stale){ belumPulang++; perluKoreksi.push({ds, ket:'Datang '+_jam(s.start)+' tanpa Absen Pulang'}); } }
+        if(!s.start){ perluKoreksi.push({ds, ket:'Absen Pulang '+_jam(s.end)+' tanpa Absen Datang'}); }
+        const lama = (s.start && s.end) ? new Date(s.end)-new Date(s.start) : 0;
+        const janggal = lama > STALE_MS;
+        if(janggal) perluKoreksi.push({ds, ket:'Durasi tidak wajar '+Math.floor(lama/3600000)+' jam '+Math.round((lama%3600000)/60000)+' menit ('+_jam(s.start)+' → '+fdt(s.end)+') — kemungkinan Absen Pulang terlewat'});
+        else totalMs += lama;
+        if(s.out_of_radius) luar++;
+        const a = s.start?_jam(s.start):'?', b = s.end?_jam(s.end):(open?'…':'?');
+        return `<div style="font-size:10px;line-height:1.25;${(stale||!s.start||janggal)?'color:var(--red);font-weight:700':''}">${a}<br>${b}${s.out_of_radius?' 📍':''}</div>`;
+      }).join('');
+      const bad = ss.some(s=>!s.start || (!s.end && (nowMs-new Date(s.start).getTime())>STALE_MS) || (s.start && s.end && (new Date(s.end)-new Date(s.start))>STALE_MS));
+      bg = bad ? 'rgba(220,60,60,.16)' : 'rgba(40,160,90,.16)';
+    } else if(isOff){
+      bg='rgba(128,128,128,.14)'; body='<div style="font-size:10px;color:var(--muted)">Libur</div>';
+    } else if(isWork && ds<=t0){
+      if(ds<t0){ tanpaAbsen++; bg='rgba(230,150,30,.22)'; body='<div style="font-size:10px;color:var(--amber);font-weight:700">Tanpa absen</div>'; perluKoreksi.push({ds, ket:'Terjadwal kerja, tidak ada catatan absen'}); }
+    }
+    const sh = en && en.shift_id ? shiftName[en.shift_id] : '';
+    if(sh) flag = `<div style="font-size:9px;color:var(--muted)">${esc(sh)}</div>`;
+    const today_ = ds===t0 ? 'outline:2px solid var(--teal,#0aa);' : '';
+    cells += `<td class="calCell" style="background:${bg};${today_}cursor:pointer" onclick="kalAbsenDetail('${ds}')"><div class="calDate">${d}</div>${body}${flag}</td>`;
+    if((lead+d)%7===0 && d<daysIn) cells += '</tr><tr>';
+  }
+  const rest = (7-((lead+daysIn)%7))%7; for(let i=0;i<rest;i++) cells += '<td class="calEmpty"></td>';
+  _kaCtx = {byDay, schedBy, shiftName, staffId:sid, nowMs, STALE_MS};
+  const jam = Math.floor(totalMs/3600000), mnt = Math.round((totalMs%3600000)/60000);
+  const stat = (v,l,c)=>`<div style="flex:1;min-width:92px;text-align:center"><div style="font-size:20px;font-weight:800;${c?'color:'+c:''}">${v}</div><div class="small muted">${l}</div></div>`;
+  $('kaArea').innerHTML = `<div class="card"><div class="row" style="gap:6px;flex-wrap:wrap;justify-content:space-between">
+      ${stat(hadir,'Hari hadir')}${stat(jadwalKerja||'-','Hari jadwal kerja')}
+      ${stat(tanpaAbsen,'Terjadwal, tanpa absen',tanpaAbsen?'var(--amber)':'')}${stat(belumPulang,'Lupa Absen Pulang',belumPulang?'var(--red)':'')}
+      ${stat(jam+'j '+mnt+'m','Total jam (sesi lengkap)')}${stat(luar,'Luar radius')}
+    </div></div>
+    <div class="card"><table class="calGrid"><tr><th>Sen</th><th>Sel</th><th>Rab</th><th>Kam</th><th>Jum</th><th>Sab</th><th>Min</th></tr><tr>${cells}</tr></table>
+      <p class="small muted" style="margin-top:8px">Hijau = datang &amp; pulang tercatat · Merah = Absen Pulang/Datang hilang · Oranye = terjadwal kerja tapi tanpa catatan · Abu = libur. Jam ditampilkan waktu lokal; sesi malam dihitung pada tanggal Absen Datang. Ketuk tanggal untuk rincian.</p></div>
+    ${perluKoreksi.length?`<div class="card"><h3>Perlu dicek / dikoreksi (${perluKoreksi.length})</h3><table class="respTable"><tr><th>Tanggal</th><th>Masalah</th></tr>${perluKoreksi.map(x=>`<tr><td data-label="Tanggal">${fdate(x.ds)}</td><td data-label="Masalah">${esc(x.ket)}</td></tr>`).join('')}</table>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="manualAttendModal()">+ Input Absen Manual</button></div>`:''}`;
+}
+function kalAbsenDetail(ds){
+  if(!_kaCtx) return;
+  const ss = _kaCtx.byDay[ds]||[], en=_kaCtx.schedBy[ds];
+  const rows = ss.length ? ss.map(s=>{
+    const dur = (s.start&&s.end) ? Math.round((new Date(s.end)-new Date(s.start))/60000) : null;
+    return `<tr><td>Datang</td><td>${s.start?fdt(s.start):'<span class="age-red">tidak tercatat</span>'}</td></tr>
+      <tr><td>Pulang</td><td>${s.end?fdt(s.end):'<span class="age-red">tidak tercatat</span>'}</td></tr>
+      <tr><td>Durasi</td><td>${dur!=null?Math.floor(dur/60)+' jam '+(dur%60)+' menit':'-'}${s.out_of_radius?' · 📍 luar radius':''}</td></tr>`;
+  }).join('<tr><td colspan="2"><hr></td></tr>') : '<tr><td colspan="2" class="muted">Tidak ada catatan absen.</td></tr>';
+  const jd = en ? (en.is_off?'Libur':'Kerja'+(en.shift_id&&_kaCtx.shiftName[en.shift_id]?' — '+esc(_kaCtx.shiftName[en.shift_id]):'')) : 'Tidak ada jadwal';
+  openModal(`<div class="mhead"><h3>${fdate(ds)}</h3><button onclick="closeModal()">✕</button></div>
+    <p class="small muted">Jadwal: ${jd}</p><table>${rows}</table>
+    <button class="btn btn-teal" style="margin-top:12px;width:100%" onclick="closeModal();manualAttendModal()">Input / Koreksi Absen Manual</button>`);
+}
+
 async function renderRekapIndividu(){
   const staffList = await q(db.from('profiles').select('*').in('role',['spv','staff']).eq('active',true).order('name'));
   window._riStaffList = staffList;
@@ -15622,29 +15782,111 @@ async function loadHrdAttendance(){
   } else h += `<p class="muted small">Belum ada data kehadiran bulan ini.</p>`;
   $('hrAttendanceArea').innerHTML = h + `</div>`;
 }
-async function loadHrdTreatment(){
-  const m = $('hrMonth').value;
-  const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
-  const [logs, pools] = await Promise.all([
-    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to).order('scanned_at',{ascending:false}).limit(5000)),
+
+/* ================= TREATMENT PER SESI ================= */
+// Treatment kolam dibayar PER SESI dan sebagian besar dikerjakan orang luar,
+// jadi dicatat terpisah dari absensi: siapa, kolam apa, berapa sesi.
+const _tgName = x => x.pelaksana_tipe==='karyawan' ? uname(x.staff_id) : (x.nama_luar||'-');
+const _tgKey  = x => x.pelaksana_tipe==='karyawan' ? 'k:'+x.staff_id : 'l:'+(x.nama_luar||'').trim().toLowerCase();
+async function renderTreatment(){
+  const [pools, recentNames] = await Promise.all([
+    q(db.from('pool_types').select('*').eq('active',true).order('sort_order')),
+    q(db.from('treatment_logs').select('nama_luar').eq('pelaksana_tipe','luar').order('created_at',{ascending:false}).limit(300))
+  ]);
+  const names = [...new Set(recentNames.map(r=>(r.nama_luar||'').trim()).filter(Boolean))];
+  const staffList = profilesCache.filter(p=>['spv','staff'].includes(p.role) && p.active);
+  $('main').innerHTML = `<h2>Catat Treatment</h2>
+    <div class="card">
+      <p class="small muted">Dibayar per sesi — tidak masuk absensi dan tidak dihitung sebagai jam lembur.</p>
+      <label>Tanggal</label><input type="date" id="trTgl" value="${today()}">
+      <label>Kolam</label><select id="trPool">${pools.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+      <label>Jumlah Sesi</label><input type="number" id="trSesi" value="1" min="1" max="50" inputmode="numeric">
+      <label>Dikerjakan oleh</label>
+      <select id="trTipe" onchange="trGantiTipe()"><option value="luar">Orang luar</option><option value="karyawan">Karyawan (hanya bila tidak ada orang luar)</option></select>
+      <div id="trLuarBox"><input id="trNama" list="trNamaList" placeholder="Nama pelaksana" autocomplete="off">
+        <datalist id="trNamaList">${names.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></div>
+      <div id="trKarBox" class="hidden"><select id="trStaff">${staffList.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
+      <label>Catatan (opsional)</label><input id="trCatatan" placeholder="mis. vakum kolam malam">
+      <button class="btn btn-teal" id="btnTr" style="margin-top:14px;width:100%" onclick="submitTreatment()">Simpan</button>
+    </div><div id="trList"></div>`;
+  loadTreatmentRecent();
+}
+function trGantiTipe(){
+  const k = $('trTipe').value==='karyawan';
+  $('trLuarBox').classList.toggle('hidden',k); $('trKarBox').classList.toggle('hidden',!k);
+}
+async function submitTreatment(){
+  const tipe = $('trTipe').value, sesi = Number($('trSesi').value), tgl = $('trTgl').value;
+  const nama = ($('trNama').value||'').trim().replace(/\s+/g,' ');
+  if(!tgl){ toast('Tanggal wajib diisi'); return; }
+  if(!(sesi>=1 && sesi<=50) || !Number.isInteger(sesi)){ toast('Jumlah sesi harus bilangan bulat 1–50'); return; }
+  if(tipe==='luar' && !nama){ toast('Nama pelaksana wajib diisi'); return; }
+  if(!lockBtn($('btnTr'))) return;
+  try{
+    const saved = await q(db.from('treatment_logs').insert({
+      tanggal: tgl, pool_type_id: Number($('trPool').value), jumlah_sesi: sesi, pelaksana_tipe: tipe,
+      staff_id: tipe==='karyawan' ? $('trStaff').value : null, nama_luar: tipe==='luar' ? nama : null,
+      catatan: ($('trCatatan').value||'').trim() || null, created_by: me.id
+    }).select());
+    if(!saved || !saved.length) throw new Error('Server tidak mengonfirmasi penyimpanan');
+    toast('✅ Treatment tercatat: '+_tgName(saved[0])+' · '+sesi+' sesi');
+    $('trSesi').value = 1; $('trNama').value=''; $('trCatatan').value='';
+  }catch(err){ /* q() sudah menampilkan pesan error */ }
+  const b=$('btnTr'); if(b){ b.disabled=false; b.style.opacity=''; }
+  loadTreatmentRecent();
+}
+async function loadTreatmentRecent(){
+  const [list, pools] = await Promise.all([
+    q(db.from('treatment_logs').select('*').is('voided_at',null).gte('tanggal',addDays(today(),-14)).order('tanggal',{ascending:false}).order('created_at',{ascending:false}).limit(200)),
     q(db.from('pool_types').select('*'))
   ]);
-  const sessions = pairSessions(logs, l=>'p'+l.pool_type_id);
-  let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Riwayat Treatment</h3>
-    <button class="btn btn-ghost btn-sm" onclick="exportTreatmentExcel()">⬇ Excel</button></div>`;
-  if(sessions.length){
-    h += `<table class="respTable"><tr><th>Tanggal</th><th>Nama</th><th>Kolam</th><th>Mulai</th><th>Selesai</th><th>Durasi</th></tr>`;
-    sessions.slice(0,50).forEach(s=>{
-      const poolName = pools.find(p=>p.id===s.pool_type_id)?.name || '-';
-      const durasi = (s.start && s.end) ? (((new Date(s.end)-new Date(s.start))/3600000).toFixed(1)+' jam') : '-';
-      h += `<tr><td data-label="Tanggal">${fdate(localDateOf(s.start||s.end))}</td><td data-label="Nama">${uname(s.staff_id)}</td>
-        <td data-label="Kolam">${esc(poolName)}</td><td data-label="Mulai">${s.start?fdt(s.start):'-'}</td>
-        <td data-label="Selesai">${s.end?fdt(s.end):'<span class="age-red">⚠ Belum Selesai</span>'}${s.out_of_radius?' <span class="age-red">📍</span>':''}</td>
-        <td data-label="Durasi">${durasi}</td></tr>`;
-    });
-    h += `</table>`;
-    if(sessions.length>50) h += `<p class="small muted">Menampilkan 50 dari ${sessions.length} — export Excel untuk semua.</p>`;
-  } else h += `<p class="muted small">Belum ada data treatment bulan ini.</p>`;
+  const canVoid = isMgr() || (me.role==='spv' && ['POL','HRD'].includes(me.department));
+  let h = `<div class="card"><h3>14 hari terakhir</h3>`;
+  h += list.length ? `<table class="respTable"><tr><th>Tanggal</th><th>Pelaksana</th><th>Kolam</th><th>Sesi</th><th>Dicatat oleh</th><th></th></tr>`+
+    list.map(x=>`<tr><td data-label="Tanggal">${fdate(x.tanggal)}</td><td data-label="Pelaksana">${esc(_tgName(x))}${x.pelaksana_tipe==='karyawan'?' <span class="small muted">(karyawan)</span>':''}</td>
+      <td data-label="Kolam">${esc(pools.find(p=>p.id===x.pool_type_id)?.name||'-')}</td><td data-label="Sesi">${x.jumlah_sesi}</td>
+      <td data-label="Dicatat oleh">${uname(x.created_by)}</td>
+      <td>${canVoid?`<button class="btn btn-ghost btn-sm" onclick="voidTreatment(${x.id})">Batalkan</button>`:''}</td></tr>`).join('')+`</table>`
+    : '<p class="muted small">Belum ada catatan.</p>';
+  $('trList').innerHTML = h + '</div>';
+}
+async function voidTreatment(id){
+  const alasan = (prompt('Alasan membatalkan catatan treatment ini (wajib):')||'').trim();
+  if(!alasan){ toast('Dibatalkan'); return; }
+  await q(db.from('treatment_logs').update({voided_at:new Date().toISOString(), voided_by:me.id, void_reason:alasan}).eq('id',id).select());
+  toast('Catatan treatment dibatalkan');
+  if(page==='treatment') loadTreatmentRecent(); else loadHrdTreatment();
+}
+async function loadHrdTreatment(){
+  const m = $('hrMonth').value;
+  const [list, pools] = await Promise.all([
+    q(db.from('treatment_logs').select('*').is('voided_at',null).gte('tanggal',m+'-01').lte('tanggal',lastDayOfMonth(m)).order('tanggal',{ascending:false}).limit(5000)),
+    q(db.from('pool_types').select('*').order('sort_order'))
+  ]);
+  const poolIds = [...new Set(list.map(x=>x.pool_type_id))];
+  const cols = pools.filter(p=>poolIds.includes(p.id));
+  const rekap = {};
+  list.forEach(x=>{
+    const k=_tgKey(x); const r = rekap[k] = rekap[k] || {nama:_tgName(x), tipe:x.pelaksana_tipe, per:{}, total:0};
+    r.per[x.pool_type_id] = (r.per[x.pool_type_id]||0) + x.jumlah_sesi; r.total += x.jumlah_sesi;
+  });
+  const rows = Object.values(rekap).sort((a,b)=>b.total-a.total);
+  const grand = rows.reduce((s,r)=>s+r.total,0);
+  const canVoid = isMgr() || (me.role==='spv' && ['POL','HRD'].includes(me.department));
+  let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Treatment (per sesi)</h3>
+    <div class="row" style="gap:6px"><button class="btn btn-ghost btn-sm" onclick="go('treatment')">+ Catat</button>
+    <button class="btn btn-ghost btn-sm" onclick="exportTreatmentExcel()">⬇ Excel</button></div></div>`;
+  if(rows.length){
+    h += `<p class="small muted">Rekap bulan ini — dasar pembayaran per sesi. Total <b>${grand}</b> sesi.</p>
+      <table class="respTable"><tr><th>Pelaksana</th><th>Status</th>${cols.map(c=>`<th>${esc(c.name)}</th>`).join('')}<th>Total Sesi</th></tr>`+
+      rows.map(r=>`<tr><td data-label="Pelaksana">${esc(r.nama)}</td><td data-label="Status">${r.tipe==='karyawan'?'Karyawan':'Orang luar'}</td>
+        ${cols.map(c=>`<td data-label="${esc(c.name)}">${r.per[c.id]||0}</td>`).join('')}<td data-label="Total Sesi"><b>${r.total}</b></td></tr>`).join('')+`</table>
+      <details style="margin-top:10px"><summary class="small">Rincian per tanggal (${list.length})</summary>
+      <table class="respTable"><tr><th>Tanggal</th><th>Pelaksana</th><th>Kolam</th><th>Sesi</th><th>Dicatat oleh</th><th></th></tr>`+
+      list.slice(0,200).map(x=>`<tr><td data-label="Tanggal">${fdate(x.tanggal)}</td><td data-label="Pelaksana">${esc(_tgName(x))}</td>
+        <td data-label="Kolam">${esc(pools.find(p=>p.id===x.pool_type_id)?.name||'-')}</td><td data-label="Sesi">${x.jumlah_sesi}</td>
+        <td data-label="Dicatat oleh">${uname(x.created_by)}</td><td>${canVoid?`<button class="btn btn-ghost btn-sm" onclick="voidTreatment(${x.id})">Batalkan</button>`:''}</td></tr>`).join('')+`</table></details>`;
+  } else h += `<p class="muted small">Belum ada catatan treatment bulan ini.</p>`;
   $('hrTreatmentArea').innerHTML = h + `</div>`;
 }
 async function exportKehadiranExcel(){
@@ -15667,23 +15909,19 @@ async function exportKehadiranExcel(){
 async function exportTreatmentExcel(){
   await ensureXlsx();
   const m = $('hrMonth').value;
-  const from = m+'-01', to = lastDayOfMonth(m)+'T23:59:59';
-  const [logs, pools] = await Promise.all([
-    q(db.from('attendance_logs').select('*').eq('kategori','treatment').gte('scanned_at',from).lte('scanned_at',to).order('scanned_at',{ascending:false}).limit(5000)),
+  const [list, pools] = await Promise.all([
+    q(db.from('treatment_logs').select('*').is('voided_at',null).gte('tanggal',m+'-01').lte('tanggal',lastDayOfMonth(m)).order('tanggal').limit(5000)),
     q(db.from('pool_types').select('*'))
   ]);
-  const sessions = pairSessions(logs, l=>'p'+l.pool_type_id);
-  const rows = sessions.map(s=>({
-    Tanggal: localDateOf(s.start||s.end), Nama: uname(s.staff_id),
-    Kolam: pools.find(p=>p.id===s.pool_type_id)?.name || '-',
-    Mulai: s.start?fdt(s.start):'', Selesai: s.end?fdt(s.end):'',
-    'Durasi (jam)': (s.start&&s.end)?((new Date(s.end)-new Date(s.start))/3600000).toFixed(1):'',
-    Lokasi: s.out_of_radius?'Di luar radius':'Sesuai'
-  }));
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const detail = list.map(x=>({Tanggal:x.tanggal, Pelaksana:_tgName(x), Status:x.pelaksana_tipe==='karyawan'?'Karyawan':'Orang luar',
+    Kolam:pools.find(p=>p.id===x.pool_type_id)?.name||'-', 'Jumlah Sesi':x.jumlah_sesi, 'Dicatat oleh':uname(x.created_by), Catatan:x.catatan||''}));
+  const rk = {};
+  list.forEach(x=>{ const k=_tgKey(x)+'|'+x.pool_type_id; const nm=pools.find(p=>p.id===x.pool_type_id)?.name||'-';
+    rk[k]=rk[k]||{Pelaksana:_tgName(x), Status:x.pelaksana_tipe==='karyawan'?'Karyawan':'Orang luar', Kolam:nm, 'Jumlah Sesi':0}; rk[k]['Jumlah Sesi']+=x.jumlah_sesi; });
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Treatment');
-  XLSX.writeFile(wb, `Riwayat_Treatment_${m}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(Object.values(rk)), 'Rekap');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail), 'Rincian');
+  XLSX.writeFile(wb, `Treatment_${m}.xlsx`);
 }
 async function saveWaNumber(){
   await q(db.from('app_settings').upsert({key:'wa_hrd_darurat', value:$('waNum').value.trim(), updated_by:me.id, updated_at:new Date().toISOString()}, {onConflict:'key'}).select());
