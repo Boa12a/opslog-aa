@@ -14434,19 +14434,16 @@ async function computeLemburForRequest(req){
 //   TUGAS  = pengajuan/pencatatan lembur (overtime_requests)
 //   ABSEN  = bukti kehadiran (attendance_logs, kategori 'kehadiran')
 // Dari pertemuan keduanya lahir kategori kelengkapan (LKAT) di bawah ini.
-const LB_AMBANG_JAM = 1;     // selisih di atas jam normal yang dianggap "potensi lembur"
-const LB_SESI_MAX_JAM = 16;  // sesi lebih panjang dianggap data salah (lupa Absen Pulang), tidak dinilai
 const LKAT = {
   lengkap:     {ikon:'✅', l:'Lengkap',            d:'Tugas disetujui & absen terpenuhi',                               bg:'#DCFCE7', fg:'#166534'},
   tanpa_absen: {ikon:'⚠️', l:'Tanpa absen',         d:'Tugas ada, absen tidak ada — perlu diluluskan Manager/Owner',      bg:'#FEF3C7', fg:'#92400E'},
   lulus_manual:{ikon:'🖊️', l:'Diluluskan manual',   d:'Tugas ada, absen tidak ada — sudah diluluskan Manager/Owner',      bg:'#E0E7FF', fg:'#4338CA'},
-  belum_tugas: {ikon:'📝', l:'Belum ada tugas',     d:'Absen ada, tugas belum diajukan — SPV dapat mengajukan',           bg:'#DBEAFE', fg:'#1D4ED8'},
   menunggu:    {ikon:'⏳', l:'Menunggu keputusan',  d:'Sudah diajukan, menunggu Manager/Owner menerima atau menolak',     bg:'#FEF9C3', fg:'#854D0E'},
   terjadwal:   {ikon:'🗓️', l:'Terjadwal',           d:'Disetujui, belum ada absen selesai (belum waktunya / masih berjalan)', bg:'#F3F4F6', fg:'#374151'},
   ditolak:     {ikon:'✖️', l:'Ditolak',             d:'Ditolak Manager/Owner',                                            bg:'#FEE2E2', fg:'#B91C1C'},
   batal:       {ikon:'🚫', l:'Dibatalkan',          d:'Dibatalkan (void)',                                                bg:'#E5E7EB', fg:'#6B7280'}
 };
-let _lbMode = 'daftar', _lbPseudo = [], _lbItems = [];
+let _lbMode = 'daftar', _lbItems = [];
 
 // Ambil SEMUA baris (Supabase membatasi 1.000 per permintaan).
 async function pagedAll(mk){
@@ -14487,66 +14484,14 @@ function lemburKategori(r, jam, hariIni){
   if(r.tanpa_bukti) return 'lulus_manual';
   return r.requested_date>=hariIni ? 'terjadwal' : 'tanpa_absen';
 }
-// Jam kerja normal (jam) untuk satu orang & tanggal; 0 = libur; null = tidak bisa dinilai.
-function lemburNormalSync(ctx, st, d){
-  const en = ctx.entries[st.id+'|'+d];
-  if(en && en.is_off) return 0;
-  const shDur = id=>{ const sh = ctx.shifts[id]; return (sh && sh.start_time && sh.end_time) ? normalDurationHours(sh.start_time.slice(0,5), sh.end_time.slice(0,5)) : null; };
-  if(en && en.shift_id){ const v = shDur(en.shift_id); if(v!=null) return v; }
-  if(st.department==='ACC' && st.default_shift_id){ const v = shDur(st.default_shift_id); if(v!=null) return v; }
-  if(st.department==='SEC') return null; // Security tanpa shift di jadwal: tidak dinilai
-  const row = ctx.deptHours.find(x=>x.department===st.department && x.day_type===dayTypeOf(d));
-  return (row && row.jam_mulai && row.jam_selesai) ? normalDurationHours(row.jam_mulai.slice(0,5), row.jam_selesai.slice(0,5)) : null;
-}
-// "Absen ada, tugas belum ada": hari kerja melebihi jam normal ≥ ambang (atau masuk di hari libur)
-// tetapi tidak ada satu pun catatan lembur untuk orang & tanggal itu.
-function lemburDeteksi(ctx, scopeIds, from, to){
-  const out = [];
-  scopeIds.forEach(sid=>{
-    const st = ctx.profilesById[sid]; if(!st) return;
-    const byDate = {};
-    (ctx.sessionsByStaff[sid]||[]).forEach(s=>{
-      if(!s.start || !s.end) return;
-      const d = localDateOf(s.start); if(d<from || d>to) return;
-      const dur = (new Date(s.end)-new Date(s.start))/3600000;
-      if(dur<=0 || dur>LB_SESI_MAX_JAM) return;
-      (byDate[d]=byDate[d]||[]).push({s,dur});
-    });
-    Object.entries(byDate).forEach(([d,arr])=>{
-      if(ctx.reqKeys.has(sid+'|'+d)) return;
-      const normal = lemburNormalSync(ctx, st, d); if(normal==null) return;
-      const extra = arr.reduce((a,x)=>a+x.dur,0) - normal;
-      if(extra < LB_AMBANG_JAM) return;
-      arr.sort((a,b)=>new Date(a.s.start)-new Date(b.s.start));
-      const first = arr[0].s, last = arr[arr.length-1].s;
-      const mulai = normal>0 ? new Date(new Date(first.start).getTime()+normal*3600000) : new Date(first.start);
-      out.push({_pseudo:true, _kat:'belum_tugas', staff_id:sid, department:st.department, requested_date:d,
-                _extra:Math.round(extra*100)/100, _normal:normal, _hm:{mulai:_jam(mulai.toISOString()), selesai:_jam(last.end)}});
-    });
-  });
-  return out;
-}
-// Muat bukti absen (dan, bila deteksi, jadwal & jam normal) sekali jalan untuk banyak orang.
-async function lemburMuatKonteks(staffIds, from, to, deteksi){
+// Muat bukti absen sekali jalan untuk banyak orang.
+async function lemburMuatKonteks(staffIds, from, to){
   const dari = new Date(new Date(from+'T00:00:00').getTime()-2*864e5).toISOString();
   const sampai = new Date(new Date(to+'T00:00:00').getTime()+3*864e5).toISOString();
-  const ctx = {sessionsByStaff:{}, profilesById:{}, shifts:{}, deptHours:[], entries:{}, reqKeys:new Set()};
-  profilesCache.forEach(p=>{ ctx.profilesById[p.id]=p; });
+  const ctx = {sessionsByStaff:{}};
   const ids = [...new Set(staffIds)];
   const logs = ids.length ? await pagedAll(()=>db.from('attendance_logs').select('*').eq('kategori','kehadiran').in('staff_id',ids).gte('scanned_at',dari).lt('scanned_at',sampai).order('scanned_at',{ascending:true}).order('id',{ascending:true})) : [];
   pairSessions(logs, ()=>'k').forEach(s=>{ (ctx.sessionsByStaff[s.staff_id]=ctx.sessionsByStaff[s.staff_id]||[]).push(s); });
-  if(deteksi){
-    const [shifts, dh, ents, reqs] = await Promise.all([
-      q(db.from('shifts').select('*')),
-      q(db.from('department_default_hours').select('*')),
-      pagedAll(()=>db.from('work_schedule_entries').select('*').gte('work_date',from).lte('work_date',to).order('id',{ascending:true})),
-      pagedAll(()=>db.from('overtime_requests').select('id,staff_id,requested_date,voided_at').gte('requested_date',from).lte('requested_date',to).order('id',{ascending:true}))
-    ]);
-    shifts.forEach(x=>{ ctx.shifts[x.id]=x; });
-    ctx.deptHours = dh;
-    ents.forEach(e=>{ ctx.entries[e.staff_id+'|'+e.work_date]=e; });
-    reqs.forEach(r=>{ if(!r.voided_at) ctx.reqKeys.add(r.staff_id+'|'+r.requested_date); });
-  }
   return ctx;
 }
 
@@ -14626,16 +14571,7 @@ async function loadLembur(){
   if(cari) list = list.filter(r => cocokKata(uname(r.staff_id), cari) || cocokKata(r.reason, cari));
   if(!list.length && !bulan){ $('lemburSummary').innerHTML=''; $('lemburList').innerHTML='<p class="muted">Tidak ada catatan.</p>'; return; }
   if(!dari){ const ds = list.map(r=>r.requested_date).sort(); dari = ds[0]; sampai = ds[ds.length-1]; }
-  // orang yang dinilai untuk deteksi "absen ada, tugas belum ada"
-  let scope = [];
-  const bolehDeteksi = !!bulan && f!=='approve' && !$('lbTB')?.checked;
-  if(bolehDeteksi){
-    if(staf) scope = [staf];
-    else if(f==='mine') scope = [me.id];
-    else if(f==='dept') scope = profilesCache.filter(p=>p.active && p.department===me.department && ['spv','staff'].includes(p.role)).map(p=>p.id);
-    else scope = profilesCache.filter(p=>p.active && ['spv','staff'].includes(p.role)).map(p=>p.id);
-  }
-  const ctx = await lemburMuatKonteks([...list.map(r=>r.staff_id), ...scope], dari, sampai, bolehDeteksi);
+  const ctx = await lemburMuatKonteks(list.map(r=>r.staff_id), dari, sampai);
   if(seq!==_lbSeq) return;
   const t0 = today();
   // tanda ganda
@@ -14648,16 +14584,14 @@ async function loadLembur(){
     r._ren = (r.planned_start && r.planned_end) ? normalDurationHours(r.planned_start.slice(0,5), r.planned_end.slice(0,5)) : null;
     r._kat = lemburKategori(r, r._jam||0, t0);
   });
-  const pseudo = bolehDeteksi ? lemburDeteksi(ctx, scope, dari, sampai).filter(p=>!cari || cocokKata(uname(p.staff_id), cari)) : [];
-  _lbPseudo = pseudo;
-  let items = [...list, ...pseudo];
+  let items = [...list];
   const nGanda = Object.values(hitung).filter(n=>n>1).length;
   // ringkasan = chip per kategori (klik untuk menyaring)
   const cnt = {}; items.forEach(x=>{ cnt[x._kat]=(cnt[x._kat]||0)+1; });
   const jamLengkap = list.filter(r=>r._kat==='lengkap').reduce((a,r)=>a+(r._jam||0),0);
   $('lemburSummary').innerHTML = `<div class="lb-chips">` + Object.entries(LKAT).filter(([k])=>cnt[k]).map(([k,v])=>
     `<button class="lb-chip ${katF===k?'on':''}" style="background:${v.bg};color:${v.fg}" onclick="lbPilihKat('${k}')" title="${esc(v.d)}">${v.ikon} ${v.l} <b>${cnt[k]}</b></button>`).join('') +
-    `</div><div class="small muted" style="margin:4px 0 8px">${list.length} catatan${pseudo.length?` · ${pseudo.length} potensi lembur tanpa tugas`:''} · jam lembur terpenuhi (lengkap): <b>${jamFmt(jamLengkap)}</b></div>` +
+    `</div><div class="small muted" style="margin:4px 0 8px">${list.length} catatan · jam lembur terpenuhi (lengkap): <b>${jamFmt(jamLengkap)}</b></div>` +
     (nGanda ? `<div class="kotak k-kuning small" style="margin-bottom:8px">⚠ ${nGanda} orang punya lebih dari satu catatan lembur aktif di tanggal yang sama — periksa yang bertanda ganda.</div>` : '');
   if(katF) items = items.filter(x=>x._kat===katF);
   _lbItems = items;
@@ -14677,17 +14611,6 @@ function lbChip(kat, extra){
   return `<span class="badge" style="background:${k.bg};color:${k.fg}" title="${esc(k.d)}">${k.ikon} ${k.l}</span>${extra||''}`;
 }
 function lemburRow(r){
-  if(r._pseudo){
-    const i = _lbPseudo.indexOf(r);
-    return `<tr class="lb-tr lb-pseudo">
-      <td data-label="Tanggal" class="lb-tgl">${fdate(r.requested_date)}</td>
-      <td data-label="Nama"><b>${esc(uname(r.staff_id))}</b> ${deptTag(r.department)}</td>
-      <td data-label="Rencana" class="lb-jam">${r._hm.mulai}–${r._hm.selesai}</td>
-      <td data-label="Jam rencana" class="lb-num">—</td>
-      <td data-label="Jam aktual" class="lb-num">${jamFmt(r._extra)}</td>
-      <td data-label="Pekerjaan" class="small muted">Absen melebihi jam normal ${r._normal>0?jamFmt(r._normal):'(hari libur)'}, belum ada tugas lembur</td>
-      <td data-label="Status">${lbChip('belum_tugas')} ${(isMgr()||me.role==='spv')?`<button class="btn btn-teal btn-sm" onclick="lbAjukanDariAbsen(${i})">Ajukan</button>`:''}</td></tr>`;
-  }
   const byOther = r.created_by && r.created_by!==r.staff_id;
   const lintas = r.planned_start && r.planned_end && hmToMinutes(r.planned_end.slice(0,5)) <= hmToMinutes(r.planned_start.slice(0,5));
   const aktual = (r.status==='disetujui' && !r.voided_at) ? (r._jam==null ? '<span class="muted" title="Tanpa jam rencana — lihat detail">?</span>' : `<span class="${(r._ren>0 && r._jam < r._ren*0.5)?'lb-kurang':''}">${jamFmt(r._jam)}</span>`) : '—';
@@ -14700,10 +14623,6 @@ function lemburRow(r){
     <td data-label="Pekerjaan" class="small">${esc(r.reason||'')}</td>
     <td data-label="Status">${r._ganda?'<span class="badge" style="background:#FEE2E2;color:#B91C1C;margin-right:4px">GANDA</span>':''}${lbChip(r._kat)}</td>
   </tr>`;
-}
-function lbAjukanDariAbsen(i){
-  const p = _lbPseudo[i]; if(!p) return;
-  newLemburModal({staff_id:p.staff_id, date:p.requested_date, start:p._hm.mulai, end:p._hm.selesai});
 }
 // ---------- Kalender ----------
 function lbRenderKalender(items, bulan){
@@ -14720,8 +14639,8 @@ function lbRenderKalender(items, bulan){
     let body = '';
     if(arr.length){
       if(orangTunggal){
-        body = arr.slice(0,2).map(x=>{ const k=LKAT[x._kat]; const w = x._pseudo ? x._hm.mulai+'–'+x._hm.selesai : (x.planned_start||'?').slice(0,5)+'–'+(x.planned_end||'?').slice(0,5);
-          return `<div class="lb-mini" style="background:${k.bg};color:${k.fg}">${k.ikon} ${w}<br><span>${esc(x._pseudo?'belum ada tugas':(x.reason||'').slice(0,22))}</span></div>`; }).join('') + (arr.length>2?`<div class="small muted">+${arr.length-2}</div>`:'');
+        body = arr.slice(0,2).map(x=>{ const k=LKAT[x._kat]; const w = (x.planned_start||'?').slice(0,5)+'–'+(x.planned_end||'?').slice(0,5);
+          return `<div class="lb-mini" style="background:${k.bg};color:${k.fg}">${k.ikon} ${w}<br><span>${esc((x.reason||'').slice(0,22))}</span></div>`; }).join('') + (arr.length>2?`<div class="small muted">+${arr.length-2}</div>`:'');
       } else {
         const c = {}; arr.forEach(x=>{ c[x._kat]=(c[x._kat]||0)+1; });
         body = Object.entries(c).map(([k,n])=>`<span class="lb-dot" style="background:${LKAT[k].bg};color:${LKAT[k].fg}">${LKAT[k].ikon}${n}</span>`).join('');
@@ -14739,18 +14658,15 @@ function lbHariDetail(ds){
   const arr = _lbItems.filter(x=>x.requested_date===ds).sort((a,b)=>uname(a.staff_id).localeCompare(uname(b.staff_id)));
   openModal(`<div class="mhead"><h3>Lembur ${fdate(ds)}</h3><button onclick="closeModal()">✕</button></div>` +
     (arr.map(x=>{
-      const w = x._pseudo ? x._hm.mulai+'–'+x._hm.selesai : (x.planned_start||'?').slice(0,5)+'–'+(x.planned_end||'?').slice(0,5);
-      const act = x._pseudo
-        ? ((isMgr()||me.role==='spv') ? `<button class="btn btn-teal btn-sm" onclick="closeModal();lbAjukanDariAbsen(${_lbPseudo.indexOf(x)})">Ajukan lembur</button>` : '')
-        : `<button class="btn btn-ghost btn-sm" onclick="closeModal();openLembur(${x.id})">Buka / Putuskan</button>`;
+      const w = (x.planned_start||'?').slice(0,5)+'–'+(x.planned_end||'?').slice(0,5);
       return `<div class="item" style="cursor:default"><div class="row" style="justify-content:space-between;gap:6px"><b>${esc(uname(x.staff_id))}</b> ${deptTag(x.department)}</div>
-        <div class="small">${w}${x._pseudo?` · kelebihan ${jamFmt(x._extra)}`:(x._jam!=null?` · aktual ${jamFmt(x._jam)}`:'')}</div>
-        <div class="small" style="margin:4px 0"><b>Untuk:</b> ${esc(x._pseudo?'(belum ada tugas — absen melebihi jam normal)':(x.reason||'-'))}</div>
-        ${lbChip(x._kat)} ${act}</div>`;
+        <div class="small">${w}${x._jam!=null?` · aktual ${jamFmt(x._jam)}`:''}</div>
+        <div class="small" style="margin:4px 0"><b>Untuk:</b> ${esc(x.reason||'-')}</div>
+        ${lbChip(x._kat)} <button class="btn btn-ghost btn-sm" onclick="closeModal();openLembur(${x.id})">Buka / Putuskan</button></div>`;
     }).join('') || '<p class="muted">Tidak ada.</p>'));
 }
 
-async function newLemburModal(pre){
+async function newLemburModal(){
   let staffList;
   if(isMgr()){
     staffList = await q(db.from('profiles').select('*').in('role',['spv','staff']).eq('active',true).order('name'));
@@ -14761,29 +14677,23 @@ async function newLemburModal(pre){
   }
   openModal(`<div class="mhead"><h3>Catat / Ajukan Lembur</h3><button onclick="closeModal()">✕</button></div>
     <label>Karyawan</label><select id="jlStaff" onchange="updateLemburModalNote()">${staffList.map(p=>`<option value="${p.id}" data-dept="${p.department||''}">${esc(p.name)}${p.id===me.id?' (Diri Saya Sendiri)':''} ${p.department?'— '+(DIVS[p.department]?.label||p.department):''}</option>`).join('')}</select>
-    <label>Tanggal</label><input type="date" id="jlDate" value="${today()}">
+    <label>Tanggal</label><input type="date" id="jlDate" value="${today()}" ${isMgr()?'':'min="'+today()+'"'}>
     <div class="grid2"><div><label>Rencana Mulai</label><input type="time" id="jlStart"></div>
     <div><label>Rencana Selesai</label><input type="time" id="jlEnd"></div></div>
     <label>Alasan / Pekerjaan</label><textarea id="jlReason" rows="3" placeholder="pekerjaan apa yang perlu diselesaikan lembur..."></textarea>
     <p class="small muted" id="jlNote" style="margin-top:6px"></p>
     <button class="btn btn-teal" id="btnSubmitJadwalLembur" style="margin-top:14px;width:100%" onclick="submitJadwalLembur()">Simpan</button>`);
-  if(pre){
-    if(pre.staff_id && [...$('jlStaff').options].some(o=>o.value===pre.staff_id)) $('jlStaff').value = pre.staff_id;
-    if(pre.date) $('jlDate').value = pre.date;
-    if(pre.start) $('jlStart').value = pre.start;
-    if(pre.end) $('jlEnd').value = pre.end;
-    $('jlReason').placeholder = 'wajib: pekerjaan apa yang dikerjakan saat lembur (absen sudah ada)';
-  }
   updateLemburModalNote();
 }
 function updateLemburModalNote(){
   const sel = $('jlStaff'); if(!sel) return;
   const isSelf = sel.value===me.id;
   let note;
-  if(isMgr()) note = 'Langsung tercatat <b>Disetujui</b> (Manager/Owner).';
+  if(isMgr()) note = 'Langsung tercatat <b>Disetujui</b> (Manager/Owner). Hanya Manager/Owner yang boleh mencatat lembur untuk tanggal yang sudah lewat.';
   else if(isSelf) note = 'Pengajuan untuk diri sendiri <b>selalu</b> menunggu otorisasi Manager/Owner, apa pun hak yang kamu punya.';
   else if(me.can_approve_lembur) note = 'Langsung tercatat <b>Disetujui</b> (kamu punya hak "Boleh Setujui Lembur").';
   else note = 'Akan <b>menunggu otorisasi Manager/Owner</b> dulu (kamu belum punya hak "Boleh Setujui Lembur").';
+  if(!isMgr()) note += ' Lembur harus diajukan <b>sebelum</b> tanggalnya.';
   $('jlNote').innerHTML = note;
 }
 async function submitJadwalLembur(){
@@ -14796,6 +14706,9 @@ async function submitJadwalLembur(){
   const dept = staffSel.selectedOptions[0].dataset.dept || null;
   const tgl = $('jlDate').value;
   const isSelf = staffId===me.id;
+  // Lembur harus diajukan SEBELUM terjadi. Hanya Manager/Owner yang boleh mencatat untuk tanggal yang sudah lewat.
+  if(!tgl){ toast('Tanggal wajib diisi'); return; }
+  if(tgl < today() && !isMgr()){ toast('Lembur harus diajukan sebelum tanggalnya. Untuk tanggal yang sudah lewat, hubungi Manager/Owner.'); return; }
 
   const dup = await q(db.from('overtime_requests').select('id,voided_at').eq('staff_id',staffId).eq('requested_date',tgl).neq('status','ditolak'));
   if(dup.some(d=>!d.voided_at)){ toast('Sudah ada catatan/pengajuan lembur untuk orang & tanggal yang sama'); return; }
