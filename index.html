@@ -10693,7 +10693,7 @@ function buildNav(){
   if(isMgr()) grupOperasional.push(['checklist','Checklist & Shift']);
   if(isMgr() || isSpvOps) grupOperasional.push(['rekap','Rekap']);
   if(isHrdOrMgr()) grupOperasional.push(['rekapind','Rekap Individu'],['kalabsen','Kalender Absensi']);
-  if(isMgr() || ['POL','HRD'].includes(me.department)) grupOperasional.push(['treatment','Catat Treatment']);
+  if(bolehTreatment()) grupOperasional.push(['treatment','Catat Treatment']);
 
   const grupPengadaan = [];
   const isAccStaff = me.role==='staff' && me.department==='ACC';
@@ -15922,9 +15922,12 @@ async function loadHrdAttendance(){
 /* ================= TREATMENT PER SESI ================= */
 // Treatment kolam dibayar PER SESI dan sebagian besar dikerjakan orang luar,
 // jadi dicatat terpisah dari absensi: siapa, kolam apa, berapa sesi.
+// Lihat & catat treatment: HANYA SPV Pool, Manager, Owner. Batalkan: HANYA Manager/Owner (ditegakkan juga oleh database).
+const bolehTreatment = () => isMgr() || (me.role==='spv' && me.department==='POL');
 const _tgName = x => x.pelaksana_tipe==='karyawan' ? uname(x.staff_id) : (x.nama_luar||'-');
 const _tgKey  = x => x.pelaksana_tipe==='karyawan' ? 'k:'+x.staff_id : 'l:'+(x.nama_luar||'').trim().toLowerCase();
 async function renderTreatment(){
+  if(!bolehTreatment()){ $('main').innerHTML = '<h2>Catat Treatment</h2><p class="muted">Hanya SPV Pool, Manager, dan Owner yang dapat mencatat treatment.</p>'; return; }
   const [pools, recentNames] = await Promise.all([
     q(db.from('pool_types').select('*').eq('active',true).order('sort_order')),
     q(db.from('treatment_logs').select('nama_luar').eq('pelaksana_tipe','luar').order('created_at',{ascending:false}).limit(300))
@@ -15976,7 +15979,7 @@ async function loadTreatmentRecent(){
     q(db.from('treatment_logs').select('*').is('voided_at',null).gte('tanggal',addDays(today(),-14)).order('tanggal',{ascending:false}).order('created_at',{ascending:false}).limit(200)),
     q(db.from('pool_types').select('*'))
   ]);
-  const canVoid = isMgr() || (me.role==='spv' && ['POL','HRD'].includes(me.department));
+  const canVoid = isMgr();
   let h = `<div class="card"><h3>14 hari terakhir</h3>`;
   h += list.length ? `<table class="respTable"><tr><th>Tanggal</th><th>Pelaksana</th><th>Kolam</th><th>Sesi</th><th>Dicatat oleh</th><th></th></tr>`+
     list.map(x=>`<tr><td data-label="Tanggal">${fdate(x.tanggal)}</td><td data-label="Pelaksana">${esc(_tgName(x))}${x.pelaksana_tipe==='karyawan'?' <span class="small muted">(karyawan)</span>':''}</td>
@@ -15987,6 +15990,7 @@ async function loadTreatmentRecent(){
   $('trList').innerHTML = h + '</div>';
 }
 async function voidTreatment(id){
+  if(!isMgr()){ toast('Hanya Manager/Owner yang dapat membatalkan catatan treatment'); return; }
   const alasan = (prompt('Alasan membatalkan catatan treatment ini (wajib):')||'').trim();
   if(!alasan){ toast('Dibatalkan'); return; }
   await q(db.from('treatment_logs').update({voided_at:new Date().toISOString(), voided_by:me.id, void_reason:alasan}).eq('id',id).select());
@@ -15994,6 +15998,7 @@ async function voidTreatment(id){
   if(page==='treatment') loadTreatmentRecent(); else loadHrdTreatment();
 }
 async function loadHrdTreatment(){
+  if(!bolehTreatment()){ $('hrTreatmentArea').innerHTML = '<div class="card"><h3>Treatment (per sesi)</h3><p class="muted small">Hanya Manager, Owner, dan SPV Pool yang dapat melihat catatan treatment.</p></div>'; return; }
   const m = $('hrMonth').value;
   const [list, pools] = await Promise.all([
     q(db.from('treatment_logs').select('*').is('voided_at',null).gte('tanggal',m+'-01').lte('tanggal',lastDayOfMonth(m)).order('tanggal',{ascending:false}).limit(5000)),
@@ -16008,7 +16013,7 @@ async function loadHrdTreatment(){
   });
   const rows = Object.values(rekap).sort((a,b)=>b.total-a.total);
   const grand = rows.reduce((s,r)=>s+r.total,0);
-  const canVoid = isMgr() || (me.role==='spv' && ['POL','HRD'].includes(me.department));
+  const canVoid = isMgr();
   let h = `<div class="card"><div class="row" style="justify-content:space-between"><h3>Treatment (per sesi)</h3>
     <div class="row" style="gap:6px"><button class="btn btn-ghost btn-sm" onclick="go('treatment')">+ Catat</button>
     <button class="btn btn-ghost btn-sm" onclick="exportTreatmentExcel()">⬇ Excel</button></div></div>`;
