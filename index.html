@@ -12697,23 +12697,54 @@ async function exportLogbookExcel(){
   closeModal();
 }
 async function exportLemburExcel(){
+  // Excel mengikuti BULAN yang sedang dipilih di filter (plus filter orang/departemen), bukan seluruh riwayat.
+  const bulan = $('lbBulan')?.value;
+  if(!bulan){ toast('Pilih bulan dulu di filter — Excel mengikuti bulan yang dipilih'); return; }
   await ensureXlsx();
-  const list = await q(db.from('overtime_requests').select('*').order('requested_date'));
-  const rows = [];
+  const dari = bulan+'-01', sampai = lastDayOfMonth(bulan);
+  const f = $('lbFilter').value, staf = $('lbStaf').value;
+  const mkQ = () => {
+    let qy = db.from('overtime_requests').select('*').gte('requested_date',dari).lte('requested_date',sampai)
+      .order('requested_date',{ascending:true}).order('id',{ascending:true});
+    if(f==='mine') qy = qy.eq('staff_id', me.id);
+    else if(f==='dept') qy = qy.eq('department', me.department);
+    else if(f==='approve') qy = qy.eq('status','diajukan');
+    if(staf) qy = qy.eq('staff_id', staf);
+    return qy;
+  };
+  const list = await pagedAll(mkQ);
+  if(!list.length){ toast('Tidak ada data lembur pada bulan itu'); return; }
+  const ctx = await lemburMuatKonteks(list.map(r=>r.staff_id), dari, sampai);
+  const t0 = today(), rows = [], rekap = {};
   for(const r of list){
-    const jamLembur = r.status==='disetujui' ? await computeLemburForRequest(r) : '';
+    let jam = null;
+    if(r.status==='disetujui' && !r.voided_at){
+      jam = (r.planned_start && r.planned_end) ? lemburIrisan(r, ctx.sessionsByStaff[r.staff_id]||[]) : await computeLemburForRequest(r);
+    }
+    const kat = lemburKategori(r, jam||0, t0);
+    const jamRencana = (r.planned_start && r.planned_end) ? normalDurationHours(r.planned_start.slice(0,5), r.planned_end.slice(0,5)) : '';
     rows.push({
       Tanggal: r.requested_date, Departemen: DEPTS[r.department]?DEPTS[r.department].label:r.department,
-      Nama: uname(r.staff_id), 'Rencana Mulai': r.planned_start||'', 'Rencana Selesai': r.planned_end||'',
-      Alasan: r.reason, Status: r.voided_at?'Dibatalkan (Void)':LSTAT[r.status].l, 'Jam Lembur (Otomatis)': jamLembur,
+      Nama: uname(r.staff_id), 'Rencana Mulai': (r.planned_start||'').slice(0,5), 'Rencana Selesai': (r.planned_end||'').slice(0,5),
+      'Jam Rencana': jamRencana, 'Jam Aktual (Absen)': jam==null ? '' : jam,
+      Pekerjaan: r.reason, Status: r.voided_at ? 'Dibatalkan (Void)' : LSTAT[r.status].l, 'Status Kelengkapan': LKAT[kat].l,
+      'Tanpa Bukti': r.tanpa_bukti ? 'Ya' : '', 'Alasan Tanpa Bukti': r.alasan_tanpa_bukti||'',
       Penyetuju: r.approver_id?uname(r.approver_id):'', 'Catatan Keputusan': r.decision_note||'',
+      'Dicatat Oleh': r.created_by?uname(r.created_by):'',
       'Void Oleh': r.voided_by?uname(r.voided_by):'', 'Alasan Void': r.void_reason||''
     });
+    if(r.status==='disetujui' && !r.voided_at){
+      const k = r.staff_id; const o = rekap[k] = rekap[k] || {Nama:uname(k), Departemen:DEPTS[r.department]?DEPTS[r.department].label:r.department, 'Jumlah Lembur':0, 'Total Jam Rencana':0, 'Total Jam Aktual':0, 'Lembur Tanpa Absen':0};
+      o['Jumlah Lembur']++; o['Total Jam Rencana'] += (jamRencana||0); o['Total Jam Aktual'] += (jam||0);
+      if(kat==='tanpa_absen' || kat==='lulus_manual') o['Lembur Tanpa Absen']++;
+    }
   }
-  const ws = XLSX.utils.json_to_sheet(rows);
+  Object.values(rekap).forEach(o=>{ o['Total Jam Rencana']=Math.round(o['Total Jam Rencana']*100)/100; o['Total Jam Aktual']=Math.round(o['Total Jam Aktual']*100)/100; });
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Lembur');
-  XLSX.writeFile(wb, `Riwayat_Lembur_${today()}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Lembur');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(Object.values(rekap).sort((x,y)=>x.Nama.localeCompare(y.Nama))), 'Rekap per Orang');
+  XLSX.writeFile(wb, `Riwayat_Lembur_${bulan}.xlsx`);
+  toast('Excel lembur '+bulan+' diunduh ('+list.length+' baris)');
 }
 
 /* ================= TIKET KERUSAKAN ================= */
